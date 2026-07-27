@@ -1,1 +1,1 @@
-export * from './structure';
+export * from './node-structure';
