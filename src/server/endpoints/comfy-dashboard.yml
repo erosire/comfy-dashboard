@@ -9,6 +9,17 @@ info:
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
+  - url: https://comfy-spawner.beam.cloud
+    description: Beam ComfyUI spawner (Tier 1 — used by /api/cloud/create)
+tags:
+  - name: Workflows
+    description: CRUD for ComfyUI workflows
+  - name: Queue
+    description: Generation queue management
+  - name: Status
+    description: Server status and health
+  - name: Cloud
+    description: Beam cloud pod management - spawn pods and submit prompts
 paths:
   /api/workflows:
     get:
@@ -204,6 +215,128 @@ paths:
               schema:
                 $ref: '#/components/schemas/ServerStatusResponse'
 
+  /api/cloud/create:
+    get:
+      operationId: cloudCreate
+      summary: Spawn a new ComfyUI pod on Beam
+      description: >-
+        Triggers the creation of a new, isolated ComfyUI pod via the Beam
+        spawner (Tier 1). Returns the pod's container ID and public proxy
+        URL. The pod runs ComfyUI with a FastAPI proxy on its public port
+        and scales to zero ~120s after the last active connection.
+      tags:
+        - Cloud
+      parameters:
+        - name: name
+          in: query
+          required: false
+          description: Optional name for the spawned pod.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Pod created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudCreateResponse'
+        '502':
+          description: Spawner unavailable or pod creation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/cloud/prompt:
+    post:
+      operationId: cloudPrompt
+      summary: Send a workflow to a spawned pod and stream results
+      description: >-
+        Sends a ComfyUI workflow payload to a spawned pod's Tier 2 proxy
+        and streams back the execution results as newline-delimited JSON
+        (NDJSON). The client must read the response body as a stream,
+        parsing one JSON object per line until receiving a `proxy_done`
+        or terminal event.
+      tags:
+        - Cloud
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloudPromptRequest'
+            examples:
+              txt2img:
+                summary: Submit a txt2img workflow
+                value:
+                  pod_url: "https://test-pod-abc123.beam.cloud:8188"
+                  prompt:
+                    "3":
+                      class_type: KSampler
+                      inputs:
+                        seed: 123456789012345
+                        steps: 20
+                        cfg: 8
+                        sampler_name: euler
+                        scheduler: normal
+                        denoise: 1
+                        model: ["4", 0]
+                        positive: ["6", 0]
+                        negative: ["7", 0]
+                        latent_image: ["5", 0]
+                    "4":
+                      class_type: CheckpointLoaderSimple
+                      inputs:
+                        ckpt_name: sd_xl_base_1.0.safetensors
+                    "5":
+                      class_type: EmptyLatentImage
+                      inputs:
+                        width: 1024
+                        height: 1024
+                        batch_size: 1
+                    "6":
+                      class_type: CLIPTextEncode
+                      inputs:
+                        text: "a serene mountain lake at dawn"
+                        clip: ["4", 1]
+                    "7":
+                      class_type: CLIPTextEncode
+                      inputs:
+                        text: "blurry, low quality"
+                        clip: ["4", 1]
+                    "8":
+                      class_type: VAEDecode
+                      inputs:
+                        samples: ["3", 0]
+                        vae: ["4", 2]
+                    "9":
+                      class_type: SaveImage
+                      inputs:
+                        filename_prefix: "ComfyUI"
+                        images: ["8", 0]
+                  client_id: "abc123def4567890fedcba0987654321"
+      responses:
+        '200':
+          description: >-
+            Chunked NDJSON stream of execution events. Read line-by-line
+            until `proxy_done` or a terminal event.
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/CloudPromptStreamEvent'
+        '400':
+          description: Invalid request (missing pod_url or prompt)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Pod unreachable or returned an error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 components:
   schemas:
     WorkflowMeta:
@@ -368,3 +501,63 @@ components:
       properties:
         error:
           type: string
+
+    CloudCreateResponse:
+      type: object
+      description: Response from spawning a new ComfyUI pod via Beam.
+      properties:
+        container_id:
+          type: string
+          format: uuid
+          description: Beam container ID of the spawned pod.
+          example: 5f8c1b2a-3d4e-4f5a-9b8c-7e6d5c4b3a2d
+        pod_url:
+          type: string
+          format: uri
+          description: >-
+            Public URL of the spawned pod's Tier 2 API proxy.
+            Use this URL for subsequent POST /api/cloud/prompt calls.
+          example: https://test-pod-abc123.beam.cloud:8188
+      required: [container_id, pod_url]
+
+    CloudPromptRequest:
+      type: object
+      description: Request body for submitting a workflow to a spawned pod.
+      properties:
+        pod_url:
+          type: string
+          format: uri
+          description: The Tier 2 proxy URL of a spawned pod (from cloud/create).
+          example: https://test-pod-abc123.beam.cloud:8188
+        prompt:
+          type: object
+          additionalProperties: true
+          description: >-
+            The ComfyUI workflow graph, keyed by node id (string).
+            Each value is {"class_type": "...", "inputs": {...}}.
+          example:
+            "3":
+              class_type: KSampler
+              inputs:
+                seed: 123456789012345
+                steps: 20
+        client_id:
+          type: string
+          description: Optional client identifier for websocket event linking.
+          example: abc123def4567890fedcba0987654321
+      required: [pod_url, prompt]
+
+    CloudPromptStreamEvent:
+      type: object
+      description: >-
+        One line in the NDJSON stream returned by POST /api/cloud/prompt.
+        Every event is {"type": "<EventType>", "data": <event-specific>}.
+      properties:
+        type:
+          type: string
+          description: Event type discriminator.
+        data:
+          type: object
+          additionalProperties: true
+          description: Event-specific payload.
+      required: [type, data]
