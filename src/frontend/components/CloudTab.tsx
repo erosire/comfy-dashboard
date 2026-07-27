@@ -495,6 +495,25 @@ function sortNodes(nodes: ComfyNode[]): ComfyNode[] {
     return [...inputs, ...middle, ...outputs];
 }
 
+/** Re-number node IDs sequentially from 1 and update all link references. */
+function renumberNodes(nodes: ComfyNode[]): ComfyNode[] {
+    const idMap = new Map<string, string>();
+    nodes.forEach((n, i) => idMap.set(n.id, String(i + 1)));
+
+    return nodes.map((n) => {
+        const inputs: Record<string, unknown> = {};
+        for (const [key, val] of Object.entries(n.inputs)) {
+            if (isLinkRef(val)) {
+                const newSrc = idMap.get(val[0]);
+                inputs[key] = newSrc != null ? [newSrc, val[1]] : val;
+            } else {
+                inputs[key] = val;
+            }
+        }
+        return { id: idMap.get(n.id)!, class_type: n.class_type, inputs };
+    });
+}
+
 function parseWorkflowJson(raw: Record<string, unknown>): ComfyNode[] {
     // Workflow/UI format: { "nodes": [...], "links": [...] }
     if (Array.isArray(raw.nodes)) {
@@ -713,7 +732,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         const full = store.selectedWorkflow;
         if (full && full.raw) {
             setRawJson(full.raw);
-            setNodes(sortNodes(parseWorkflowJson(full.raw)));
+            setNodes(renumberNodes(sortNodes(parseWorkflowJson(full.raw))));
             setFileName(`${full.name}.json`);
             setPod({ status: 'idle' });
             setRun({ status: 'idle' });
@@ -728,7 +747,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
             try {
                 const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
                 setRawJson(parsed);
-                setNodes(sortNodes(parseWorkflowJson(parsed)));
+                setNodes(renumberNodes(sortNodes(parseWorkflowJson(parsed))));
                 setFileName(file.name);
                 setPod({ status: 'idle' });
                 setRun({ status: 'idle' });
