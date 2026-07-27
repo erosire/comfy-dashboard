@@ -445,6 +445,56 @@ const DialogActions = styled('div')({
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/** Classify and order nodes: inputs (sources) → middle → outputs (sinks). Discard unlinked. */
+function sortNodes(nodes: ComfyNode[]): ComfyNode[] {
+    const nodeIds = new Set(nodes.map((n) => n.id));
+
+    // Which nodes does each node receive from? (incoming links)
+    // Which nodes does each node feed into? (outgoing references)
+    const incomingFrom = new Map<string, Set<string>>();   // node → set of nodes it receives from
+    const outgoingTo = new Map<string, Set<string>>();     // node → set of nodes it feeds into
+
+    for (const n of nodes) {
+        incomingFrom.set(n.id, new Set());
+        outgoingTo.set(n.id, new Set());
+    }
+
+    for (const n of nodes) {
+        for (const val of Object.values(n.inputs)) {
+            if (isLinkRef(val)) {
+                const srcId = val[0];
+                if (nodeIds.has(srcId)) {
+                    incomingFrom.get(n.id)!.add(srcId);
+                    outgoingTo.get(srcId)!.add(n.id);
+                }
+            }
+        }
+    }
+
+    const isSource = (n: ComfyNode) => incomingFrom.get(n.id)!.size === 0;
+    const isSink = (n: ComfyNode) => outgoingTo.get(n.id)!.size === 0;
+
+    const inputs: ComfyNode[] = [];
+    const outputs: ComfyNode[] = [];
+    const middle: ComfyNode[] = [];
+
+    for (const n of nodes) {
+        const src = isSource(n);
+        const snk = isSink(n);
+        if (src && snk) {
+            // Completely unlinked — discard
+        } else if (src) {
+            inputs.push(n);
+        } else if (snk) {
+            outputs.push(n);
+        } else {
+            middle.push(n);
+        }
+    }
+
+    return [...inputs, ...middle, ...outputs];
+}
+
 function parseWorkflowJson(raw: Record<string, unknown>): ComfyNode[] {
     // Workflow/UI format: { "nodes": [...], "links": [...] }
     if (Array.isArray(raw.nodes)) {
@@ -611,6 +661,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     const [run, setRun] = React.useState<RunState>({ status: 'idle' });
     const [dragOver, setDragOver] = React.useState(false);
     const [podName, setPodName] = React.useState('');
+    const [spawnDialogOpen, setSpawnDialogOpen] = React.useState(false);
     const [sidebarOpen, setSidebarOpen] = React.useState(() => {
         if (typeof window !== 'undefined' && window.matchMedia) {
             return window.matchMedia('(min-width: 768px)').matches;
@@ -623,7 +674,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     const [saveDesc, setSaveDesc] = React.useState('');
     const [saving, setSaving] = React.useState(false);
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
-    const fileInputRef = React.useRef<HTMLInputElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
@@ -663,7 +713,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         const full = store.selectedWorkflow;
         if (full && full.raw) {
             setRawJson(full.raw);
-            setNodes(parseWorkflowJson(full.raw));
+            setNodes(sortNodes(parseWorkflowJson(full.raw)));
             setFileName(`${full.name}.json`);
             setPod({ status: 'idle' });
             setRun({ status: 'idle' });
@@ -678,7 +728,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
             try {
                 const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
                 setRawJson(parsed);
-                setNodes(parseWorkflowJson(parsed));
+                setNodes(sortNodes(parseWorkflowJson(parsed)));
                 setFileName(file.name);
                 setPod({ status: 'idle' });
                 setRun({ status: 'idle' });
@@ -712,36 +762,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         if (related && e.currentTarget.contains(related)) return;
         setDragOver(false);
     }, []);
-
-    const handleFileInput = React.useCallback(() => {
-        fileInputRef.current?.click();
-    }, []);
-
-    const handleFileInputChange = React.useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (file) handleFile(file);
-        e.target.value = '';
-    }, [handleFile]);
-
-    const handlePaste = React.useCallback(() => {
-        const text = window.prompt('Paste ComfyUI JSON:');
-        if (text) {
-            try {
-                const parsed = JSON.parse(text) as Record<string, unknown>;
-                setRawJson(parsed);
-                setNodes(parseWorkflowJson(parsed));
-                setFileName('pasted.json');
-                setPod({ status: 'idle' });
-                setRun({ status: 'idle' });
-                // Deselect saved workflow
-                if (editingWorkflowId) {
-                    selectWorkflow(null);
-                }
-            } catch {
-                alert('Invalid JSON');
-            }
-        }
-    }, [editingWorkflowId, selectWorkflow]);
 
     // ── Node editing ─────────────────────────────────────────────────
 
@@ -880,15 +900,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     // ── Pod spawning ─────────────────────────────────────────────────
 
-    const handleSpawn = React.useCallback(async () => {
+    const handleSpawn = React.useCallback(async (name?: string) => {
         setPod({ status: 'spawning' });
         try {
-            const result = await cloudCreate(baseUrl, { name: podName || undefined });
+            const result = await cloudCreate(baseUrl, { name: name || undefined });
             setPod({ status: 'ready', container_id: result.container_id, pod_url: result.pod_url });
         } catch (err: any) {
             setPod({ status: 'error', message: err.message ?? String(err) });
         }
-    }, [baseUrl, podName]);
+    }, [baseUrl]);
 
     // ── Submit prompt ────────────────────────────────────────────────
 
@@ -988,28 +1008,18 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     const content = (
         <>
-            {/* Hidden file input */}
-            <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: 'none' }}
-                onChange={handleFileInputChange}
-            />
-
             {/* Empty state: entire area is the drop zone */}
             {nodes.length === 0 && (
                 <EditorAreaEmpty
                     onDrop={handleDrop}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
-                    onClick={handleFileInput}
                     style={dragOver ? { borderColor: theme.accent, backgroundColor: theme.accentSoft } : undefined}
                     data-testid="cloud-drop-zone"
                 >
                     <DropTitle>Drop ComfyUI JSON</DropTitle>
                     <DropHint>
-                        Drag & drop a .json file, or click to browse.
+                        Drag & drop a .json file to get started.
                     </DropHint>
                     {isEditingSaved && (
                         <DropHint style={{ marginTop: 8, color: theme.accent }}>
@@ -1133,8 +1143,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     const footer = (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
-            <Btn className="sg-hover" onClick={handleFileInput}>Load JSON</Btn>
-            <Btn className="sg-hover" onClick={handlePaste}>Paste JSON</Btn>
             {nodes.length > 0 && (
                 <>
                     {isEditingSaved ? (
@@ -1166,28 +1174,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
             <div style={{ flex: '1 1 auto' }} />
 
-            {pod.status === 'idle' && (
-                <>
-                    <input
-                        type="text"
-                        value={podName}
-                        onChange={(e) => setPodName(e.target.value)}
-                        placeholder="Pod name"
-                        style={{
-                            padding: '3px 8px',
-                            fontSize: theme.fontSize.xs,
-                            fontFamily: theme.fontMono,
-                            color: theme.text,
-                            backgroundColor: theme.surface3,
-                            border: `1px solid ${theme.border}`,
-                            borderRadius: theme.radiusSm,
-                            outline: 'none',
-                            width: 110,
-                        }}
-                    />
-                    <BtnPrimary className="sg-primary" onClick={handleSpawn}>Spawn Pod</BtnPrimary>
-                </>
-            )}
             {pod.status === 'spawning' && (
                 <Badge><SpinnerEl /> Spawning...</Badge>
             )}
@@ -1199,9 +1185,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 >
                     {isRunning ? 'Running...' : 'Submit'}
                 </BtnPrimary>
-            )}
-            {pod.status === 'error' && (
-                <Btn className="sg-hover" onClick={handleSpawn}>Retry</Btn>
             )}
         </div>
     );
@@ -1236,6 +1219,17 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 <Badge style={{ marginLeft: 8, color: theme.warning, borderColor: theme.warningSoft }}>
                     ⚠ {store.loadWarning}
                 </Badge>
+            )}
+            <div style={{ flex: '1 1 auto' }} />
+            {pod.status === 'idle' && (
+                <BtnPrimary className="sg-primary" onClick={() => setSpawnDialogOpen(true)}>
+                    Spawn Pod
+                </BtnPrimary>
+            )}
+            {pod.status === 'error' && (
+                <BtnPrimary className="sg-primary" onClick={() => setSpawnDialogOpen(true)}>
+                    Retry
+                </BtnPrimary>
             )}
         </>
     );
@@ -1291,6 +1285,42 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                 data-testid="save-confirm-btn"
                             >
                                 {saving ? 'Saving...' : isEditingSaved ? 'Update' : 'Save'}
+                            </BtnPrimary>
+                        </DialogActions>
+                    </DialogBox>
+                </DialogOverlay>
+            )}
+
+            {/* Spawn Pod dialog */}
+            {spawnDialogOpen && (
+                <DialogOverlay onClick={() => setSpawnDialogOpen(false)}>
+                    <DialogBox onClick={(e) => e.stopPropagation()} data-testid="spawn-dialog">
+                        <DialogTitle>Spawn Pod</DialogTitle>
+                        <DialogField>
+                            <DialogLabel htmlFor="spawn-name">Pod name</DialogLabel>
+                            <DialogInput
+                                id="spawn-name"
+                                type="text"
+                                value={podName}
+                                onChange={(e) => setPodName(e.target.value)}
+                                placeholder="Enter a name for the pod"
+                                autoFocus
+                                data-testid="spawn-name-input"
+                            />
+                        </DialogField>
+                        <DialogActions>
+                            <Btn className="sg-hover" onClick={() => setSpawnDialogOpen(false)}>Cancel</Btn>
+                            <BtnPrimary
+                                className="sg-primary"
+                                onClick={() => {
+                                    if (!podName.trim()) return;
+                                    setSpawnDialogOpen(false);
+                                    handleSpawn(podName.trim());
+                                }}
+                                disabled={!podName.trim()}
+                                data-testid="spawn-confirm-btn"
+                            >
+                                Spawn
                             </BtnPrimary>
                         </DialogActions>
                     </DialogBox>
