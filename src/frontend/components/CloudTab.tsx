@@ -13,17 +13,25 @@ import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
 import { cloudCreate, cloudPrompt, cloudReadNdjson } from '../api/cloud';
 import { useDashboardStore } from '../context';
+import { isApiLinkRef } from '../../comfy/structure';
 import type { CloudStreamEvent } from '../api/cloud';
 import type { WorkflowMeta } from '../api';
-
-// ── Types ──────────────────────────────────────────────────────────────
-
-type ComfyNode = {
-    id: string;
-    class_type: string;
-    inputs: Record<string, unknown>;      // linked connection slots: { name: [srcId, slot] }
-    widgets: unknown[];                   // widget values (from widgets_values)
-};
+import type {
+    WorkflowNode,
+    NodeInput,
+    NodeOutput,
+    ApiPromptNode,
+    ComfyLink,
+    ComfyLinkTuple,
+    DataType,
+} from '../../comfy/structure';
+import type {
+    UINode,
+    UIInputConnection,
+    UIOutputSlot,
+    UIWidget,
+} from '../nodes/node-type';
+import { MODE_LABELS, MODE_STYLES } from '../nodes/node-type';
 
 type PodState =
     | { status: 'idle' }
@@ -446,14 +454,223 @@ const DialogActions = styled('div')({
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/** Build a link map from v0.4 tuple links: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]. */
+function buildLinkMapFromTuples(links: ComfyLinkTuple[]): Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }> {
+    const map = new Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>();
+    for (const link of links) {
+        // ComfyLinkTuple: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]
+        if (Array.isArray(link) && link.length >= 6) {
+            map.set(Number(link[0]), {
+                sourceNodeId: String(link[1]),
+                sourceSlot: Number(link[2]),
+                dataType: link[5] as DataType,
+            });
+        }
+    }
+    return map;
+}
+
+/** Build a link map from v1 object links. */
+function buildLinkMapFromObjects(links: ComfyLink[]): Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }> {
+    const map = new Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>();
+    for (const link of links) {
+        map.set(link.id, {
+            sourceNodeId: String(link.origin_id),
+            sourceSlot: Number(link.origin_slot),
+            dataType: link.type,
+        });
+    }
+    return map;
+}
+
+/** Build output slot metadata from a WorkflowNode. */
+function buildOutputSlots(node: WorkflowNode): UIOutputSlot[] {
+    if (!node.outputs) return [];
+    return node.outputs.map((out: NodeOutput, i: number) => ({
+        name: out.name ?? `output_${i}`,
+        type: out.type ?? '*',
+        connectionCount: Array.isArray(out.links) ? out.links.length : 0,
+        slotIndex: Number(out.slot_index ?? i),
+        isList: out.type_is_list,
+    }));
+}
+
+/** Resolve connections from node inputs using the link map. */
+function resolveConnections(
+    inputs: NodeInput[] | undefined,
+    linkMap: Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>
+): UIInputConnection[] {
+    if (!inputs) return [];
+    const connections: UIInputConnection[] = [];
+    for (const inp of inputs) {
+        const linkId = inp.link != null ? Number(inp.link) : null;
+        if (linkId != null && linkMap.has(linkId)) {
+            const ref = linkMap.get(linkId)!;
+            connections.push({
+                name: inp.name,
+                type: ref.dataType,
+                sourceNodeId: ref.sourceNodeId,
+                sourceSlot: ref.sourceSlot,
+                linkId,
+            });
+        }
+    }
+    return connections;
+}
+
+/** Parse a WorkflowNode (from v1 or v0.4 workflow) into a UINode. */
+function workflowNodeToUINode(
+    node: WorkflowNode,
+    linkMap: Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>,
+    sourceFormat: 'workflow-v1' | 'workflow-v04'
+): UINode {
+    const connections = resolveConnections(node.inputs, linkMap);
+    const outputs = buildOutputSlots(node);
+
+    // Build widget list — widgets_values can be array or record
+    const widgets: UIWidget[] = [];
+    if (Array.isArray(node.widgets_values)) {
+        node.widgets_values.forEach((val, i) => {
+            widgets.push({ value: val, index: i });
+        });
+    } else if (node.widgets_values && typeof node.widgets_values === 'object') {
+        // Record<string, unknown> form — newer format
+        Object.entries(node.widgets_values as Record<string, unknown>).forEach(([key, val], i) => {
+            widgets.push({ value: val, index: i });
+        });
+    }
+
+    return {
+        id: String(node.id),
+        classType: node.type ?? 'Unknown',
+        connections,
+        outputs,
+        widgets,
+        mode: node.mode ?? 0,
+        order: node.order ?? 0,
+        properties: node.properties ?? {},
+        flags: node.flags ?? {},
+        position: node.pos ?? [0, 0],
+        size: node.size ?? [200, 100],
+        color: node.color,
+        bgColor: node.bgcolor,
+        _raw: node,
+        _sourceFormat: sourceFormat,
+    };
+}
+
+/**
+ * Parse an API prompt node into a UINode.
+ *
+ * In API prompt format, `inputs` is a flat dict mixing:
+ * - Link references: [nodeId (string), slotIndex (number)]
+ * - Widget values: string, number, boolean, object
+ *
+ * We separate them into connections vs widgets.
+ */
+function apiPromptNodeToUINode(id: string, node: ApiPromptNode): UINode {
+    const connections: UIInputConnection[] = [];
+    const widgets: UIWidget[] = [];
+    let widgetIdx = 0;
+
+    for (const [key, val] of Object.entries(node.inputs)) {
+        if (isApiLinkRef(val)) {
+            connections.push({
+                name: key,
+                type: '*', // API prompt doesn't carry type info per-link
+                sourceNodeId: val[0],
+                sourceSlot: val[1],
+            });
+        } else {
+            widgets.push({ value: val, index: widgetIdx++ });
+        }
+    }
+
+    return {
+        id,
+        classType: node.class_type ?? 'Unknown',
+        connections,
+        outputs: [], // API prompt doesn't carry output info
+        widgets,
+        mode: 0, // API prompt doesn't carry mode info
+        order: 0,
+        properties: {},
+        flags: {},
+        position: [0, 0],
+        size: [200, 100],
+        _rawApi: node,
+        _sourceFormat: 'api-prompt',
+    };
+}
+
+/**
+ * Parse a raw ComfyUI JSON into UINode[].
+ *
+ * Handles three formats:
+ * 1. **Workflow v1**: `{ version: 1, nodes: [...], links: [...objects] }`
+ * 2. **Workflow v0.4**: `{ version: 0.4, nodes: [...], links: [...tuples] }`
+ * 3. **API prompt**: `{ "1": { class_type, inputs }, ... }` or `{ prompt: { ... } }`
+ *
+ * Auto-detects which format based on shape of the JSON.
+ */
+function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
+    // ── Workflow format (v1 or v0.4) ──────────────────────────────────
+    // Detected by presence of `nodes` array.
+    if (Array.isArray(raw.nodes)) {
+        const version = typeof raw.version === 'number' ? raw.version : 0.4;
+        const sourceFormat = version >= 1 ? 'workflow-v1' : 'workflow-v04';
+
+        // Build link map based on format
+        let linkMap: Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>;
+
+        if (Array.isArray(raw.links) && raw.links.length > 0) {
+            const firstLink = raw.links[0];
+            if (Array.isArray(firstLink)) {
+                // v0.4 tuple links
+                linkMap = buildLinkMapFromTuples(raw.links as ComfyLinkTuple[]);
+            } else {
+                // v1 object links
+                linkMap = buildLinkMapFromObjects(raw.links as ComfyLink[]);
+            }
+        } else {
+            linkMap = new Map();
+        }
+
+        const nodes = raw.nodes as WorkflowNode[];
+        return nodes.map((n) => workflowNodeToUINode(n, linkMap, sourceFormat));
+    }
+
+    // ── API prompt format ─────────────────────────────────────────────
+    // Could be: { prompt: { "1": { class_type, inputs } } }
+    // Or flat: { "1": { class_type, inputs }, ... }
+    let promptDict: Record<string, unknown>;
+
+    if ('prompt' in raw && typeof raw.prompt === 'object' && raw.prompt !== null) {
+        promptDict = raw.prompt as Record<string, unknown>;
+    } else {
+        promptDict = raw;
+    }
+
+    const nodes: UINode[] = [];
+    for (const [id, value] of Object.entries(promptDict)) {
+        // Skip known top-level keys that aren't node entries
+        if (id === 'extra' || id === 'config' || id === 'groups' || id === 'links' || id === 'version' || id === 'prompt') continue;
+
+        if (value && typeof value === 'object' && 'class_type' in value) {
+            nodes.push(apiPromptNodeToUINode(id, value as ApiPromptNode));
+        }
+    }
+    return nodes;
+}
+
 /** Classify and order nodes: inputs (sources) → middle → outputs (sinks). Discard unlinked. */
-function sortNodes(nodes: ComfyNode[]): ComfyNode[] {
+function sortNodes(nodes: UINode[]): UINode[] {
     const nodeIds = new Set(nodes.map((n) => n.id));
 
     // Which nodes does each node receive from? (incoming links)
     // Which nodes does each node feed into? (outgoing references)
-    const incomingFrom = new Map<string, Set<string>>();   // node → set of nodes it receives from
-    const outgoingTo = new Map<string, Set<string>>();     // node → set of nodes it feeds into
+    const incomingFrom = new Map<string, Set<string>>();
+    const outgoingTo = new Map<string, Set<string>>();
 
     for (const n of nodes) {
         incomingFrom.set(n.id, new Set());
@@ -461,23 +678,20 @@ function sortNodes(nodes: ComfyNode[]): ComfyNode[] {
     }
 
     for (const n of nodes) {
-        for (const val of Object.values(n.inputs)) {
-            if (isLinkRef(val)) {
-                const srcId = val[0];
-                if (nodeIds.has(srcId)) {
-                    incomingFrom.get(n.id)!.add(srcId);
-                    outgoingTo.get(srcId)!.add(n.id);
-                }
+        for (const conn of n.connections) {
+            if (nodeIds.has(conn.sourceNodeId)) {
+                incomingFrom.get(n.id)!.add(conn.sourceNodeId);
+                outgoingTo.get(conn.sourceNodeId)!.add(n.id);
             }
         }
     }
 
-    const isSource = (n: ComfyNode) => incomingFrom.get(n.id)!.size === 0;
-    const isSink = (n: ComfyNode) => outgoingTo.get(n.id)!.size === 0;
+    const isSource = (n: UINode) => incomingFrom.get(n.id)!.size === 0;
+    const isSink = (n: UINode) => outgoingTo.get(n.id)!.size === 0;
 
-    const inputs: ComfyNode[] = [];
-    const outputs: ComfyNode[] = [];
-    const middle: ComfyNode[] = [];
+    const inputs: UINode[] = [];
+    const outputs: UINode[] = [];
+    const middle: UINode[] = [];
 
     for (const n of nodes) {
         const src = isSource(n);
@@ -497,96 +711,17 @@ function sortNodes(nodes: ComfyNode[]): ComfyNode[] {
 }
 
 /** Re-number node IDs sequentially from 1 and update all link references. */
-function renumberNodes(nodes: ComfyNode[]): ComfyNode[] {
+function renumberNodes(nodes: UINode[]): UINode[] {
     const idMap = new Map<string, string>();
     nodes.forEach((n, i) => idMap.set(n.id, String(i + 1)));
 
     return nodes.map((n) => {
-        const inputs: Record<string, unknown> = {};
-        for (const [key, val] of Object.entries(n.inputs)) {
-            if (isLinkRef(val)) {
-                const newSrc = idMap.get(val[0]);
-                inputs[key] = newSrc != null ? [newSrc, val[1]] : val;
-            } else {
-                inputs[key] = val;
-            }
-        }
-        return { id: idMap.get(n.id)!, class_type: n.class_type, inputs, widgets: n.widgets };
-    });
-}
-
-function parseWorkflowJson(raw: Record<string, unknown>): ComfyNode[] {
-    // Workflow/UI format: { "nodes": [...], "links": [...] }
-    if (Array.isArray(raw.nodes)) {
-        const links = Array.isArray(raw.links) ? raw.links as Array<Array<unknown>> : [];
-        const linkMap = new Map<number, [string, number]>();
-        for (const link of links) {
-            if (Array.isArray(link) && link.length >= 4) {
-                linkMap.set(Number(link[0]), [String(link[1]), Number(link[2])]);
-            }
-        }
-
-        return (raw.nodes as Array<Record<string, unknown>>).map((n) => {
-            const id = String(n.id ?? '');
-            const classType = String(n.type ?? n.class_type ?? 'Unknown');
-            const inputDescriptors = Array.isArray(n.inputs) ? n.inputs as Array<Record<string, unknown>> : [];
-            const widgetValues = Array.isArray(n.widgets_values) ? n.widgets_values as unknown[] : [];
-
-            // inputs: only store linked connection slots
-            const inputs: Record<string, unknown> = {};
-            for (const desc of inputDescriptors) {
-                const name = String(desc.name ?? '');
-                const linkId = desc.link != null ? Number(desc.link) : null;
-                if (linkId != null && linkMap.has(linkId)) {
-                    const [src, slot] = linkMap.get(linkId)!;
-                    inputs[name] = [src, slot];
-                }
-            }
-
-            return { id, class_type: classType, inputs, widgets: widgetValues };
+        const connections: UIInputConnection[] = n.connections.map((conn) => {
+            const newSrc = idMap.get(conn.sourceNodeId);
+            return newSrc != null ? { ...conn, sourceNodeId: newSrc } : conn;
         });
-    }
-
-    // Prompt wrapper: { "prompt": { "3": { "class_type": "...", "inputs": {...} } } }
-    // API format: { "3": { "class_type": "...", "inputs": {...} }, ... }
-    // In both, inputs dict mixes link refs [srcId, slot] and scalar widget values.
-    function parsePromptNode(id: string, node: Record<string, unknown>): ComfyNode | null {
-        if (!(node && typeof node === 'object' && 'class_type' in node)) return null;
-        const rawInputs = (node.inputs as Record<string, unknown>) ?? {};
-        const inputs: Record<string, unknown> = {};
-        const widgets: unknown[] = [];
-        for (const [key, val] of Object.entries(rawInputs)) {
-            if (isLinkRef(val)) {
-                inputs[key] = val;
-            } else {
-                widgets.push(val);
-            }
-        }
-        return { id, class_type: String(node.class_type), inputs, widgets };
-    }
-
-    if ('prompt' in raw && typeof raw.prompt === 'object' && raw.prompt !== null) {
-        const prompt = raw.prompt as Record<string, unknown>;
-        const nodes: ComfyNode[] = [];
-        for (const [id, value] of Object.entries(prompt)) {
-            const parsed = parsePromptNode(id, value as Record<string, unknown>);
-            if (parsed) nodes.push(parsed);
-        }
-        if (nodes.length > 0) return nodes;
-    }
-
-    // API format
-    const nodes: ComfyNode[] = [];
-    for (const [id, value] of Object.entries(raw)) {
-        if (id === 'extra' || id === 'config' || id === 'groups' || id === 'links' || id === 'version') continue;
-        const parsed = parsePromptNode(id, value as Record<string, unknown>);
-        if (parsed) nodes.push(parsed);
-    }
-    return nodes;
-}
-
-function isLinkRef(val: unknown): val is [string, number] {
-    return Array.isArray(val) && val.length === 2 && typeof val[0] === 'string';
+        return { ...n, id: idMap.get(n.id)!, connections };
+    });
 }
 
 function displayValue(val: unknown): string {
@@ -604,6 +739,32 @@ function parseInputValue(raw: string, original: unknown): unknown {
         return raw.toLowerCase() === 'true' || raw === '1';
     }
     return raw;
+}
+
+/** Display a data type with a color hint based on common ComfyUI types. */
+function dataTypeColor(type: DataType): string {
+    const t = typeof type === 'string' ? type : Array.isArray(type) ? type[0] : String(type);
+    switch (t) {
+        case 'MODEL': return '#818cf8';        // accent (indigo)
+        case 'CLIP': return '#a78bfa';         // purple
+        case 'VAE': return '#f472b6';          // pink
+        case 'CONDITIONING': return '#6ee7b7'; // success (green)
+        case 'LATENT': return '#fbbf24';       // warning (amber)
+        case 'IMAGE': return '#38bdf8';        // sky blue
+        case 'MASK': return '#fb923c';         // orange
+        case 'STRING': return '#c8cdd8';       // text muted
+        case 'INT': return '#93b4d4';          // accent2
+        case 'FLOAT': return '#93b4d4';
+        case 'BOOLEAN': return '#f87171';      // danger (red)
+        default: return '#8891a5';             // textDim
+    }
+}
+
+/** Short label for a data type. Truncate long type names. */
+function dataTypeLabel(type: DataType): string {
+    if (typeof type === 'string') return type;
+    if (Array.isArray(type)) return type.join('|');
+    return String(type);
 }
 
 function eventSummary(event: CloudStreamEvent): string {
@@ -665,10 +826,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         cloneWorkflow,
         selectWorkflow,
         searchWorkflows,
-        refreshWorkflows,
     } = useDashboardStore();
 
-    const [nodes, setNodes] = React.useState<ComfyNode[]>([]);
+    const [nodes, setNodes] = React.useState<UINode[]>([]);
     const [rawJson, setRawJson] = React.useState<Record<string, unknown> | null>(null);
     const [fileName, setFileName] = React.useState('');
     const [pod, setPod] = React.useState<PodState>({ status: 'idle' });
@@ -783,8 +943,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         setNodes((prev) =>
             prev.map((n) => {
                 if (n.id !== nodeId) return n;
-                const widgets = [...n.widgets];
-                widgets[widgetIdx] = parseInputValue(rawValue, widgets[widgetIdx]);
+                const widgets = n.widgets.map((w, i) => {
+                    if (i !== widgetIdx) return w;
+                    return { ...w, value: parseInputValue(rawValue, w.value) };
+                });
                 return { ...n, widgets };
             })
         );
@@ -795,12 +957,18 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     const buildPrompt = React.useCallback((): Record<string, unknown> => {
         const prompt: Record<string, unknown> = {};
         for (const node of nodes) {
-            // Merge linked inputs with widget values back into the flat inputs dict
-            const inputs: Record<string, unknown> = { ...node.inputs };
-            for (let i = 0; i < node.widgets.length; i++) {
-                inputs[`widget_${i}`] = node.widgets[i];
+            // Merge linked connections with widget values back into the flat inputs dict
+            const inputs: Record<string, unknown> = {};
+            // Add connection link references
+            for (const conn of node.connections) {
+                inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
             }
-            prompt[node.id] = { class_type: node.class_type, inputs };
+            // Add widget values using their names from the original API format if available,
+            // otherwise use widget_${index} keys
+            for (const widget of node.widgets) {
+                inputs[`widget_${widget.index}`] = widget.value;
+            }
+            prompt[node.id] = { class_type: node.classType, inputs };
         }
         return prompt;
     }, [nodes]);
@@ -810,11 +978,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         if (rawJson) {
             const prompt: Record<string, unknown> = {};
             for (const node of nodes) {
-                const inputs: Record<string, unknown> = { ...node.inputs };
-                for (let i = 0; i < node.widgets.length; i++) {
-                    inputs[`widget_${i}`] = node.widgets[i];
+                const inputs: Record<string, unknown> = {};
+                for (const conn of node.connections) {
+                    inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
                 }
-                prompt[node.id] = { class_type: node.class_type, inputs };
+                for (const widget of node.widgets) {
+                    inputs[`widget_${widget.index}`] = widget.value;
+                }
+                prompt[node.id] = { class_type: node.classType, inputs };
             }
             if ('prompt' in rawJson) {
                 return { ...rawJson, prompt };
@@ -824,11 +995,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         // Fallback
         const prompt: Record<string, unknown> = {};
         for (const node of nodes) {
-            const inputs: Record<string, unknown> = { ...node.inputs };
-            for (let i = 0; i < node.widgets.length; i++) {
-                inputs[`widget_${i}`] = node.widgets[i];
+            const inputs: Record<string, unknown> = {};
+            for (const conn of node.connections) {
+                inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
             }
-            prompt[node.id] = { class_type: node.class_type, inputs };
+            for (const widget of node.widgets) {
+                inputs[`widget_${widget.index}`] = widget.value;
+            }
+            prompt[node.id] = { class_type: node.classType, inputs };
         }
         return prompt;
     }, [rawJson, nodes]);
@@ -1110,33 +1284,126 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                         </div>
                         {nodes.map((node) => (
                             <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}>
-                                <NodeHeader>
-                                    <NodeClassType>{node.class_type}</NodeClassType>
+                                <NodeHeader style={node.color ? { backgroundColor: node.color } : undefined}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                                        <NodeClassType>{node.classType}</NodeClassType>
+                                        {node.mode !== 0 && (
+                                            <span style={{
+                                                fontSize: theme.fontSize.xs,
+                                                color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
+                                                opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
+                                                fontStyle: 'italic',
+                                            }}>
+                                                [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
+                                            </span>
+                                        )}
+                                    </div>
                                     <NodeId>#{node.id}</NodeId>
                                 </NodeHeader>
                                 <NodeInputs>
-                                    {Object.entries(node.inputs).map(([key, val]) => {
-                                        const link = val as [string, number];
-                                        return (
-                                            <InputRow key={key}>
-                                                <InputLabel>{key}</InputLabel>
-                                                <LinkBadge>→ node {link[0]}[{link[1]}]</LinkBadge>
-                                            </InputRow>
-                                        );
-                                    })}
-                                    {node.widgets.map((val, i) => (
-                                        <InputRow key={`w${i}`}>
-                                            <InputLabel>#{i + 1}</InputLabel>
+                                    {/* Input connections */}
+                                    {node.connections.map((conn) => (
+                                        <InputRow key={`conn-${conn.name}`}>
+                                            <InputLabel style={{ color: dataTypeColor(conn.type) }}>
+                                                {conn.name}
+                                            </InputLabel>
+                                            <LinkBadge style={{
+                                                color: dataTypeColor(conn.type),
+                                                borderColor: `${dataTypeColor(conn.type)}40`,
+                                                backgroundColor: `${dataTypeColor(conn.type)}12`,
+                                            }}>
+                                                → {conn.sourceNodeId}[{conn.sourceSlot}]
+                                                {conn.type !== '*' && (
+                                                    <span style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}>
+                                                        {dataTypeLabel(conn.type)}
+                                                    </span>
+                                                )}
+                                            </LinkBadge>
+                                        </InputRow>
+                                    ))}
+
+                                    {/* Widget values */}
+                                    {node.widgets.map((widget) => (
+                                        <InputRow key={`w${widget.index}`}>
+                                            <InputLabel>#{widget.index + 1}</InputLabel>
                                             <InputField
                                                 type="text"
-                                                value={displayValue(val)}
-                                                onChange={(e) => updateNodeWidget(node.id, i, e.target.value)}
+                                                value={displayValue(widget.value)}
+                                                onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
                                                 readOnly={isRunning}
-                                                data-testid={`cloud-widget-${node.id}-${i}`}
+                                                data-testid={`cloud-widget-${node.id}-${widget.index}`}
                                             />
                                         </InputRow>
                                     ))}
-                                    {Object.keys(node.inputs).length === 0 && node.widgets.length === 0 && (
+
+                                    {/* Output slots */}
+                                    {node.outputs.length > 0 && (
+                                        <div style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap' as const,
+                                            gap: 4,
+                                            marginTop: 4,
+                                            paddingTop: 4,
+                                            borderTop: `1px solid ${theme.border}`,
+                                        }}>
+                                            <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint, marginRight: 2 }}>
+                                                outputs:
+                                            </span>
+                                            {node.outputs.map((out) => (
+                                                <span
+                                                    key={`out-${out.slotIndex}`}
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: dataTypeColor(out.type),
+                                                        fontFamily: theme.fontMono,
+                                                        padding: '0 4px',
+                                                        borderRadius: theme.radiusSm,
+                                                        backgroundColor: `${dataTypeColor(out.type)}12`,
+                                                        border: `1px solid ${dataTypeColor(out.type)}25`,
+                                                    }}
+                                                >
+                                                    {out.name}
+                                                    {out.connectionCount > 0 && (
+                                                        <span style={{ opacity: 0.6 }}> ({out.connectionCount})</span>
+                                                    )}
+                                                    {out.isList && (
+                                                        <span style={{ opacity: 0.6 }}> []</span>
+                                                    )}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    )}
+
+                                    {/* Node properties — show S&R name and version if present */}
+                                    {(node.properties['Node name for S&R'] || node.properties.ver) && (
+                                        <div style={{
+                                            display: 'flex',
+                                            flexWrap: 'wrap' as const,
+                                            gap: 6,
+                                            marginTop: 4,
+                                            paddingTop: 4,
+                                            borderTop: `1px solid ${theme.border}`,
+                                        }}>
+                                            {node.properties['Node name for S&R'] && (
+                                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                                                    S&amp;R: {node.properties['Node name for S&R']}
+                                                </span>
+                                            )}
+                                            {node.properties.ver && (
+                                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                                                    v{node.properties.ver}
+                                                </span>
+                                            )}
+                                            {node.properties.cnr_id && (
+                                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
+                                                    CNR: {node.properties.cnr_id}
+                                                </span>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Empty state */}
+                                    {node.connections.length === 0 && node.widgets.length === 0 && node.outputs.length === 0 && (
                                         <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
                                             No inputs
                                         </div>
