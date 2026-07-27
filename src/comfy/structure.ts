@@ -274,6 +274,125 @@ export interface Group {
     [key: string]: unknown;
 }
 
+// ── Subgraph (Group Node) Definitions ───────────────────────────────────────
+//
+// ComfyUI v1.45+ supports subgraphs (also called "group nodes").
+// A subgraph is a reusable node type defined by a graph of internal nodes.
+// It appears in the main workflow as a single node with a UUID type,
+// and its definition is stored in `definitions.subgraphs[]`.
+//
+// The subgraph definition contains its own `nodes`, `links`, `groups`,
+// and special `inputNode`/`outputNode` references that define the
+// subgraph's external ports.
+
+/**
+ * Reference to the subgraph's virtual input or output node.
+ * These are sentinel nodes (negative IDs like -10, -20) that define
+ * where external data enters/leaves the subgraph.
+ */
+export interface SubgraphIONode {
+    /** Sentinel node ID (typically -10 for input, -20 for output). */
+    id: number;
+    /** Bounding box [x, y, width, height] on the subgraph canvas. */
+    bounding: [number, number, number, number];
+}
+
+/**
+ * An input port on a subgraph definition.
+ * Maps to an input slot on the subgraph node in the parent workflow.
+ */
+export interface SubgraphInputPort {
+    /** Unique port identifier (UUID string). */
+    id: string;
+    /** Port name (e.g. "text", "image"). */
+    name: string;
+    /** Data type (e.g. "STRING", "IMAGE", "MODEL"). */
+    type: DataType;
+    /** Link IDs inside the subgraph that connect to this port. */
+    linkIds?: number[];
+    /** Display label (may differ from name, e.g. "prompt" for "text"). */
+    label?: string;
+    /** Position on the subgraph canvas [x, y]. */
+    pos?: Vector2;
+    [key: string]: unknown;
+}
+
+/**
+ * An output port on a subgraph definition.
+ * Maps to an output slot on the subgraph node in the parent workflow.
+ */
+export interface SubgraphOutputPort {
+    /** Unique port identifier (UUID string). */
+    id: string;
+    /** Port name (e.g. "IMAGE", "MODEL"). */
+    name: string;
+    /** Data type (e.g. "IMAGE", "MODEL"). */
+    type: DataType;
+    /** Link IDs inside the subgraph that feed into this port. */
+    linkIds?: number[];
+    /** Display name for the output. */
+    localized_name?: string;
+    /** Position on the subgraph canvas [x, y]. */
+    pos?: Vector2;
+    [key: string]: unknown;
+}
+
+/**
+ * A subgraph definition — a reusable node type defined as an internal graph.
+ *
+ * Subgraphs appear in `WorkflowJSON.definitions.subgraphs[]` and are
+ * referenced by their UUID `id` from the parent workflow's `nodes` array
+ * (the subgraph node's `type` and `id` fields match this `id`).
+ */
+export interface SubgraphDefinition {
+    /** Subgraph UUID — matches the `type` of the subgraph node in parent workflow. */
+    id: string;
+    /** Definition version (usually 1). */
+    version: number;
+    /** Display name shown in the node palette and on the node. */
+    name: string;
+    /** Revision counter (incremented on edits). */
+    revision?: number;
+    /** Internal state counters (last IDs for groups, nodes, links, reroutes). */
+    state?: {
+        lastGroupId?: number;
+        lastNodeId?: number;
+        lastLinkId?: number;
+        lastRerouteId?: number;
+    };
+    /** Subgraph configuration. */
+    config?: Record<string, unknown>;
+    /** Virtual input node reference (sentinel node where external data enters). */
+    inputNode?: SubgraphIONode;
+    /** Virtual output node reference (sentinel node where data exits). */
+    outputNode?: SubgraphIONode;
+    /** Input port definitions — these become the subgraph node's input slots. */
+    inputs?: SubgraphInputPort[];
+    /** Output port definitions — these become the subgraph node's output slots. */
+    outputs?: SubgraphOutputPort[];
+    /** Widget definitions for the subgraph node (usually empty). */
+    widgets?: unknown[];
+    /** Internal nodes that make up the subgraph. */
+    nodes?: WorkflowNode[];
+    /** Internal groups. */
+    groups?: Group[];
+    /** Internal links (v1 object format). */
+    links?: ComfyLink[];
+    /** Extra state (display, renderer version, etc.). */
+    extra?: WorkflowExtra;
+    [key: string]: unknown;
+}
+
+/**
+ * Workflow definitions — contains subgraph (group node) definitions.
+ * Stored in the top-level `definitions` field of the workflow JSON.
+ */
+export interface WorkflowDefinitions {
+    /** Array of subgraph definitions. */
+    subgraphs?: SubgraphDefinition[];
+    [key: string]: unknown;
+}
+
 // ── Workflow Extra / State ──────────────────────────────────────────────────
 //
 // `extra` holds display state, frontend version, reroutes, etc.
@@ -324,6 +443,8 @@ export interface WorkflowJSON04 {
     links: ComfyLinkTuple[];
     floatingLinks?: ComfyLink[];
     groups?: Group[];
+    /** Subgraph (group node) definitions — added in ComfyUI frontend v1.45+. */
+    definitions?: WorkflowDefinitions;
     config?: WorkflowConfig | null;
     extra?: WorkflowExtra | null;
     version: number; // 0.4
@@ -350,6 +471,8 @@ export interface WorkflowJSON {
     floatingLinks?: ComfyLink[];
     reroutes?: Reroute[];
     groups?: Group[];
+    /** Subgraph (group node) definitions — added in ComfyUI frontend v1.45+. */
+    definitions?: WorkflowDefinitions;
     config?: WorkflowConfig | null;
     extra?: WorkflowExtra | null;
     models?: ModelFile[];
