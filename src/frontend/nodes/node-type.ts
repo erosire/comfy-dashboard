@@ -13,6 +13,9 @@ import type {
     NodeFlags,
     ApiPromptNode,
     DataType,
+    SubgraphDefinition,
+    ComfyLink,
+    Group,
 } from '../../comfy/structure';
 
 // ── UI Node (display-friendly representation) ────────────────────────────────
@@ -151,6 +154,26 @@ export type UINode = {
 
     /** Node body background color — CSS color string. */
     bgColor?: string;
+
+    // ── Subgraph fields ──────────────────────────────────────────────
+    //
+    // When `subgraphDef` is present, this node references a subgraph definition.
+    // The subgraph's `inputs[]` become this node's input slots,
+    // and its `outputs[]` become this node's output slots.
+    // `subgraphNodes` contains the internal nodes for nested display.
+    // A UUID `type` on a WorkflowNode matches a SubgraphDefinition.id.
+
+    /** The subgraph definition — present when this node is a subgraph. */
+    subgraphDef?: SubgraphDefinition;
+
+    /** Internal nodes inside the subgraph, parsed to UINode for nested rendering. */
+    subgraphNodes?: UINode[];
+
+    /** Internal links inside the subgraph. */
+    subgraphLinks?: ComfyLink[];
+
+    /** Internal groups inside the subgraph. */
+    subgraphGroups?: Group[];
 
     /** The raw workflow node this was parsed from (for round-tripping). */
     _raw?: WorkflowNode;

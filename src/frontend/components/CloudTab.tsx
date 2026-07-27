@@ -24,6 +24,7 @@ import type {
     ComfyLink,
     ComfyLinkTuple,
     DataType,
+    SubgraphDefinition,
 } from '../../comfy/structure';
 import type {
     UINode,
@@ -452,7 +453,167 @@ const DialogActions = styled('div')({
     marginTop: 4,
 });
 
+// ── SubgraphNodeCard — renders a UINode with the same card as regular nodes ─
+
+const SubgraphNodeCard: React.FC<{
+    node: UINode;
+    isRunning: boolean;
+    updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+}> = React.memo(({ node, isRunning, updateNodeWidget }) => (
+    <NodeCard style={{ marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }}>
+        <NodeHeader>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                <NodeClassType>{node.classType}</NodeClassType>
+                {node.mode !== 0 && (
+                    <span style={{
+                        fontSize: theme.fontSize.xs,
+                        color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
+                        opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
+                        fontStyle: 'italic',
+                    }}>
+                        [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
+                    </span>
+                )}
+            </div>
+            <NodeId>#{node.id}</NodeId>
+        </NodeHeader>
+        <NodeInputs>
+            {node.connections.map((conn) => (
+                <InputRow key={`conn-${conn.name}`}>
+                    <InputLabel style={{ color: dataTypeColor(conn.type) }}>{conn.name}</InputLabel>
+                    <LinkBadge style={{
+                        color: dataTypeColor(conn.type),
+                        borderColor: `${dataTypeColor(conn.type)}40`,
+                        backgroundColor: `${dataTypeColor(conn.type)}12`,
+                    }}>
+                        → {conn.sourceNodeId}[{conn.sourceSlot}]
+                        {conn.type !== '*' && (
+                            <span style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}>
+                                {dataTypeLabel(conn.type)}
+                            </span>
+                        )}
+                    </LinkBadge>
+                </InputRow>
+            ))}
+            {node.widgets.map((widget) => (
+                <InputRow key={`w${widget.index}`}>
+                    <InputLabel>#{widget.index + 1}</InputLabel>
+                    <InputField
+                        type="text"
+                        value={displayValue(widget.value)}
+                        onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
+                        readOnly={isRunning}
+                    />
+                </InputRow>
+            ))}
+            {node.outputs.length > 0 && (
+                <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap' as const,
+                    gap: 4,
+                    marginTop: 4,
+                    paddingTop: 4,
+                    borderTop: `1px solid ${theme.border}`,
+                }}>
+                    <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint, marginRight: 2 }}>outputs:</span>
+                    {node.outputs.map((out) => (
+                        <span
+                            key={`out-${out.slotIndex}`}
+                            style={{
+                                fontSize: theme.fontSize.xs,
+                                color: dataTypeColor(out.type),
+                                fontFamily: theme.fontMono,
+                                padding: '0 4px',
+                                borderRadius: theme.radiusSm,
+                                backgroundColor: `${dataTypeColor(out.type)}12`,
+                                border: `1px solid ${dataTypeColor(out.type)}25`,
+                            }}
+                        >
+                            {out.name}
+                            {out.connectionCount > 0 && <span style={{ opacity: 0.6 }}> ({out.connectionCount})</span>}
+                            {out.isList && <span style={{ opacity: 0.6 }}> []</span>}
+                        </span>
+                    ))}
+                </div>
+            )}
+            {(node.properties['Node name for S&R'] || node.properties.ver) && (
+                <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap' as const,
+                    gap: 6,
+                    marginTop: 4,
+                    paddingTop: 4,
+                    borderTop: `1px solid ${theme.border}`,
+                }}>
+                    {node.properties['Node name for S&R'] && (
+                        <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                            S&amp;R: {node.properties['Node name for S&R']}
+                        </span>
+                    )}
+                    {node.properties.ver && (
+                        <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                            v{node.properties.ver}
+                        </span>
+                    )}
+                    {node.properties.cnr_id && (
+                        <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
+                            CNR: {node.properties.cnr_id}
+                        </span>
+                    )}
+                </div>
+            )}
+            {node.connections.length === 0 && node.widgets.length === 0 && node.outputs.length === 0 && (
+                <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>No inputs</div>
+            )}
+            {/* Recurse into nested subgraphs */}
+            {node.subgraphNodes && node.subgraphNodes.length > 0 && (
+                <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${theme.accent}30` }}>
+                    <div style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600, marginBottom: 4 }}>
+                        ◈ {node.subgraphNodes.length} internal node{node.subgraphNodes.length !== 1 ? 's' : ''}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {node.subgraphNodes.map((inner) => (
+                            <SubgraphNodeCard key={inner.id} node={inner} isRunning={isRunning} updateNodeWidget={updateNodeWidget} />
+                        ))}
+                    </div>
+                </div>
+            )}
+        </NodeInputs>
+    </NodeCard>
+));
+
 // ── Helpers ────────────────────────────────────────────────────────────
+
+// ── Subgraph detection ──────────────────────────────────────────────────
+//
+// ComfyUI v1.45+ uses subgraphs (group nodes) — reusable node types
+// defined by an internal graph. A subgraph node in the parent workflow
+// has a UUID string as its `type`, matching a `SubgraphDefinition.id`
+// from `workflow.definitions.subgraphs[]`.
+//
+// Regular node types are human-readable: "KSampler", "CLIPTextEncode", etc.
+// UUID types always indicate a subgraph reference.
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Check if a node type string is a UUID (indicating a subgraph node). */
+function isSubgraphType(type: string): boolean {
+    return UUID_PATTERN.test(type);
+}
+
+/** Look up a subgraph definition by UUID from a workflow's definitions. */
+function findSubgraphDef(
+    raw: Record<string, unknown>,
+    subgraphId: string
+): SubgraphDefinition | undefined {
+    const defs = raw.definitions as Record<string, unknown> | undefined;
+    if (!defs) return undefined;
+    const subs = defs.subgraphs as Array<Record<string, unknown>> | undefined;
+    if (!Array.isArray(subs)) return undefined;
+    return subs.find((sg) => sg.id === subgraphId) as SubgraphDefinition | undefined;
+}
+
+// ── Link map builders ───────────────────────────────────────────────────
 
 /** Build a link map from v0.4 tuple links: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]. */
 function buildLinkMapFromTuples(links: ComfyLinkTuple[]): Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }> {
@@ -622,12 +783,14 @@ function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
 
         // Build link map based on format
         let linkMap: Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>;
+        let linkTuples: ComfyLinkTuple[] = [];
 
         if (Array.isArray(raw.links) && raw.links.length > 0) {
             const firstLink = raw.links[0];
             if (Array.isArray(firstLink)) {
                 // v0.4 tuple links
-                linkMap = buildLinkMapFromTuples(raw.links as ComfyLinkTuple[]);
+                linkTuples = raw.links as ComfyLinkTuple[];
+                linkMap = buildLinkMapFromTuples(linkTuples);
             } else {
                 // v1 object links
                 linkMap = buildLinkMapFromObjects(raw.links as ComfyLink[]);
@@ -637,7 +800,99 @@ function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
         }
 
         const nodes = raw.nodes as WorkflowNode[];
-        return nodes.map((n) => workflowNodeToUINode(n, linkMap, sourceFormat));
+        const result: UINode[] = [];
+
+        for (const n of nodes) {
+            const nodeType = n.type ?? '';
+
+            // Subgraph node: UUID type matching a definition → expand inline
+            if (isSubgraphType(nodeType)) {
+                const sgDef = findSubgraphDef(raw, nodeType);
+                if (sgDef) {
+                    const sgNodeId = String(n.id);
+
+                    // Build internal link map from subgraph definition
+                    const internalLinks = ((sgDef as any).links ?? []) as ComfyLink[];
+                    const internalLinkMap = buildLinkMapFromObjects(internalLinks);
+
+                    // Rewrite boundary: find external links targeting this subgraph
+                    const externalInputByPort = new Map<number, { sourceNodeId: string; sourceSlot: number }>();
+                    for (const tuple of linkTuples) {
+                        if (tuple.length >= 6 && String(tuple[3]) === sgNodeId) {
+                            externalInputByPort.set(Number(tuple[4]), {
+                                sourceNodeId: String(tuple[1]),
+                                sourceSlot: Number(tuple[2]),
+                            });
+                        }
+                    }
+
+                    // Rewrite internal links from -10 (inputNode) → external source
+                    (sgDef.inputs ?? []).forEach((inp, portIndex) => {
+                        const ext = externalInputByPort.get(portIndex);
+                        if (!ext) return;
+                        for (const linkId of (inp.linkIds ?? [])) {
+                            const existing = internalLinkMap.get(linkId);
+                            if (existing && String(existing.sourceNodeId) === '-10') {
+                                internalLinkMap.set(linkId, {
+                                    ...existing,
+                                    sourceNodeId: ext.sourceNodeId,
+                                    sourceSlot: ext.sourceSlot,
+                                });
+                            }
+                        }
+                    });
+
+                    // Parse internal nodes with rewritten link map
+                    const internalNodes = ((sgDef as any).nodes ?? []) as WorkflowNode[];
+                    const subgraphNodes = internalNodes.map((inode) =>
+                        workflowNodeToUINode(inode, internalLinkMap, sourceFormat)
+                    );
+
+                    // Build the parent subgraph UINode with definition ports
+                    const sgInputConnections: UIInputConnection[] = (sgDef.inputs ?? []).map((inp) => ({
+                        name: inp.name,
+                        type: inp.type as DataType,
+                        sourceNodeId: '',
+                        sourceSlot: -1,
+                        linkId: undefined,
+                    }));
+
+                    const sgOutputSlots: UIOutputSlot[] = (sgDef.outputs ?? []).map((out, i) => ({
+                        name: out.name,
+                        type: out.type as DataType,
+                        connectionCount: 0,
+                        slotIndex: i,
+                    }));
+
+                    result.push({
+                        id: sgNodeId,
+                        classType: (sgDef as any).name ?? nodeType,
+                        connections: sgInputConnections,
+                        outputs: sgOutputSlots,
+                        widgets: [],
+                        mode: n.mode ?? 0,
+                        order: n.order ?? 0,
+                        properties: n.properties ?? {},
+                        flags: n.flags ?? {},
+                        position: n.pos ?? [0, 0],
+                        size: n.size ?? [200, 100],
+                        color: n.color,
+                        bgColor: n.bgcolor,
+                        _raw: n,
+                        _sourceFormat: sourceFormat,
+                        subgraphDef: sgDef,
+                        subgraphNodes,
+                        subgraphLinks: internalLinks,
+                    });
+                    continue;
+                }
+            }
+
+            // Regular node
+            result.push(workflowNodeToUINode(n, linkMap, sourceFormat));
+        }
+
+        return result;
     }
 
     // ── API prompt format ─────────────────────────────────────────────
@@ -940,16 +1195,21 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     // ── Node editing ─────────────────────────────────────────────────
 
     const updateNodeWidget = React.useCallback((nodeId: string, widgetIdx: number, rawValue: string) => {
-        setNodes((prev) =>
-            prev.map((n) => {
-                if (n.id !== nodeId) return n;
-                const widgets = n.widgets.map((w, i) => {
-                    if (i !== widgetIdx) return w;
-                    return { ...w, value: parseInputValue(rawValue, w.value) };
-                });
-                return { ...n, widgets };
-            })
-        );
+        /** Recursively update a widget in a node tree (handles subgraph nesting). */
+        const updateInTree = (nodes: UINode[]): UINode[] =>
+            nodes.map((n) => {
+                if (n.id === nodeId) {
+                    const widgets = n.widgets.map((w, i) =>
+                        i === widgetIdx ? { ...w, value: parseInputValue(rawValue, w.value) } : w
+                    );
+                    return { ...n, widgets };
+                }
+                if (n.subgraphNodes && n.subgraphNodes.length > 0) {
+                    return { ...n, subgraphNodes: updateInTree(n.subgraphNodes) };
+                }
+                return n;
+            });
+        setNodes((prev) => updateInTree(prev));
     }, []);
 
     // ── Build API prompt ─────────────────────────────────────────────
@@ -1282,11 +1542,26 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                 </div>
                             )}
                         </div>
-                        {nodes.map((node) => (
-                            <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}>
-                                <NodeHeader style={node.color ? { backgroundColor: node.color } : undefined}>
+                        {nodes.map((node) => {
+                            const isSubgraph = !!node.subgraphDef;
+                            return (
+                            <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}
+                                style={isSubgraph ? { border: `1px solid ${theme.accent}40` } : undefined}
+                            >
+                                <NodeHeader style={{
+                                    backgroundColor: node.color
+                                        ? node.color
+                                        : isSubgraph ? 'rgba(129, 140, 248, 0.15)' : undefined,
+                                }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                                        <NodeClassType>{node.classType}</NodeClassType>
+                                        {isSubgraph && (
+                                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, marginRight: 2 }} title="Subgraph">
+                                                ◈
+                                            </span>
+                                        )}
+                                        <NodeClassType style={isSubgraph ? { color: theme.accent } : undefined}>
+                                            {node.classType}
+                                        </NodeClassType>
                                         {node.mode !== 0 && (
                                             <span style={{
                                                 fontSize: theme.fontSize.xs,
@@ -1408,9 +1683,38 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                             No inputs
                                         </div>
                                     )}
+
+                                    {/* ── Nested subgraph internal nodes ────────── */}
+                                    {isSubgraph && node.subgraphNodes && node.subgraphNodes.length > 0 && (
+                                        <div style={{
+                                            marginTop: 6,
+                                            paddingTop: 6,
+                                            borderTop: `1px dashed ${theme.accent}30`,
+                                        }}>
+                                            <div style={{
+                                                fontSize: theme.fontSize.xs,
+                                                color: theme.accent,
+                                                fontWeight: 600,
+                                                marginBottom: 4,
+                                            }}>
+                                                ◈ {node.subgraphNodes.length} internal node{node.subgraphNodes.length !== 1 ? 's' : ''}
+                                            </div>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                {node.subgraphNodes.map((inner) => (
+                                                    <SubgraphNodeCard
+                                                        key={inner.id}
+                                                        node={inner}
+                                                        isRunning={isRunning}
+                                                        updateNodeWidget={updateNodeWidget}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </NodeInputs>
                             </NodeCard>
-                        ))}
+                            );
+                        })}
                     </NodeList>
                 </EditorArea>
             )}
