@@ -14,9 +14,10 @@
 //   └──────────────────────────────────────┘
 
 import React from 'react';
-import { styled, theme } from '../styles';
+import styled from '@emotion/styled';
+import { theme } from '../styles';
 
-export const DashboardShell = styled('div', {
+export const DashboardShell = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
@@ -24,7 +25,7 @@ export const DashboardShell = styled('div', {
     overflow: 'hidden'
 });
 
-export const DashboardHeader = styled('div', {
+export const DashboardHeader = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     alignItems: 'center',
@@ -36,14 +37,14 @@ export const DashboardHeader = styled('div', {
     backgroundColor: theme.surface1
 });
 
-export const DashboardBody = styled('div', {
+export const DashboardBody = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     flex: '1 1 auto',
     overflow: 'hidden'
 });
 
-const DashboardSidebarPanel = styled('div', {
+const DashboardSidebarPanel = styled('div')({
     flex: '0 0 auto',
     overflow: 'hidden',
     transition: `width ${theme.transitionSlow}, min-width ${theme.transitionSlow}, max-width ${theme.transitionSlow}, border-color ${theme.transitionSlow}`,
@@ -51,7 +52,7 @@ const DashboardSidebarPanel = styled('div', {
     boxSizing: 'border-box' as const
 });
 
-export const DashboardContent = styled('div', {
+export const DashboardContent = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     flex: '1 1 auto',
@@ -61,7 +62,7 @@ export const DashboardContent = styled('div', {
     minHeight: 0
 });
 
-const SidebarOverlay = styled('div', {
+const SidebarOverlay = styled('div')({
     position: 'absolute' as const,
     inset: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.55)',
@@ -70,7 +71,7 @@ const SidebarOverlay = styled('div', {
     animation: 'sg-fade-in 160ms ease both'
 });
 
-export const DashboardFooter = styled('div', {
+export const DashboardFooter = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     flex: '0 0 auto',

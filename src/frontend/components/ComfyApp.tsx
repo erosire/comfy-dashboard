@@ -4,12 +4,13 @@
 // so all workflow state is managed centrally.
 
 import React from 'react';
-import { styled, theme } from '../styles';
+import styled from '@emotion/styled';
+import { theme } from '../styles';
 import { DashboardStoreProvider } from '../context';
 import { BootstrapLayer } from './BootstrapLayer';
 import { CloudTab } from './CloudTab';
 
-const FullScreen = styled('div', {
+const FullScreen = styled('div')({
     position: 'fixed',
     inset: 0,
     width: '100%',
@@ -18,7 +19,7 @@ const FullScreen = styled('div', {
     backgroundColor: theme.bg
 });
 
-const DarkThemeWrapper = styled('div', {
+const DarkThemeWrapper = styled('div')({
     width: '100%',
     height: '100%',
     display: 'flex',

@@ -8,7 +8,8 @@
 // Manages pod lifecycle and prompt execution for cloud runs.
 
 import React from 'react';
-import { styled, theme } from '../styles';
+import styled from '@emotion/styled';
+import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
 import { cloudCreate, cloudPrompt, cloudReadNdjson } from '../api/cloud';
 import { useDashboardStore } from '../context';
@@ -37,7 +38,7 @@ type RunState =
 
 // ── Styled: shared ────────────────────────────────────────────────────
 
-const Btn = styled('button', {
+const Btn = styled('button')({
     padding: '5px 14px',
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
@@ -49,7 +50,7 @@ const Btn = styled('button', {
     transition: `background-color ${theme.transition}, color ${theme.transition}, border-color ${theme.transition}`,
 });
 
-const BtnPrimary = styled('button', {
+const BtnPrimary = styled('button')({
     padding: '5px 14px',
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
@@ -61,7 +62,7 @@ const BtnPrimary = styled('button', {
     transition: `background-color ${theme.transition}`,
 });
 
-const BtnDanger = styled('button', {
+const BtnDanger = styled('button')({
     padding: '5px 14px',
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
@@ -73,7 +74,7 @@ const BtnDanger = styled('button', {
     transition: `background-color ${theme.transition}, color ${theme.transition}`,
 });
 
-const BtnSuccess = styled('button', {
+const BtnSuccess = styled('button')({
     padding: '5px 14px',
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
@@ -85,7 +86,7 @@ const BtnSuccess = styled('button', {
     transition: `background-color ${theme.transition}, color ${theme.transition}`,
 });
 
-const Badge = styled('span', {
+const Badge = styled('span')({
     display: 'inline-flex',
     alignItems: 'center',
     gap: 5,
@@ -97,14 +98,14 @@ const Badge = styled('span', {
     border: `1px solid ${theme.border}`,
 });
 
-const BadgeDot = styled('span', {
+const BadgeDot = styled('span')({
     width: 6,
     height: 6,
     borderRadius: '50%',
     flex: '0 0 auto',
 });
 
-const SpinnerEl = styled('span', {
+const SpinnerEl = styled('span')({
     display: 'inline-block',
     width: 12,
     height: 12,
@@ -114,14 +115,14 @@ const SpinnerEl = styled('span', {
     animation: 'sg-spin 700ms linear infinite',
 });
 
-const SectionLabel = styled('div', {
+const SectionLabel = styled('div')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
     color: theme.textDim,
     marginBottom: 6,
 });
 
-const ToggleButton = styled('button', {
+const ToggleButton = styled('button')({
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -139,7 +140,7 @@ const ToggleButton = styled('button', {
     transition: `background-color ${theme.transition}, border-color ${theme.transition}`,
 });
 
-const HeaderTitle = styled('span', {
+const HeaderTitle = styled('span')({
     fontSize: theme.fontSize.lg,
     fontWeight: 600,
     color: theme.text,
@@ -150,14 +151,14 @@ const HeaderTitle = styled('span', {
 
 // ── Styled: left sidebar (workflow list) ─────────────────────────────
 
-const SidebarPanel = styled('div', {
+const SidebarPanel = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
     overflow: 'hidden',
 });
 
-const SidebarHeader = styled('div', {
+const SidebarHeader = styled('div')({
     padding: '10px 12px 6px',
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
@@ -171,12 +172,12 @@ const SidebarHeader = styled('div', {
     justifyContent: 'space-between',
 });
 
-const SidebarSearch = styled('div', {
+const SidebarSearch = styled('div')({
     padding: '0 12px 8px',
     flex: '0 0 auto',
 });
 
-const SearchInput = styled('input', {
+const SearchInput = styled('input')({
     width: '100%',
     padding: '5px 8px',
     fontSize: theme.fontSize.xs,
@@ -190,13 +191,13 @@ const SearchInput = styled('input', {
     transition: `border-color ${theme.transition}`,
 });
 
-const SidebarScroll = styled('div', {
+const SidebarScroll = styled('div')({
     flex: '1 1 auto',
     overflowY: 'auto',
     padding: '0 6px 12px',
 });
 
-const EmptyHint = styled('div', {
+const EmptyHint = styled('div')({
     padding: '20px 0',
     fontSize: theme.fontSize.sm,
     color: theme.textFaint,
@@ -204,7 +205,7 @@ const EmptyHint = styled('div', {
     lineHeight: 1.5,
 });
 
-const WorkflowItem = styled('div', {
+const WorkflowItem = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     padding: '8px 10px',
@@ -215,7 +216,7 @@ const WorkflowItem = styled('div', {
     marginBottom: 2,
 });
 
-const WorkflowItemActive = styled('div', {
+const WorkflowItemActive = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     padding: '8px 10px',
@@ -227,7 +228,7 @@ const WorkflowItemActive = styled('div', {
     backgroundColor: theme.accentSoft,
 });
 
-const WorkflowItemName = styled('div', {
+const WorkflowItemName = styled('div')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
     color: theme.text,
@@ -236,7 +237,7 @@ const WorkflowItemName = styled('div', {
     whiteSpace: 'nowrap' as const,
 });
 
-const WorkflowItemMeta = styled('div', {
+const WorkflowItemMeta = styled('div')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
     marginTop: 2,
@@ -246,17 +247,17 @@ const WorkflowItemMeta = styled('div', {
     overflow: 'hidden',
 });
 
-const WorkflowItemCount = styled('span', {
+const WorkflowItemCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.accent2,
 });
 
-const WorkflowItemDate = styled('span', {
+const WorkflowItemDate = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
 });
 
-const WorkflowItemActions = styled('div', {
+const WorkflowItemActions = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     gap: 4,
@@ -266,7 +267,7 @@ const WorkflowItemActions = styled('div', {
     // Show on hover of parent
 });
 
-const SidebarCount = styled('span', {
+const SidebarCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
     fontWeight: 400,
@@ -274,13 +275,13 @@ const SidebarCount = styled('span', {
 
 // ── Styled: right content (editor) ────────────────────────────────────
 
-const EditorArea = styled('div', {
+const EditorArea = styled('div')({
     flex: '1 1 auto',
     overflowY: 'auto',
     padding: '14px 24px',
 });
 
-const EditorAreaEmpty = styled('div', {
+const EditorAreaEmpty = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
@@ -296,31 +297,31 @@ const EditorAreaEmpty = styled('div', {
     flex: '1 1 auto',
 });
 
-const DropTitle = styled('div', {
+const DropTitle = styled('div')({
     fontSize: theme.fontSize.lg,
     fontWeight: 600,
     color: theme.textMuted,
 });
 
-const DropHint = styled('div', {
+const DropHint = styled('div')({
     fontSize: theme.fontSize.sm,
     color: theme.textDim,
 });
 
-const NodeList = styled('div', {
+const NodeList = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     gap: 8,
 });
 
-const NodeCard = styled('div', {
+const NodeCard = styled('div')({
     border: `1px solid ${theme.border}`,
     borderRadius: theme.radiusMd,
     backgroundColor: theme.surface1,
     overflow: 'hidden',
 });
 
-const NodeHeader = styled('div', {
+const NodeHeader = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     alignItems: 'center',
@@ -330,33 +331,33 @@ const NodeHeader = styled('div', {
     borderBottom: `1px solid ${theme.border}`,
 });
 
-const NodeId = styled('span', {
+const NodeId = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
     fontFamily: theme.fontMono,
 });
 
-const NodeClassType = styled('span', {
+const NodeClassType = styled('span')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
     color: theme.accent,
 });
 
-const NodeInputs = styled('div', {
+const NodeInputs = styled('div')({
     padding: '8px 10px',
     display: 'flex',
     flexDirection: 'column',
     gap: 4,
 });
 
-const InputRow = styled('div', {
+const InputRow = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
 });
 
-const InputLabel = styled('span', {
+const InputLabel = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textDim,
     fontFamily: theme.fontMono,
@@ -367,7 +368,7 @@ const InputLabel = styled('span', {
     whiteSpace: 'nowrap' as const,
 });
 
-const InputField = styled('input', {
+const InputField = styled('input')({
     flex: '1 1 auto',
     padding: '3px 6px',
     fontSize: theme.fontSize.xs,
@@ -380,7 +381,7 @@ const InputField = styled('input', {
     minWidth: 0,
 });
 
-const LinkBadge = styled('span', {
+const LinkBadge = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.accent2,
     fontFamily: theme.fontMono,
@@ -392,7 +393,7 @@ const LinkBadge = styled('span', {
 
 // ── Styled: save dialog ──────────────────────────────────────────────
 
-const DialogOverlay = styled('div', {
+const DialogOverlay = styled('div')({
     position: 'fixed' as const,
     inset: 0,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
@@ -402,7 +403,7 @@ const DialogOverlay = styled('div', {
     zIndex: 100,
 });
 
-const DialogBox = styled('div', {
+const DialogBox = styled('div')({
     backgroundColor: theme.surface2,
     border: `1px solid ${theme.border}`,
     borderRadius: theme.radiusLg,
@@ -414,25 +415,25 @@ const DialogBox = styled('div', {
     gap: 12,
 });
 
-const DialogTitle = styled('div', {
+const DialogTitle = styled('div')({
     fontSize: theme.fontSize.lg,
     fontWeight: 600,
     color: theme.text,
 });
 
-const DialogField = styled('div', {
+const DialogField = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     gap: 4,
 });
 
-const DialogLabel = styled('label', {
+const DialogLabel = styled('label')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
     color: theme.textDim,
 });
 
-const DialogInput = styled('input', {
+const DialogInput = styled('input')({
     padding: '6px 10px',
     fontSize: theme.fontSize.sm,
     fontFamily: theme.fontSans,
@@ -444,7 +445,7 @@ const DialogInput = styled('input', {
     transition: `border-color ${theme.transition}`,
 });
 
-const DialogTextArea = styled('textarea', {
+const DialogTextArea = styled('textarea')({
     padding: '6px 10px',
     fontSize: theme.fontSize.sm,
     fontFamily: theme.fontSans,
@@ -458,7 +459,7 @@ const DialogTextArea = styled('textarea', {
     transition: `border-color ${theme.transition}`,
 });
 
-const DialogActions = styled('div', {
+const DialogActions = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     justifyContent: 'flex-end',
