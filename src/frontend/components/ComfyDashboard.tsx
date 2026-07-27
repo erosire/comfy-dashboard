@@ -52,10 +52,13 @@ const DashboardSidebarPanel = styled('div', {
 });
 
 export const DashboardContent = styled('div', {
+    display: 'flex',
+    flexDirection: 'column',
     flex: '1 1 auto',
     overflowY: 'auto',
     overflowX: 'hidden',
-    position: 'relative' as const
+    position: 'relative' as const,
+    minHeight: 0
 });
 
 const SidebarOverlay = styled('div', {

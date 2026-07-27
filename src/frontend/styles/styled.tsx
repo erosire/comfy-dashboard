@@ -18,9 +18,10 @@ export function styled<Tag extends keyof JSX.IntrinsicElements>(
     tag: Tag,
     style: StyleObject
 ): React.FC<StyledProps<Tag>> {
-    const Component: React.FC<any> = ({ as, ...rest }) => {
+    const Component: React.FC<any> = ({ as, style: inlineStyle, ...rest }) => {
         const Tag = (as || tag) as keyof JSX.IntrinsicElements;
-        return React.createElement(Tag, { style, ...rest });
+        const mergedStyle = inlineStyle ? { ...style, ...inlineStyle } : style;
+        return React.createElement(Tag, { style: mergedStyle, ...rest });
     };
     Component.displayName = `styled.${tag}`;
     return Component;

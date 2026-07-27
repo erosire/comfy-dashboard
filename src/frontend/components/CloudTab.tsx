@@ -277,12 +277,10 @@ const SidebarCount = styled('span', {
 const EditorArea = styled('div', {
     flex: '1 1 auto',
     overflowY: 'auto',
-    padding: 14,
+    padding: '14px 24px',
 });
 
 const EditorAreaEmpty = styled('div', {
-    flex: '1 1 auto',
-    overflowY: 'auto',
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
@@ -294,7 +292,8 @@ const EditorAreaEmpty = styled('div', {
     transition: `border-color ${theme.transition}, background-color ${theme.transition}`,
     color: theme.textDim,
     fontSize: theme.fontSize.body,
-    minHeight: 0,
+    boxSizing: 'border-box' as const,
+    flex: '1 1 auto',
 });
 
 const DropTitle = styled('div', {
@@ -1123,36 +1122,60 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                     <NodeList data-testid="cloud-node-list">
                         {dragOver && (
                             <EditorAreaEmpty
-                                style={{ borderColor: theme.accent, backgroundColor: theme.accentSoft, minHeight: 80, margin: 0, padding: 16 }}
+                                style={{ position: 'relative' as const, borderColor: theme.accent, backgroundColor: theme.accentSoft, minHeight: 80, margin: 0, padding: 16, flex: '0 0 auto' }}
                             >
                                 <DropTitle style={{ fontSize: theme.fontSize.body }}>Drop to replace workflow</DropTitle>
                             </EditorAreaEmpty>
                         )}
 
-                        {/* Workflow name badge when editing a saved workflow */}
-                        {isEditingSaved && store.selectedWorkflow && (
-                            <div style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 8,
-                                padding: '6px 0',
-                                marginBottom: 4,
-                            }}>
-                                <SectionLabel style={{ marginBottom: 0 }}>
-                                    {store.selectedWorkflow.name}
+                        {/* Workflow name header with Clone/Delete */}
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            marginBottom: 10,
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
+                                <SectionLabel style={{ marginBottom: 0, whiteSpace: 'nowrap' }}>
+                                    {isEditingSaved && store.selectedWorkflow
+                                        ? store.selectedWorkflow.name
+                                        : 'Unsaved'}
                                 </SectionLabel>
-                                {store.selectedWorkflow.description && (
+                                {isEditingSaved && store.selectedWorkflow?.description && (
                                     <span style={{
                                         fontSize: theme.fontSize.xs,
                                         color: theme.textFaint,
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap' as const,
                                     }}>
                                         {store.selectedWorkflow.description}
                                     </span>
                                 )}
+                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint, whiteSpace: 'nowrap' as const }}>
+                                    ({nodes.length} nodes)
+                                </span>
                             </div>
-                        )}
-
-                        <SectionLabel>Workflow Nodes ({nodes.length})</SectionLabel>
+                            {isEditingSaved && (
+                                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                                    <Btn
+                                        className="sg-hover"
+                                        onClick={handleClone}
+                                        style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
+                                    >
+                                        Clone
+                                    </Btn>
+                                    <BtnDanger
+                                        className="sg-danger"
+                                        onClick={handleDelete}
+                                        style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
+                                    >
+                                        Delete
+                                    </BtnDanger>
+                                </div>
+                            )}
+                        </div>
                         {nodes.map((node) => (
                             <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}>
                                 <NodeHeader>
@@ -1212,12 +1235,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                         <BtnSuccess className="sg-hover" onClick={handleSaveDialogOpen}>
                             Save
                         </BtnSuccess>
-                    )}
-                    {isEditingSaved && (
-                        <Btn className="sg-hover" onClick={handleClone}>Clone</Btn>
-                    )}
-                    {isEditingSaved && (
-                        <BtnDanger className="sg-danger" onClick={handleDelete}>Delete</BtnDanger>
                     )}
                 </>
             )}
