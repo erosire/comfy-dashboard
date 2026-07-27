@@ -816,13 +816,27 @@ function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
                     const internalLinkMap = buildLinkMapFromObjects(internalLinks);
 
                     // Rewrite boundary: find external links targeting this subgraph
+                    // Works for both v0.4 (tuples) and v1 (object links)
                     const externalInputByPort = new Map<number, { sourceNodeId: string; sourceSlot: number }>();
+                    // v0.4 tuple format: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]
                     for (const tuple of linkTuples) {
                         if (tuple.length >= 6 && String(tuple[3]) === sgNodeId) {
                             externalInputByPort.set(Number(tuple[4]), {
                                 sourceNodeId: String(tuple[1]),
                                 sourceSlot: Number(tuple[2]),
                             });
+                        }
+                    }
+                    // v1 object format: { target_id, target_slot, origin_id, origin_slot }
+                    if (linkTuples.length === 0 && Array.isArray(raw.links) && raw.links.length > 0) {
+                        const v1Links = raw.links as ComfyLink[];
+                        for (const link of v1Links) {
+                            if (link && typeof link === 'object' && 'target_id' in link && String(link.target_id) === sgNodeId) {
+                                externalInputByPort.set(Number(link.target_slot), {
+                                    sourceNodeId: String(link.origin_id),
+                                    sourceSlot: Number(link.origin_slot),
+                                });
+                            }
                         }
                     }
 
@@ -975,7 +989,44 @@ function renumberNodes(nodes: UINode[]): UINode[] {
             const newSrc = idMap.get(conn.sourceNodeId);
             return newSrc != null ? { ...conn, sourceNodeId: newSrc } : conn;
         });
-        return { ...n, id: idMap.get(n.id)!, connections };
+        // Recursively renumber subgraph internal nodes with parent-prefixed IDs
+        const subgraphNodes = n.subgraphNodes
+            ? renumberSubgraphNodes(n.subgraphNodes, idMap.get(n.id)!, idMap)
+            : undefined;
+        return { ...n, id: idMap.get(n.id)!, connections, subgraphNodes };
+    });
+}
+
+/**
+ * Re-number subgraph internal node IDs with a parent-prefixed scheme.
+ * Internal nodes get IDs like "3-1", "3-2", etc. (where 3 is the parent subgraph ID).
+ * All cross-references between internal nodes are updated accordingly.
+ * References to external nodes (via externalIdMap) are also updated.
+ */
+function renumberSubgraphNodes(
+    internalNodes: UINode[],
+    parentPrefix: string,
+    externalIdMap: Map<string, string>,
+): UINode[] {
+    const internalIdMap = new Map<string, string>();
+    internalNodes.forEach((n, i) => internalIdMap.set(n.id, `${parentPrefix}-${i + 1}`));
+
+    return internalNodes.map((n) => {
+        const connections: UIInputConnection[] = n.connections.map((conn) => {
+            // Check if source is another internal node first
+            const newInternalSrc = internalIdMap.get(conn.sourceNodeId);
+            if (newInternalSrc != null) {
+                return { ...conn, sourceNodeId: newInternalSrc };
+            }
+            // Check if source is an external node (boundary link from subgraph input)
+            const newExternalSrc = externalIdMap.get(conn.sourceNodeId);
+            if (newExternalSrc != null) {
+                return { ...conn, sourceNodeId: newExternalSrc };
+            }
+            // Unknown source — keep as-is
+            return conn;
+        });
+        return { ...n, id: internalIdMap.get(n.id)!, connections };
     });
 }
 
