@@ -21,7 +21,8 @@ import type { WorkflowMeta } from '../api';
 type ComfyNode = {
     id: string;
     class_type: string;
-    inputs: Record<string, unknown>;
+    inputs: Record<string, unknown>;      // linked connection slots: { name: [srcId, slot] }
+    widgets: unknown[];                   // widget values (from widgets_values)
 };
 
 type PodState =
@@ -510,7 +511,7 @@ function renumberNodes(nodes: ComfyNode[]): ComfyNode[] {
                 inputs[key] = val;
             }
         }
-        return { id: idMap.get(n.id)!, class_type: n.class_type, inputs };
+        return { id: idMap.get(n.id)!, class_type: n.class_type, inputs, widgets: n.widgets };
     });
 }
 
@@ -531,61 +532,55 @@ function parseWorkflowJson(raw: Record<string, unknown>): ComfyNode[] {
             const inputDescriptors = Array.isArray(n.inputs) ? n.inputs as Array<Record<string, unknown>> : [];
             const widgetValues = Array.isArray(n.widgets_values) ? n.widgets_values as unknown[] : [];
 
+            // inputs: only store linked connection slots
             const inputs: Record<string, unknown> = {};
-            let widgetIdx = 0;
-
             for (const desc of inputDescriptors) {
                 const name = String(desc.name ?? '');
                 const linkId = desc.link != null ? Number(desc.link) : null;
-
                 if (linkId != null && linkMap.has(linkId)) {
                     const [src, slot] = linkMap.get(linkId)!;
                     inputs[name] = [src, slot];
-                } else if (name && widgetIdx < widgetValues.length) {
-                    inputs[name] = widgetValues[widgetIdx];
-                    widgetIdx++;
                 }
             }
 
-            const extra = widgetValues.slice(widgetIdx);
-            for (let i = 0; i < extra.length; i++) {
-                const key = `widget_${i}`;
-                if (!(key in inputs)) inputs[key] = extra[i];
-            }
-
-            return { id, class_type: classType, inputs };
+            return { id, class_type: classType, inputs, widgets: widgetValues };
         });
     }
 
     // Prompt wrapper: { "prompt": { "3": { "class_type": "...", "inputs": {...} } } }
+    // API format: { "3": { "class_type": "...", "inputs": {...} }, ... }
+    // In both, inputs dict mixes link refs [srcId, slot] and scalar widget values.
+    function parsePromptNode(id: string, node: Record<string, unknown>): ComfyNode | null {
+        if (!(node && typeof node === 'object' && 'class_type' in node)) return null;
+        const rawInputs = (node.inputs as Record<string, unknown>) ?? {};
+        const inputs: Record<string, unknown> = {};
+        const widgets: unknown[] = [];
+        for (const [key, val] of Object.entries(rawInputs)) {
+            if (isLinkRef(val)) {
+                inputs[key] = val;
+            } else {
+                widgets.push(val);
+            }
+        }
+        return { id, class_type: String(node.class_type), inputs, widgets };
+    }
+
     if ('prompt' in raw && typeof raw.prompt === 'object' && raw.prompt !== null) {
         const prompt = raw.prompt as Record<string, unknown>;
         const nodes: ComfyNode[] = [];
         for (const [id, value] of Object.entries(prompt)) {
-            const node = value as Record<string, unknown>;
-            if (node && typeof node === 'object' && 'class_type' in node) {
-                nodes.push({
-                    id,
-                    class_type: String(node.class_type),
-                    inputs: (node.inputs as Record<string, unknown>) ?? {},
-                });
-            }
+            const parsed = parsePromptNode(id, value as Record<string, unknown>);
+            if (parsed) nodes.push(parsed);
         }
         if (nodes.length > 0) return nodes;
     }
 
-    // API format: { "3": { "class_type": "...", "inputs": {...} }, ... }
+    // API format
     const nodes: ComfyNode[] = [];
     for (const [id, value] of Object.entries(raw)) {
         if (id === 'extra' || id === 'config' || id === 'groups' || id === 'links' || id === 'version') continue;
-        const node = value as Record<string, unknown>;
-        if (node && typeof node === 'object' && 'class_type' in node) {
-            nodes.push({
-                id,
-                class_type: String(node.class_type),
-                inputs: (node.inputs as Record<string, unknown>) ?? {},
-            });
-        }
+        const parsed = parsePromptNode(id, value as Record<string, unknown>);
+        if (parsed) nodes.push(parsed);
     }
     return nodes;
 }
@@ -784,16 +779,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     // ── Node editing ─────────────────────────────────────────────────
 
-    const updateNodeInput = React.useCallback((nodeId: string, inputKey: string, rawValue: string) => {
+    const updateNodeWidget = React.useCallback((nodeId: string, widgetIdx: number, rawValue: string) => {
         setNodes((prev) =>
             prev.map((n) => {
                 if (n.id !== nodeId) return n;
-                const original = n.inputs[inputKey];
-                if (isLinkRef(original)) return n;
-                return {
-                    ...n,
-                    inputs: { ...n.inputs, [inputKey]: parseInputValue(rawValue, original) },
-                };
+                const widgets = [...n.widgets];
+                widgets[widgetIdx] = parseInputValue(rawValue, widgets[widgetIdx]);
+                return { ...n, widgets };
             })
         );
     }, []);
@@ -803,10 +795,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     const buildPrompt = React.useCallback((): Record<string, unknown> => {
         const prompt: Record<string, unknown> = {};
         for (const node of nodes) {
-            prompt[node.id] = {
-                class_type: node.class_type,
-                inputs: { ...node.inputs },
-            };
+            // Merge linked inputs with widget values back into the flat inputs dict
+            const inputs: Record<string, unknown> = { ...node.inputs };
+            for (let i = 0; i < node.widgets.length; i++) {
+                inputs[`widget_${i}`] = node.widgets[i];
+            }
+            prompt[node.id] = { class_type: node.class_type, inputs };
         }
         return prompt;
     }, [nodes]);
@@ -814,28 +808,27 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     // Rebuild rawJson from nodes for saving
     const rebuildRawJson = React.useCallback((): Record<string, unknown> => {
         if (rawJson) {
-            // If we have the original raw, update the prompt-style format
             const prompt: Record<string, unknown> = {};
             for (const node of nodes) {
-                prompt[node.id] = {
-                    class_type: node.class_type,
-                    inputs: { ...node.inputs },
-                };
+                const inputs: Record<string, unknown> = { ...node.inputs };
+                for (let i = 0; i < node.widgets.length; i++) {
+                    inputs[`widget_${i}`] = node.widgets[i];
+                }
+                prompt[node.id] = { class_type: node.class_type, inputs };
             }
-            // Return raw with updated prompt if it had prompt wrapper
             if ('prompt' in rawJson) {
                 return { ...rawJson, prompt };
             }
-            // For API format, return the prompt object
             return prompt;
         }
-        // Fallback: build from nodes
+        // Fallback
         const prompt: Record<string, unknown> = {};
         for (const node of nodes) {
-            prompt[node.id] = {
-                class_type: node.class_type,
-                inputs: { ...node.inputs },
-            };
+            const inputs: Record<string, unknown> = { ...node.inputs };
+            for (let i = 0; i < node.widgets.length; i++) {
+                inputs[`widget_${i}`] = node.widgets[i];
+            }
+            prompt[node.id] = { class_type: node.class_type, inputs };
         }
         return prompt;
     }, [rawJson, nodes]);
@@ -1123,30 +1116,29 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                 </NodeHeader>
                                 <NodeInputs>
                                     {Object.entries(node.inputs).map(([key, val]) => {
-                                        if (isLinkRef(val)) {
-                                            return (
-                                                <InputRow key={key}>
-                                                    <InputLabel>{key}</InputLabel>
-                                                    <LinkBadge>→ node {val[0]}[{val[1]}]</LinkBadge>
-                                                </InputRow>
-                                            );
-                                        }
+                                        const link = val as [string, number];
                                         return (
                                             <InputRow key={key}>
                                                 <InputLabel>{key}</InputLabel>
-                                                <InputField
-                                                    type="text"
-                                                    value={displayValue(val)}
-                                                    onChange={(e) => updateNodeInput(node.id, key, e.target.value)}
-                                                    readOnly={isRunning}
-                                                    data-testid={`cloud-input-${node.id}-${key}`}
-                                                />
+                                                <LinkBadge>→ node {link[0]}[{link[1]}]</LinkBadge>
                                             </InputRow>
                                         );
                                     })}
-                                    {Object.keys(node.inputs).length === 0 && (
+                                    {node.widgets.map((val, i) => (
+                                        <InputRow key={`w${i}`}>
+                                            <InputLabel>#{i + 1}</InputLabel>
+                                            <InputField
+                                                type="text"
+                                                value={displayValue(val)}
+                                                onChange={(e) => updateNodeWidget(node.id, i, e.target.value)}
+                                                readOnly={isRunning}
+                                                data-testid={`cloud-widget-${node.id}-${i}`}
+                                            />
+                                        </InputRow>
+                                    ))}
+                                    {Object.keys(node.inputs).length === 0 && node.widgets.length === 0 && (
                                         <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
-                                            No editable inputs
+                                            No inputs
                                         </div>
                                     )}
                                 </NodeInputs>
