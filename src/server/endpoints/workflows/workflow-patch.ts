@@ -8,10 +8,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
-export const workflowPatch = asHandlerMethod(async (request, parameters, variables) => {
+export const workflowPatch = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
     const workflowId = parameters.path.id;
-    const body = request.body as {
+    const body = parameters.body as {
         name?: string;
         description?: string;
         raw?: Record<string, unknown>;
@@ -47,16 +47,47 @@ export const workflowPatch = asHandlerMethod(async (request, parameters, variabl
             existing.raw = body.raw;
 
             const rawNodes = (body.raw as any).nodes;
-            existing.nodes = Array.isArray(rawNodes) ? rawNodes : [];
-            existing.nodeCount = Array.isArray(rawNodes) ? rawNodes.length : 0;
+            let nodeCount = 0;
+            let storedNodes: unknown[] = [];
+            const newTags: string[] = [];
+
+            if (Array.isArray(rawNodes)) {
+                // UI format: { "nodes": [...] }
+                nodeCount = rawNodes.length;
+                storedNodes = rawNodes;
+            } else {
+                // API format: { "3": { class_type, inputs }, ... } or prompt wrapper
+                const promptObj = (body.raw as any).prompt ?? body.raw;
+                if (typeof promptObj === 'object' && promptObj !== null) {
+                    const entries = Object.entries(promptObj).filter(
+                        ([, v]) => v && typeof v === 'object' && 'class_type' in (v as Record<string, unknown>)
+                    );
+                    nodeCount = entries.length;
+                    storedNodes = entries.map(([id, v]) => ({ id, ...(v as Record<string, unknown>) }));
+                }
+            }
+
+            existing.nodes = storedNodes;
+            existing.nodeCount = nodeCount;
 
             // Re-extract tags from node types if tags weren't explicitly provided
-            if (body.tags === undefined && Array.isArray(rawNodes)) {
+            if (body.tags === undefined) {
                 const types = new Set<string>();
-                for (const node of rawNodes) {
-                    if (node.type) types.add(String(node.type).toLowerCase());
+                if (Array.isArray(rawNodes)) {
+                    for (const node of rawNodes) {
+                        if (node.type) types.add(String(node.type).toLowerCase());
+                    }
+                } else {
+                    const promptObj = (body.raw as any).prompt ?? body.raw;
+                    if (typeof promptObj === 'object' && promptObj !== null) {
+                        for (const [, value] of Object.entries(promptObj)) {
+                            const node = value as Record<string, unknown>;
+                            if (node && typeof node === 'object' && 'class_type' in node) {
+                                types.add(String(node.class_type).toLowerCase());
+                            }
+                        }
+                    }
                 }
-                const newTags: string[] = [];
                 let i = 0;
                 for (const t of types) {
                     if (i >= 5) break;

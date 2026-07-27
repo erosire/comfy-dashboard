@@ -7,9 +7,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
-export const workflowCreate = asHandlerMethod(async (request, _, variables) => {
+export const workflowCreate = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
-    const body = request.body as { name?: string; description?: string; raw?: Record<string, unknown> } | undefined;
+    const body = parameters.body as { name?: string; description?: string; raw?: Record<string, unknown> } | undefined;
 
     if (!body?.name) {
         return { status: 400, response: { error: 'name is required' } };
@@ -23,9 +23,24 @@ export const workflowCreate = asHandlerMethod(async (request, _, variables) => {
     const id = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     const now = new Date().toISOString();
 
-    // Count nodes from the raw workflow (ComfyUI format has a `nodes` array or top-level keys)
+    // Count nodes from the raw workflow (handles multiple ComfyUI formats)
+    let nodeCount = 0;
     const rawNodes = (body.raw as any).nodes;
-    const nodeCount = Array.isArray(rawNodes) ? rawNodes.length : 0;
+    if (Array.isArray(rawNodes)) {
+        // UI format: { "nodes": [...] }
+        nodeCount = rawNodes.length;
+    } else {
+        // API format: { "3": { class_type, inputs }, ... } or prompt wrapper
+        const promptObj = (body.raw as any).prompt ?? body.raw;
+        if (typeof promptObj === 'object' && promptObj !== null) {
+            nodeCount = Object.keys(promptObj).filter(
+                (k) => {
+                    const v = promptObj[k];
+                    return v && typeof v === 'object' && 'class_type' in v;
+                }
+            ).length;
+        }
+    }
 
     // Extract tags from node types
     const tags: string[] = [];
@@ -41,6 +56,37 @@ export const workflowCreate = asHandlerMethod(async (request, _, variables) => {
             tags.push(t);
             i++;
         }
+    } else {
+        // API format: extract class_types
+        const promptObj = (body.raw as any).prompt ?? body.raw;
+        if (typeof promptObj === 'object' && promptObj !== null) {
+            const types = new Set<string>();
+            for (const [, value] of Object.entries(promptObj)) {
+                const node = value as Record<string, unknown>;
+                if (node && typeof node === 'object' && 'class_type' in node) {
+                    types.add(String(node.class_type).toLowerCase());
+                }
+            }
+            let i = 0;
+            for (const t of types) {
+                if (i >= 5) break;
+                tags.push(t);
+                i++;
+            }
+        }
+    }
+
+    // Build nodes list for storage (normalize from raw)
+    let storedNodes: unknown[] = [];
+    if (Array.isArray(rawNodes)) {
+        storedNodes = rawNodes;
+    } else {
+        const promptObj = (body.raw as any).prompt ?? body.raw;
+        if (typeof promptObj === 'object' && promptObj !== null) {
+            storedNodes = Object.entries(promptObj)
+                .filter(([, v]) => v && typeof v === 'object' && 'class_type' in (v as Record<string, unknown>))
+                .map(([id, v]) => ({ id, ...(v as Record<string, unknown>) }));
+        }
     }
 
     const workflow = {
@@ -51,7 +97,7 @@ export const workflowCreate = asHandlerMethod(async (request, _, variables) => {
         createdDate: now,
         modifiedDate: now,
         tags,
-        nodes: rawNodes ?? [],
+        nodes: storedNodes,
         raw: body.raw
     };
 
