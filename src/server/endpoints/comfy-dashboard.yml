@@ -1,0 +1,370 @@
+openapi: 3.0.3
+info:
+  title: ComfyUI Dashboard API
+  description: >-
+    API for managing ComfyUI workflows, queue, and server status. Provides
+    CRUD for workflows, queue management for generations, and a health/status
+    endpoint for monitoring the ComfyUI server connection.
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8188
+    description: Local ComfyUI server
+paths:
+  /api/workflows:
+    get:
+      operationId: listWorkflows
+      summary: List all workflows
+      description: >-
+        Returns all stored workflow metadata. Each entry includes id, name,
+        description, nodeCount, timestamps, and tags. Sorted by modifiedDate
+        descending (most recently modified first).
+      tags:
+        - Workflows
+      responses:
+        '200':
+          description: List of all workflows
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkflowListResponse'
+              example:
+                workflows:
+                  - id: wf-001
+                    name: Text-to-Image Basic
+                    description: Simple txt2img workflow
+                    nodeCount: 8
+                    createdDate: '2026-07-01T10:00:00.000Z'
+                    modifiedDate: '2026-07-01T10:00:00.000Z'
+                    tags: [txt2img, basic]
+    post:
+      operationId: createWorkflow
+      summary: Create a new workflow
+      description: >-
+        Uploads a new ComfyUI workflow. Accepts the workflow name, optional
+        description, and the raw ComfyUI workflow JSON. Extracts node
+        information and stores the workflow.
+      tags:
+        - Workflows
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWorkflowRequest'
+      responses:
+        '200':
+          description: Workflow created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateWorkflowResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/workflows/{id}:
+    get:
+      operationId: getWorkflow
+      summary: Get a specific workflow
+      description: >-
+        Returns the full workflow including all nodes and the raw ComfyUI JSON.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetWorkflowResponse'
+        '404':
+          description: Workflow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      operationId: deleteWorkflow
+      summary: Delete a workflow
+      description: Permanently removes a workflow and all its data.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteWorkflowResponse'
+        '404':
+          description: Workflow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/queue:
+    get:
+      operationId: getQueue
+      summary: Get the generation queue
+      description: Returns all items currently in the generation queue.
+      tags:
+        - Queue
+      responses:
+        '200':
+          description: Queue contents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueResponse'
+    post:
+      operationId: queueWorkflow
+      summary: Queue a workflow for generation
+      description: >-
+        Adds a workflow to the generation queue. The workflow will be
+        executed asynchronously.
+      tags:
+        - Queue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueueWorkflowRequest'
+      responses:
+        '200':
+          description: Workflow queued successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueWorkflowResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/queue/{id}:
+    delete:
+      operationId: cancelQueueItem
+      summary: Cancel a queue item
+      description: Removes a pending or running item from the generation queue.
+      tags:
+        - Queue
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Queue item cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelQueueResponse'
+        '404':
+          description: Queue item not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/status:
+    get:
+      operationId: getStatus
+      summary: Get server status
+      description: >-
+        Returns the current server status including connection state, queue
+        size, active jobs, uptime, and version information.
+      tags:
+        - Status
+      responses:
+        '200':
+          description: Server status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerStatusResponse'
+
+components:
+  schemas:
+    WorkflowMeta:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        nodeCount:
+          type: integer
+        createdDate:
+          type: string
+        modifiedDate:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+
+    Workflow:
+      allOf:
+        - $ref: '#/components/schemas/WorkflowMeta'
+        - type: object
+          properties:
+            nodes:
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  type:
+                    type: string
+                  position:
+                    type: object
+                    properties:
+                      x:
+                        type: number
+                      y:
+                        type: number
+                  inputs:
+                    type: object
+            raw:
+              type: object
+              description: The raw ComfyUI workflow JSON
+
+    CreateWorkflowRequest:
+      type: object
+      required:
+        - name
+        - raw
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        raw:
+          type: object
+          description: The raw ComfyUI workflow JSON
+
+    CreateWorkflowResponse:
+      type: object
+      properties:
+        workflow:
+          $ref: '#/components/schemas/WorkflowMeta'
+
+    GetWorkflowResponse:
+      type: object
+      properties:
+        workflow:
+          $ref: '#/components/schemas/Workflow'
+
+    DeleteWorkflowResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        id:
+          type: string
+
+    WorkflowListResponse:
+      type: object
+      properties:
+        workflows:
+          type: array
+          items:
+            $ref: '#/components/schemas/WorkflowMeta'
+
+    QueueItem:
+      type: object
+      properties:
+        id:
+          type: string
+        workflowId:
+          type: string
+        workflowName:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed]
+        queuedAt:
+          type: string
+        startedAt:
+          type: string
+        completedAt:
+          type: string
+        error:
+          type: string
+
+    QueueResponse:
+      type: object
+      properties:
+        queue:
+          type: array
+          items:
+            $ref: '#/components/schemas/QueueItem'
+
+    QueueWorkflowRequest:
+      type: object
+      required:
+        - workflowId
+      properties:
+        workflowId:
+          type: string
+        params:
+          type: object
+          description: Optional generation parameters to override defaults
+
+    QueueWorkflowResponse:
+      type: object
+      properties:
+        id:
+          type: string
+        message:
+          type: string
+
+    CancelQueueResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+
+    ServerStatusResponse:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        queueSize:
+          type: integer
+        activeJobs:
+          type: integer
+        uptime:
+          type: number
+        version:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
