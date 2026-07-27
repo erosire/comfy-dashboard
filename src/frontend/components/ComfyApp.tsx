@@ -1,9 +1,12 @@
 // Main dashboard component for ComfyUI Cloud.
 //
-// Single-screen layout — CloudTab handles everything.
+// Wraps the CloudTab with the DashboardStoreProvider and BootstrapLayer
+// so all workflow state is managed centrally.
 
 import React from 'react';
 import { styled, theme } from '../styles';
+import { DashboardStoreProvider } from '../context';
+import { BootstrapLayer } from './BootstrapLayer';
 import { CloudTab } from './CloudTab';
 
 const FullScreen = styled('div', {
@@ -35,10 +38,13 @@ export type ComfyAppProps = {
 
 export const ComfyApp: React.FC<ComfyAppProps> = React.memo(({ configOverrides }) => {
     return (
-        <FullScreen>
-            <DarkThemeWrapper>
-                <CloudTab baseUrl={configOverrides?.baseUrl} />
-            </DarkThemeWrapper>
-        </FullScreen>
+        <DashboardStoreProvider configOverrides={configOverrides}>
+            <BootstrapLayer />
+            <FullScreen>
+                <DarkThemeWrapper>
+                    <CloudTab baseUrl={configOverrides?.baseUrl} />
+                </DarkThemeWrapper>
+            </FullScreen>
+        </DashboardStoreProvider>
     );
 });

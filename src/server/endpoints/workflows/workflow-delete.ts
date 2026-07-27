@@ -1,4 +1,4 @@
-// Workflow delete endpoint — DELETE /api/workflows/:id
+// Workflow delete endpoint — DELETE /v1/comfy/workflows/:id
 //
 // Permanently removes a workflow file from the database directory.
 

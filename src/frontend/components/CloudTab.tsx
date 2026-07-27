@@ -1,16 +1,19 @@
 // CloudTab — Beam cloud workflow runner.
 //
 // Two-panel layout:
-//   Left sidebar: pod execution log / stream results
+//   Left sidebar: saved workflows list (from store) with search
 //   Right content: workflow editor (drop, edit, submit)
 //
-// Manages all state: workflow nodes, pod lifecycle, prompt execution.
+// Integrates with DashboardStore for CRUD operations on workflows.
+// Manages pod lifecycle and prompt execution for cloud runs.
 
 import React from 'react';
 import { styled, theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
 import { cloudCreate, cloudPrompt, cloudReadNdjson } from '../api/cloud';
+import { useDashboardStore } from '../context';
 import type { CloudStreamEvent } from '../api/cloud';
+import type { WorkflowMeta } from '../api';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -67,6 +70,18 @@ const BtnDanger = styled('button', {
     border: `1px solid ${theme.dangerBorder}`,
     backgroundColor: theme.dangerSoft,
     color: theme.danger,
+    transition: `background-color ${theme.transition}, color ${theme.transition}`,
+});
+
+const BtnSuccess = styled('button', {
+    padding: '5px 14px',
+    fontSize: theme.fontSize.sm,
+    fontWeight: 600,
+    borderRadius: theme.radiusMd,
+    cursor: 'pointer',
+    border: `1px solid rgba(110, 231, 183, 0.35)`,
+    backgroundColor: theme.successSoft,
+    color: theme.success,
     transition: `background-color ${theme.transition}, color ${theme.transition}`,
 });
 
@@ -133,7 +148,7 @@ const HeaderTitle = styled('span', {
     userSelect: 'none' as const,
 });
 
-// ── Styled: left sidebar (results) ────────────────────────────────────
+// ── Styled: left sidebar (workflow list) ─────────────────────────────
 
 const SidebarPanel = styled('div', {
     display: 'flex',
@@ -150,12 +165,35 @@ const SidebarHeader = styled('div', {
     textTransform: 'uppercase' as const,
     letterSpacing: 0.5,
     flex: '0 0 auto',
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+});
+
+const SidebarSearch = styled('div', {
+    padding: '0 12px 8px',
+    flex: '0 0 auto',
+});
+
+const SearchInput = styled('input', {
+    width: '100%',
+    padding: '5px 8px',
+    fontSize: theme.fontSize.xs,
+    fontFamily: theme.fontMono,
+    color: theme.text,
+    backgroundColor: theme.surface3,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm,
+    outline: 'none',
+    boxSizing: 'border-box' as const,
+    transition: `border-color ${theme.transition}`,
 });
 
 const SidebarScroll = styled('div', {
     flex: '1 1 auto',
     overflowY: 'auto',
-    padding: '0 12px 12px',
+    padding: '0 6px 12px',
 });
 
 const EmptyHint = styled('div', {
@@ -166,31 +204,72 @@ const EmptyHint = styled('div', {
     lineHeight: 1.5,
 });
 
-const EventRow = styled('div', {
-    padding: '3px 0',
-    fontSize: theme.fontSize.xs,
-    fontFamily: theme.fontMono,
-    color: theme.textDim,
-    lineHeight: 1.4,
-    borderBottom: `1px solid rgba(255,255,255,0.04)`,
+const WorkflowItem = styled('div', {
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '8px 10px',
+    borderRadius: theme.radiusMd,
+    cursor: 'pointer',
+    transition: `background-color ${theme.transition}, border-color ${theme.transition}`,
+    border: `1px solid transparent`,
+    marginBottom: 2,
 });
 
-const EventOk = styled('div', {
-    padding: '3px 0',
-    fontSize: theme.fontSize.xs,
-    fontFamily: theme.fontMono,
-    color: theme.success,
-    fontWeight: 600,
-    lineHeight: 1.4,
+const WorkflowItemActive = styled('div', {
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '8px 10px',
+    borderRadius: theme.radiusMd,
+    cursor: 'pointer',
+    transition: `background-color ${theme.transition}, border-color ${theme.transition}`,
+    border: `1px solid ${theme.accentRing}`,
+    marginBottom: 2,
+    backgroundColor: theme.accentSoft,
 });
 
-const EventErr = styled('div', {
-    padding: '3px 0',
-    fontSize: theme.fontSize.xs,
-    fontFamily: theme.fontMono,
-    color: theme.danger,
+const WorkflowItemName = styled('div', {
+    fontSize: theme.fontSize.sm,
     fontWeight: 600,
-    lineHeight: 1.4,
+    color: theme.text,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+});
+
+const WorkflowItemMeta = styled('div', {
+    fontSize: theme.fontSize.xs,
+    color: theme.textFaint,
+    marginTop: 2,
+    display: 'flex',
+    flexDirection: 'row',
+    gap: 6,
+    overflow: 'hidden',
+});
+
+const WorkflowItemCount = styled('span', {
+    fontSize: theme.fontSize.xs,
+    color: theme.accent2,
+});
+
+const WorkflowItemDate = styled('span', {
+    fontSize: theme.fontSize.xs,
+    color: theme.textFaint,
+});
+
+const WorkflowItemActions = styled('div', {
+    display: 'flex',
+    flexDirection: 'row',
+    gap: 4,
+    marginTop: 4,
+    opacity: 0,
+    transition: `opacity ${theme.transition}`,
+    // Show on hover of parent
+});
+
+const SidebarCount = styled('span', {
+    fontSize: theme.fontSize.xs,
+    color: theme.textFaint,
+    fontWeight: 400,
 });
 
 // ── Styled: right content (editor) ────────────────────────────────────
@@ -310,6 +389,82 @@ const LinkBadge = styled('span', {
     borderRadius: theme.radiusSm,
     backgroundColor: 'rgba(147, 180, 212, 0.12)',
     border: '1px solid rgba(147, 180, 212, 0.25)',
+});
+
+// ── Styled: save dialog ──────────────────────────────────────────────
+
+const DialogOverlay = styled('div', {
+    position: 'fixed' as const,
+    inset: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+});
+
+const DialogBox = styled('div', {
+    backgroundColor: theme.surface2,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusLg,
+    padding: 20,
+    minWidth: 360,
+    maxWidth: 480,
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+});
+
+const DialogTitle = styled('div', {
+    fontSize: theme.fontSize.lg,
+    fontWeight: 600,
+    color: theme.text,
+});
+
+const DialogField = styled('div', {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+});
+
+const DialogLabel = styled('label', {
+    fontSize: theme.fontSize.sm,
+    fontWeight: 600,
+    color: theme.textDim,
+});
+
+const DialogInput = styled('input', {
+    padding: '6px 10px',
+    fontSize: theme.fontSize.sm,
+    fontFamily: theme.fontSans,
+    color: theme.text,
+    backgroundColor: theme.surface3,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm,
+    outline: 'none',
+    transition: `border-color ${theme.transition}`,
+});
+
+const DialogTextArea = styled('textarea', {
+    padding: '6px 10px',
+    fontSize: theme.fontSize.sm,
+    fontFamily: theme.fontSans,
+    color: theme.text,
+    backgroundColor: theme.surface3,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm,
+    outline: 'none',
+    resize: 'vertical' as const,
+    minHeight: 60,
+    transition: `border-color ${theme.transition}`,
+});
+
+const DialogActions = styled('div', {
+    display: 'flex',
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginTop: 4,
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -453,6 +608,25 @@ function eventSummary(event: CloudStreamEvent): string {
     }
 }
 
+function formatDate(iso: string): string {
+    if (!iso) return '';
+    try {
+        const d = new Date(iso);
+        const now = new Date();
+        const diffMs = now.getTime() - d.getTime();
+        const diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 1) return 'just now';
+        if (diffMins < 60) return `${diffMins}m ago`;
+        const diffHours = Math.floor(diffMins / 60);
+        if (diffHours < 24) return `${diffHours}h ago`;
+        const diffDays = Math.floor(diffHours / 24);
+        if (diffDays < 7) return `${diffDays}d ago`;
+        return d.toLocaleDateString();
+    } catch {
+        return iso;
+    }
+}
+
 // ── Component ──────────────────────────────────────────────────────────
 
 export type CloudTabProps = {
@@ -460,8 +634,19 @@ export type CloudTabProps = {
 };
 
 export const CloudTab: React.FC<CloudTabProps> = React.memo(({
-    baseUrl = '/api',
+    baseUrl = 'http://192.168.8.128:5000/v1/comfy',
 }) => {
+    const {
+        store,
+        createWorkflow,
+        updateWorkflow,
+        deleteWorkflow,
+        cloneWorkflow,
+        selectWorkflow,
+        searchWorkflows,
+        refreshWorkflows,
+    } = useDashboardStore();
+
     const [nodes, setNodes] = React.useState<ComfyNode[]>([]);
     const [rawJson, setRawJson] = React.useState<Record<string, unknown> | null>(null);
     const [fileName, setFileName] = React.useState('');
@@ -475,10 +660,20 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         }
         return true;
     });
+    const [searchText, setSearchText] = React.useState(store.searchQuery);
+    const [saveDialogOpen, setSaveDialogOpen] = React.useState(false);
+    const [saveName, setSaveName] = React.useState('');
+    const [saveDesc, setSaveDesc] = React.useState('');
+    const [saving, setSaving] = React.useState(false);
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const fileInputRef = React.useRef<HTMLInputElement>(null);
+    const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
+
+    // Determine if we're editing a saved workflow (loaded from sidebar)
+    const editingWorkflowId = store.selectedId;
+    const isEditingSaved = editingWorkflowId !== null && rawJson !== null;
 
     // Auto-scroll results sidebar
     React.useEffect(() => {
@@ -486,6 +681,37 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
             sidebarScrollRef.current.scrollTop = sidebarScrollRef.current.scrollHeight;
         }
     }, [run]);
+
+    // Debounced search
+    const handleSearchChange = React.useCallback((value: string) => {
+        setSearchText(value);
+        if (searchDebounceRef.current) {
+            clearTimeout(searchDebounceRef.current);
+        }
+        searchDebounceRef.current = setTimeout(() => {
+            searchWorkflows(value);
+        }, 300);
+    }, [searchWorkflows]);
+
+    // ── Load a saved workflow from sidebar ───────────────────────────
+
+    const handleLoadWorkflow = React.useCallback((wf: WorkflowMeta) => {
+        selectWorkflow(wf.id);
+        // We need to fetch full workflow to get raw JSON
+        // selectWorkflow already loads the full workflow into store.selectedWorkflow
+    }, [selectWorkflow]);
+
+    // When selectedWorkflow changes, parse its raw JSON into nodes
+    React.useEffect(() => {
+        const full = store.selectedWorkflow;
+        if (full && full.raw) {
+            setRawJson(full.raw);
+            setNodes(parseWorkflowJson(full.raw));
+            setFileName(`${full.name}.json`);
+            setPod({ status: 'idle' });
+            setRun({ status: 'idle' });
+        }
+    }, [store.selectedWorkflow]);
 
     // ── File handling ────────────────────────────────────────────────
 
@@ -499,12 +725,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 setFileName(file.name);
                 setPod({ status: 'idle' });
                 setRun({ status: 'idle' });
+                // Deselect any saved workflow since this is new unsaved content
+                if (editingWorkflowId) {
+                    selectWorkflow(null);
+                }
             } catch {
                 alert('Invalid JSON file');
             }
         };
         reader.readAsText(file);
-    }, []);
+    }, [editingWorkflowId, selectWorkflow]);
 
     const handleDrop = React.useCallback((e: React.DragEvent) => {
         e.preventDefault();
@@ -546,11 +776,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 setFileName('pasted.json');
                 setPod({ status: 'idle' });
                 setRun({ status: 'idle' });
+                // Deselect saved workflow
+                if (editingWorkflowId) {
+                    selectWorkflow(null);
+                }
             } catch {
                 alert('Invalid JSON');
             }
         }
-    }, []);
+    }, [editingWorkflowId, selectWorkflow]);
 
     // ── Node editing ─────────────────────────────────────────────────
 
@@ -580,6 +814,112 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         }
         return prompt;
     }, [nodes]);
+
+    // Rebuild rawJson from nodes for saving
+    const rebuildRawJson = React.useCallback((): Record<string, unknown> => {
+        if (rawJson) {
+            // If we have the original raw, update the prompt-style format
+            const prompt: Record<string, unknown> = {};
+            for (const node of nodes) {
+                prompt[node.id] = {
+                    class_type: node.class_type,
+                    inputs: { ...node.inputs },
+                };
+            }
+            // Return raw with updated prompt if it had prompt wrapper
+            if ('prompt' in rawJson) {
+                return { ...rawJson, prompt };
+            }
+            // For API format, return the prompt object
+            return prompt;
+        }
+        // Fallback: build from nodes
+        const prompt: Record<string, unknown> = {};
+        for (const node of nodes) {
+            prompt[node.id] = {
+                class_type: node.class_type,
+                inputs: { ...node.inputs },
+            };
+        }
+        return prompt;
+    }, [rawJson, nodes]);
+
+    // ── Save / Update workflow ───────────────────────────────────────
+
+    const handleSaveDialogOpen = React.useCallback(() => {
+        if (isEditingSaved && store.selectedWorkflow) {
+            // Pre-fill with existing workflow data
+            setSaveName(store.selectedWorkflow.name);
+            setSaveDesc(store.selectedWorkflow.description ?? '');
+        } else {
+            // New workflow — suggest name from filename
+            const suggestedName = fileName.replace(/\.json$/i, '') || 'Untitled Workflow';
+            setSaveName(suggestedName);
+            setSaveDesc('');
+        }
+        setSaveDialogOpen(true);
+    }, [isEditingSaved, store.selectedWorkflow, fileName]);
+
+    const handleSaveConfirm = React.useCallback(async () => {
+        if (!saveName.trim() || nodes.length === 0) return;
+        setSaving(true);
+        try {
+            const raw = rebuildRawJson();
+            if (isEditingSaved && editingWorkflowId) {
+                // Update existing
+                await updateWorkflow(editingWorkflowId, {
+                    name: saveName.trim(),
+                    description: saveDesc.trim() || undefined,
+                    raw,
+                });
+            } else {
+                // Create new
+                const created = await createWorkflow({
+                    name: saveName.trim(),
+                    description: saveDesc.trim() || undefined,
+                    raw,
+                });
+                // Select the newly created workflow
+                selectWorkflow(created.id);
+            }
+            setSaveDialogOpen(false);
+        } catch (err: any) {
+            alert(`Failed to save: ${err.message ?? String(err)}`);
+        } finally {
+            setSaving(false);
+        }
+    }, [saveName, saveDesc, nodes, rebuildRawJson, isEditingSaved, editingWorkflowId, updateWorkflow, createWorkflow, selectWorkflow]);
+
+    // ── Clone workflow ───────────────────────────────────────────────
+
+    const handleClone = React.useCallback(async () => {
+        if (!editingWorkflowId) return;
+        try {
+            const cloned = await cloneWorkflow(editingWorkflowId);
+            // Select the clone
+            selectWorkflow(cloned.id);
+        } catch (err: any) {
+            alert(`Failed to clone: ${err.message ?? String(err)}`);
+        }
+    }, [editingWorkflowId, cloneWorkflow, selectWorkflow]);
+
+    // ── Delete workflow ──────────────────────────────────────────────
+
+    const handleDelete = React.useCallback(async () => {
+        if (!editingWorkflowId) return;
+        if (!confirm('Delete this workflow permanently?')) return;
+        try {
+            await deleteWorkflow(editingWorkflowId);
+            // Clear editor
+            setNodes([]);
+            setRawJson(null);
+            setFileName('');
+            setPod({ status: 'idle' });
+            setRun({ status: 'idle' });
+        } catch (err: any) {
+            alert(`Failed to delete: ${err.message ?? String(err)}`);
+        }
+    }, [editingWorkflowId, deleteWorkflow]);
 
     // ── Pod spawning ─────────────────────────────────────────────────
 
@@ -635,68 +975,102 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         setFileName('');
         setPod({ status: 'idle' });
         setRun({ status: 'idle' });
-    }, []);
+        selectWorkflow(null);
+    }, [selectWorkflow]);
 
     // ── Derived ──────────────────────────────────────────────────────
 
     const isRunning = run.status === 'running';
     const hasEvents = 'events' in run && run.events.length > 0;
+    const hasUnsavedChanges = nodes.length > 0 && !isEditingSaved;
 
-    // Pod status badge for header
-    const podStatusBadge = (() => {
-        if (pod.status === 'spawning') {
-            return <Badge><SpinnerEl /> Spawning...</Badge>;
-        }
-        if (pod.status === 'ready') {
-            return (
-                <Badge style={{ marginLeft: 8 }}>
-                    <BadgeDot style={{ backgroundColor: theme.success }} />
-                    Pod ready
-                </Badge>
-            );
-        }
-        if (pod.status === 'error') {
-            return (
-                <Badge style={{ marginLeft: 8, color: theme.danger }}>
-                    <BadgeDot style={{ backgroundColor: theme.danger }} />
-                    {pod.message}
-                </Badge>
-            );
-        }
-        return null;
-    })();
-
-    // ── Sidebar: results panel ───────────────────────────────────────
+    // ── Sidebar: workflow list panel ────────────────────────────────
 
     const sidebar = (
         <SidebarPanel>
-            <SidebarHeader>Results</SidebarHeader>
-            <SidebarScroll ref={sidebarScrollRef} className="sg-scroll">
-                {!hasEvents && run.status === 'idle' && (
+            <SidebarHeader>
+                <span>Workflows <SidebarCount>({store.workflows.length})</SidebarCount></span>
+            </SidebarHeader>
+            <SidebarSearch>
+                <SearchInput
+                    type="text"
+                    placeholder="Search workflows..."
+                    value={searchText}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    data-testid="workflow-search"
+                />
+            </SidebarSearch>
+            <SidebarScroll ref={sidebarScrollRef} className="sg-scroll" data-testid="workflow-list">
+                {store.workflows.length === 0 && (
                     <EmptyHint>
-                        Spawn a pod and submit a workflow to see execution results here.
+                        {searchText
+                            ? 'No workflows match your search.'
+                            : 'No saved workflows yet.\nDrop a JSON file and save it.'}
                     </EmptyHint>
                 )}
-                {hasEvents && run.events.map((ev: CloudStreamEvent, i: number) => {
-                    if (ev.type === 'execution_success' || ev.type === 'proxy_done') {
-                        return <EventOk key={i}>{eventSummary(ev)}</EventOk>;
-                    }
-                    if (ev.type === 'execution_error' || ev.type === 'proxy_error' || ev.type === 'execution_interrupted') {
-                        return <EventErr key={i}>{eventSummary(ev)}</EventErr>;
-                    }
-                    return <EventRow key={i}>{eventSummary(ev)}</EventRow>;
+                {store.workflows.map((wf) => {
+                    const isActive = wf.id === editingWorkflowId;
+                    const Item = isActive ? WorkflowItemActive : WorkflowItem;
+                    return (
+                        <Item
+                            key={wf.id}
+                            onClick={() => handleLoadWorkflow(wf)}
+                            data-testid={`workflow-item-${wf.id}`}
+                            style={isActive ? {} : undefined}
+                            className={(isActive ? '' : '')}
+                        >
+                            <WorkflowItemName>{wf.name}</WorkflowItemName>
+                            <WorkflowItemMeta>
+                                <WorkflowItemCount>{wf.nodeCount} nodes</WorkflowItemCount>
+                                <WorkflowItemDate>{formatDate(wf.modifiedDate)}</WorkflowItemDate>
+                            </WorkflowItemMeta>
+                            {wf.tags && wf.tags.length > 0 && (
+                                <div style={{
+                                    display: 'flex',
+                                    gap: 3,
+                                    marginTop: 3,
+                                    flexWrap: 'wrap' as const,
+                                }}>
+                                    {wf.tags.slice(0, 3).map((tag) => (
+                                        <span
+                                            key={tag}
+                                            style={{
+                                                fontSize: theme.fontSize.xs,
+                                                color: theme.accent2,
+                                                padding: '1px 5px',
+                                                borderRadius: theme.radiusSm,
+                                                backgroundColor: 'rgba(147, 180, 212, 0.08)',
+                                                border: '1px solid rgba(147, 180, 212, 0.15)',
+                                            }}
+                                        >
+                                            {tag}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {isActive && (
+                                <WorkflowItemActions style={{ opacity: 1 }}>
+                                    <Btn
+                                        className="sg-hover"
+                                        onClick={(e) => { e.stopPropagation(); handleClone(); }}
+                                        style={{ padding: '2px 8px', fontSize: theme.fontSize.xs }}
+                                        title="Clone workflow"
+                                    >
+                                        Clone
+                                    </Btn>
+                                    <BtnDanger
+                                        className="sg-danger"
+                                        onClick={(e) => { e.stopPropagation(); handleDelete(); }}
+                                        style={{ padding: '2px 8px', fontSize: theme.fontSize.xs }}
+                                        title="Delete workflow"
+                                    >
+                                        Delete
+                                    </BtnDanger>
+                                </WorkflowItemActions>
+                            )}
+                        </Item>
+                    );
                 })}
-                {isRunning && (
-                    <EventRow style={{ color: theme.accent }}>
-                        <SpinnerEl /> Waiting for events...
-                    </EventRow>
-                )}
-                {run.status === 'done' && (
-                    <EventOk>✓ Stream complete</EventOk>
-                )}
-                {run.status === 'error' && (
-                    <EventErr>✗ {run.message}</EventErr>
-                )}
             </SidebarScroll>
         </SidebarPanel>
     );
@@ -728,6 +1102,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                     <DropHint>
                         Drag & drop a .json file, or click to browse.
                     </DropHint>
+                    {isEditingSaved && (
+                        <DropHint style={{ marginTop: 8, color: theme.accent }}>
+                            Currently editing: {store.selectedWorkflow?.name}
+                        </DropHint>
+                    )}
                 </EditorAreaEmpty>
             )}
 
@@ -749,6 +1128,30 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                 <DropTitle style={{ fontSize: theme.fontSize.body }}>Drop to replace workflow</DropTitle>
                             </EditorAreaEmpty>
                         )}
+
+                        {/* Workflow name badge when editing a saved workflow */}
+                        {isEditingSaved && store.selectedWorkflow && (
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                padding: '6px 0',
+                                marginBottom: 4,
+                            }}>
+                                <SectionLabel style={{ marginBottom: 0 }}>
+                                    {store.selectedWorkflow.name}
+                                </SectionLabel>
+                                {store.selectedWorkflow.description && (
+                                    <span style={{
+                                        fontSize: theme.fontSize.xs,
+                                        color: theme.textFaint,
+                                    }}>
+                                        {store.selectedWorkflow.description}
+                                    </span>
+                                )}
+                            </div>
+                        )}
+
                         <SectionLabel>Workflow Nodes ({nodes.length})</SectionLabel>
                         {nodes.map((node) => (
                             <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}>
@@ -796,14 +1199,42 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     // ── Footer: action bar ───────────────────────────────────────────
 
     const footer = (
-        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
             <Btn className="sg-hover" onClick={handleFileInput}>Load JSON</Btn>
             <Btn className="sg-hover" onClick={handlePaste}>Paste JSON</Btn>
+            {nodes.length > 0 && (
+                <>
+                    {isEditingSaved ? (
+                        <BtnSuccess className="sg-hover" onClick={handleSaveDialogOpen}>
+                            Update
+                        </BtnSuccess>
+                    ) : (
+                        <BtnSuccess className="sg-hover" onClick={handleSaveDialogOpen}>
+                            Save
+                        </BtnSuccess>
+                    )}
+                    {isEditingSaved && (
+                        <Btn className="sg-hover" onClick={handleClone}>Clone</Btn>
+                    )}
+                    {isEditingSaved && (
+                        <BtnDanger className="sg-danger" onClick={handleDelete}>Delete</BtnDanger>
+                    )}
+                </>
+            )}
             {nodes.length > 0 && (
                 <BtnDanger className="sg-danger" onClick={handleClear}>Clear</BtnDanger>
             )}
             {fileName && (
                 <Badge>{fileName} ({nodes.length} nodes)</Badge>
+            )}
+
+            {/* Run status */}
+            {hasEvents && (
+                <Badge style={{ color: run.status === 'error' ? theme.danger : run.status === 'done' ? theme.success : theme.accent }}>
+                    {run.status === 'running' && <><SpinnerEl /> Running...</>}
+                    {run.status === 'done' && '✓ Done'}
+                    {run.status === 'error' && `✗ Error`}
+                </Badge>
             )}
 
             <div style={{ flex: '1 1 auto' }} />
@@ -856,6 +1287,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 ☰
             </ToggleButton>
             <HeaderTitle>Comfy Dashboard</HeaderTitle>
+            {hasUnsavedChanges && (
+                <Badge style={{ marginLeft: 4, color: theme.warning, borderColor: theme.warningSoft }}>
+                    ● Unsaved
+                </Badge>
+            )}
             {pod.status === 'spawning' && <Badge><SpinnerEl /> Spawning...</Badge>}
             {pod.status === 'ready' && (
                 <Badge style={{ marginLeft: 8 }}>
@@ -869,19 +1305,70 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                     {pod.message}
                 </Badge>
             )}
+            {store.loadWarning && (
+                <Badge style={{ marginLeft: 8, color: theme.warning, borderColor: theme.warningSoft }}>
+                    ⚠ {store.loadWarning}
+                </Badge>
+            )}
         </>
     );
 
     // ── Layout ───────────────────────────────────────────────────────
 
     return (
-        <ComfyDashboard
-            sidebarOpen={sidebarOpen}
-            onOverlayClick={toggleSidebar}
-            headerControls={header}
-            sidebar={sidebar}
-            content={content}
-            footer={footer}
-        />
+        <>
+            <ComfyDashboard
+                sidebarOpen={sidebarOpen}
+                onOverlayClick={toggleSidebar}
+                headerControls={header}
+                sidebar={sidebar}
+                content={content}
+                footer={footer}
+            />
+
+            {/* Save dialog */}
+            {saveDialogOpen && (
+                <DialogOverlay onClick={() => setSaveDialogOpen(false)}>
+                    <DialogBox onClick={(e) => e.stopPropagation()} data-testid="save-dialog">
+                        <DialogTitle>
+                            {isEditingSaved ? 'Update Workflow' : 'Save Workflow'}
+                        </DialogTitle>
+                        <DialogField>
+                            <DialogLabel htmlFor="save-name">Name</DialogLabel>
+                            <DialogInput
+                                id="save-name"
+                                type="text"
+                                value={saveName}
+                                onChange={(e) => setSaveName(e.target.value)}
+                                placeholder="Workflow name"
+                                autoFocus
+                                data-testid="save-name-input"
+                            />
+                        </DialogField>
+                        <DialogField>
+                            <DialogLabel htmlFor="save-desc">Description (optional)</DialogLabel>
+                            <DialogTextArea
+                                id="save-desc"
+                                value={saveDesc}
+                                onChange={(e) => setSaveDesc(e.target.value)}
+                                placeholder="Short description..."
+                                data-testid="save-desc-input"
+                            />
+                        </DialogField>
+                        <DialogActions>
+                            <Btn className="sg-hover" onClick={() => setSaveDialogOpen(false)}>Cancel</Btn>
+                            <BtnPrimary
+                                className="sg-primary"
+                                onClick={handleSaveConfirm}
+                                disabled={saving || !saveName.trim()}
+                                data-testid="save-confirm-btn"
+                            >
+                                {saving ? 'Saving...' : isEditingSaved ? 'Update' : 'Save'}
+                            </BtnPrimary>
+                        </DialogActions>
+                    </DialogBox>
+                </DialogOverlay>
+            )}
+        </>
     );
 });

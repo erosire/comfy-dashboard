@@ -1,4 +1,4 @@
-// Cloud create endpoint — GET /api/cloud/create
+// Cloud create endpoint — GET /v1/comfy/cloud/create
 //
 // Spawns a fresh ComfyUI pod via the Beam spawner (Tier 1) and returns
 // the pod's container_id and public proxy URL to the client.

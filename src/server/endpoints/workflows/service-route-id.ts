@@ -1,13 +1,13 @@
 import { asServiceHandler } from '@underload/service';
 import { workflowGet } from './workflow-get';
-import { workflowCreate } from './workflow-create';
+import { workflowPatch } from './workflow-patch';
 import { workflowDelete } from './workflow-delete';
 
 export default {
-    route: '/api/workflows/:id',
+    route: '/v1/comfy/workflows/:id',
     handler: asServiceHandler({
         GET: workflowGet,
-        POST: workflowCreate,
+        PATCH: workflowPatch,
         DELETE: workflowDelete,
     })
 };

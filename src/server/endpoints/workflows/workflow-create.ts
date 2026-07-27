@@ -1,4 +1,4 @@
-// Workflow create endpoint — POST /api/workflows
+// Workflow create endpoint — POST /v1/comfy/workflows
 //
 // Creates a new workflow entry. Stores the workflow JSON in the database
 // directory. Extracts node count from the raw workflow JSON.

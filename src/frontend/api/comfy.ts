@@ -3,20 +3,21 @@
 // Routes (see src/server/endpoints/comfy-dashboard.yml):
 //
 // Workflow collection:
-//   GET /api/workflows          → { workflows: WorkflowMeta[] }
+//   GET    /v1/comfy/workflows       → { workflows: WorkflowMeta[] }
+//   POST   /v1/comfy/workflows       → { workflow: WorkflowMeta }
 //
 // Workflow detail:
-//   GET /api/workflows/:id      → { workflow: Workflow }
-//   POST /api/workflows         → { workflow: WorkflowMeta }
-//   DELETE /api/workflows/:id   → { success: boolean, id: string }
+//   GET    /v1/comfy/workflows/:id   → { workflow: Workflow }
+//   PATCH  /v1/comfy/workflows/:id   → { workflow: Workflow }
+//   DELETE /v1/comfy/workflows/:id   → { success: boolean, id: string }
 //
 // Queue:
-//   GET /api/queue              → { queue: QueueItem[] }
-//   POST /api/queue             → { id: string, message: string }
-//   DELETE /api/queue/:id       → { success: boolean }
+//   GET /v1/comfy/queue              → { queue: QueueItem[] }
+//   POST /v1/comfy/queue             → { id: string, message: string }
+//   DELETE /v1/comfy/queue/:id       → { success: boolean }
 //
 // Status:
-//   GET /api/status             → { status: ServerStatus }
+//   GET /v1/comfy/status             → { status: ServerStatus }
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -63,9 +64,17 @@ export type ServerStatus = {
 
 // ── API Functions ──────────────────────────────────────────────────────
 
-// Fetch the list of all workflows.
-export async function fetchWorkflows(baseUrl: string): Promise<{ workflows: WorkflowMeta[] }> {
-    const response = await fetch(baseUrl);
+// Fetch the list of all workflows, optionally filtered by search query.
+export async function fetchWorkflows(
+    baseUrl: string,
+    options?: { query?: string }
+): Promise<{ workflows: WorkflowMeta[] }> {
+    let url = baseUrl;
+    if (options?.query && options.query.trim()) {
+        const params = new URLSearchParams({ q: options.query });
+        url = `${baseUrl}?${params.toString()}`;
+    }
+    const response = await fetch(url);
     if (!response.ok) {
         let message = `Failed to list workflows (HTTP ${response.status})`;
         try {
@@ -112,6 +121,29 @@ export async function createWorkflow(
         throw new Error(message);
     }
     return (await response.json()) as { workflow: WorkflowMeta };
+}
+
+// Update (patch) an existing workflow.
+export async function updateWorkflow(
+    baseUrl: string,
+    id: string,
+    body: { name?: string; description?: string; raw?: Record<string, unknown>; tags?: string[] }
+): Promise<{ workflow: Workflow }> {
+    const url = `${baseUrl}/${encodeURIComponent(id)}`;
+    const response = await fetch(url, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+        let message = `Failed to update workflow (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    return (await response.json()) as { workflow: Workflow };
 }
 
 // Delete a workflow.

@@ -1,4 +1,4 @@
-// Workflow detail endpoint — GET /api/workflows/:id
+// Workflow detail endpoint — GET /v1/comfy/workflows/:id
 //
 // Returns the full workflow including nodes and raw JSON.
 

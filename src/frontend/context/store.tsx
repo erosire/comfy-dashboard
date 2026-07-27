@@ -4,8 +4,16 @@
 // Uses plain React context + useState (same pattern as the story-generator).
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { deleteWorkflow as deleteWorkflowApi, fetchWorkflows, fetchQueue, fetchStatus } from '../api';
-import type { WorkflowMeta, QueueItem, ServerStatus } from '../api';
+import {
+    deleteWorkflow as deleteWorkflowApi,
+    fetchWorkflows,
+    fetchWorkflow,
+    createWorkflow as createWorkflowApi,
+    updateWorkflow as updateWorkflowApi,
+    fetchQueue,
+    fetchStatus
+} from '../api';
+import type { WorkflowMeta, Workflow, QueueItem, ServerStatus } from '../api';
 
 // ── localStorage helpers ──────────────────────────────────────────────
 const STORAGE_KEY_WORKFLOWS = 'comfyDashboard:workflows';
@@ -70,6 +78,8 @@ export const scheduleSaveWorkflowsToStorage = (workflows: WorkflowMeta[]): void 
 export type DashboardStore = {
     workflows: WorkflowMeta[];
     selectedId: string | null;
+    selectedWorkflow: Workflow | null;
+    searchQuery: string;
     queue: QueueItem[];
     status: ServerStatus | null;
     config: {
@@ -82,14 +92,19 @@ export type DashboardStore = {
 type DashboardStoreContextValue = {
     store: DashboardStore;
     setStore: (updater: (prev: DashboardStore) => DashboardStore) => void;
+    createWorkflow: (body: { name: string; description?: string; raw: Record<string, unknown> }) => Promise<WorkflowMeta>;
+    updateWorkflow: (id: string, body: { name?: string; description?: string; raw?: Record<string, unknown>; tags?: string[] }) => Promise<Workflow>;
     deleteWorkflow: (id: string) => Promise<void>;
+    cloneWorkflow: (id: string) => Promise<WorkflowMeta>;
+    selectWorkflow: (id: string | null) => Promise<void>;
+    searchWorkflows: (query: string) => Promise<void>;
     refreshWorkflows: () => Promise<void>;
     refreshQueue: () => Promise<void>;
     refreshStatus: () => Promise<void>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
-    baseUrl: 'http://127.0.0.1:8188/api',
+    baseUrl: 'http://192.168.8.128:5000/v1/comfy',
     pollIntervalMs: 5000
 };
 
@@ -103,6 +118,8 @@ export const DashboardStoreProvider: React.FC<{
     const [store, setStoreState] = useState<DashboardStore>(() => ({
         workflows: initialStore?.workflows ?? loadWorkflowsFromStorage(),
         selectedId: initialStore?.selectedId ?? loadSelectedIdFromStorage(),
+        selectedWorkflow: initialStore?.selectedWorkflow ?? null,
+        searchQuery: initialStore?.searchQuery ?? '',
         queue: initialStore?.queue ?? [],
         status: initialStore?.status ?? null,
         config: { ...DEFAULT_CONFIG, ...configOverrides }
@@ -158,20 +175,118 @@ export const DashboardStoreProvider: React.FC<{
         }
     }, [store.config.baseUrl, setStore]);
 
+    const createWorkflow = useCallback(
+        async (body: { name: string; description?: string; raw: Record<string, unknown> }) => {
+            const { workflow } = await createWorkflowApi(`${store.config.baseUrl}/workflows`, body);
+            setStore((prev) => ({
+                ...prev,
+                workflows: [workflow, ...prev.workflows]
+            }));
+            return workflow;
+        },
+        [store.config.baseUrl, setStore]
+    );
+
+    const updateWorkflow = useCallback(
+        async (id: string, body: { name?: string; description?: string; raw?: Record<string, unknown>; tags?: string[] }) => {
+            const { workflow } = await updateWorkflowApi(`${store.config.baseUrl}/workflows`, id, body);
+            setStore((prev) => ({
+                ...prev,
+                workflows: prev.workflows.map((w) =>
+                    w.id === id
+                        ? {
+                              id: workflow.id,
+                              name: workflow.name,
+                              description: workflow.description,
+                              nodeCount: workflow.nodeCount,
+                              createdDate: workflow.createdDate,
+                              modifiedDate: workflow.modifiedDate,
+                              tags: workflow.tags
+                          }
+                        : w
+                ),
+                selectedWorkflow: prev.selectedId === id ? workflow : prev.selectedWorkflow
+            }));
+            return workflow;
+        },
+        [store.config.baseUrl, setStore]
+    );
+
     const deleteWorkflow = useCallback(
         async (id: string) => {
             await deleteWorkflowApi(`${store.config.baseUrl}/workflows`, id);
             setStore((prev) => ({
                 ...prev,
                 workflows: prev.workflows.filter((w) => w.id !== id),
-                selectedId: prev.selectedId === id ? null : prev.selectedId
+                selectedId: prev.selectedId === id ? null : prev.selectedId,
+                selectedWorkflow: prev.selectedId === id ? null : prev.selectedWorkflow
             }));
         },
         [store.config.baseUrl, setStore]
     );
 
+    const cloneWorkflow = useCallback(
+        async (id: string) => {
+            // Fetch the full workflow, then create a new one with "(Copy)" suffix
+            const { workflow: full } = await fetchWorkflow(`${store.config.baseUrl}/workflows`, id);
+            const { workflow: cloned } = await createWorkflowApi(`${store.config.baseUrl}/workflows`, {
+                name: `${full.name} (Copy)`,
+                description: full.description,
+                raw: full.raw
+            });
+            setStore((prev) => ({
+                ...prev,
+                workflows: [cloned, ...prev.workflows]
+            }));
+            return cloned;
+        },
+        [store.config.baseUrl, setStore]
+    );
+
+    const selectWorkflow = useCallback(
+        async (id: string | null) => {
+            setStore((prev) => ({ ...prev, selectedId: id }));
+            if (!id) {
+                setStore((prev) => ({ ...prev, selectedWorkflow: null }));
+                return;
+            }
+            try {
+                const { workflow } = await fetchWorkflow(`${store.config.baseUrl}/workflows`, id);
+                setStore((prev) => ({ ...prev, selectedWorkflow: workflow }));
+            } catch {
+                // Failed to load workflow detail
+            }
+        },
+        [store.config.baseUrl, setStore]
+    );
+
+    const searchWorkflows = useCallback(
+        async (query: string) => {
+            setStore((prev) => ({ ...prev, searchQuery: query }));
+            try {
+                const { workflows } = await fetchWorkflows(`${store.config.baseUrl}/workflows`, { query });
+                setStore((prev) => ({ ...prev, workflows, loadWarning: undefined }));
+            } catch {
+                // Search failures are non-fatal
+            }
+        },
+        [store.config.baseUrl, setStore]
+    );
+
     return (
-        <DashboardStoreContext.Provider value={{ store, setStore, deleteWorkflow, refreshWorkflows, refreshQueue, refreshStatus }}>
+        <DashboardStoreContext.Provider value={{
+            store,
+            setStore,
+            createWorkflow,
+            updateWorkflow,
+            deleteWorkflow,
+            cloneWorkflow,
+            selectWorkflow,
+            searchWorkflows,
+            refreshWorkflows,
+            refreshQueue,
+            refreshStatus
+        }}>
             {children}
         </DashboardStoreContext.Provider>
     );

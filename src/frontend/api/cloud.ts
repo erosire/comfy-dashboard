@@ -3,8 +3,8 @@
 // Routes (see src/server/endpoints/comfy-dashboard.yml):
 //
 // Cloud:
-//   GET  /api/cloud/create     → { container_id, pod_url }
-//   POST /api/cloud/prompt     → NDJSON stream (raw Response)
+//   GET  /v1/comfy/cloud/create     → { container_id, pod_url }
+//   POST /v1/comfy/cloud/prompt     → NDJSON stream (raw Response)
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -13,7 +13,7 @@ export type CloudCreateResult = {
     pod_url: string;
 };
 
-/** A single line in the NDJSON stream from POST /api/cloud/prompt. */
+/** A single line in the NDJSON stream from POST /v1/comfy/cloud/prompt. */
 export type CloudStreamEvent = {
     type: string;
     data: Record<string, unknown>;

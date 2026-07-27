@@ -1,4 +1,4 @@
-// Cloud prompt endpoint — POST /api/cloud/prompt
+// Cloud prompt endpoint — POST /v1/comfy/cloud/prompt
 //
 // Sends a ComfyUI workflow payload to a spawned pod (Tier 2) and streams
 // the NDJSON response back to the client over HTTPS.

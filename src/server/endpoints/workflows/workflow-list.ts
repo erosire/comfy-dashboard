@@ -1,8 +1,11 @@
-// Workflow list endpoint — GET /api/workflows
+// Workflow list endpoint — GET /v1/comfy/workflows
 //
 // Returns all stored workflows from the local workflow database directory.
 // Each entry is a JSON file under temporary/database/comfy-workflows/.
 // Sorted by modifiedDate descending (newest first).
+//
+// Supports optional query parameter:
+//   ?q=<search>  — free-text search matching name, description, and tags
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,9 +21,10 @@ type WorkflowMeta = {
     tags?: string[];
 };
 
-export const workflowList = asHandlerMethod(async (_, __, variables) => {
+export const workflowList = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
     const databaseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
+    const searchQuery: string | undefined = parameters.query?.q;
 
     if (!fs.existsSync(databaseDir)) {
         return { status: 200, response: { workflows: [] } };
@@ -36,7 +40,7 @@ export const workflowList = asHandlerMethod(async (_, __, variables) => {
             const raw = fs.readFileSync(path.join(databaseDir, entry.name), 'utf-8');
             const data = JSON.parse(raw);
 
-            workflows.push({
+            const meta: WorkflowMeta = {
                 id: data.id ?? entry.name.replace('.json', ''),
                 name: data.name ?? 'Untitled Workflow',
                 description: data.description,
@@ -44,7 +48,18 @@ export const workflowList = asHandlerMethod(async (_, __, variables) => {
                 createdDate: data.createdDate ?? '',
                 modifiedDate: data.modifiedDate ?? '',
                 tags: Array.isArray(data.tags) ? data.tags : []
-            });
+            };
+
+            // Apply search filter if query is provided
+            if (searchQuery && searchQuery.trim()) {
+                const q = searchQuery.toLowerCase();
+                const nameMatch = meta.name.toLowerCase().includes(q);
+                const descMatch = (meta.description ?? '').toLowerCase().includes(q);
+                const tagMatch = (meta.tags ?? []).some((t) => t.toLowerCase().includes(q));
+                if (!nameMatch && !descMatch && !tagMatch) continue;
+            }
+
+            workflows.push(meta);
         } catch {
             // Skip corrupted files
         }

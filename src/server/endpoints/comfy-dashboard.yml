@@ -10,7 +10,7 @@ servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
   - url: https://comfy-spawner.beam.cloud
-    description: Beam ComfyUI spawner (Tier 1 — used by /api/cloud/create)
+    description: Beam ComfyUI spawner (Tier 1 — used by /v1/comfy/cloud/create)
 tags:
   - name: Workflows
     description: CRUD for ComfyUI workflows
@@ -21,16 +21,26 @@ tags:
   - name: Cloud
     description: Beam cloud pod management - spawn pods and submit prompts
 paths:
-  /api/workflows:
+  /v1/comfy/workflows:
     get:
       operationId: listWorkflows
       summary: List all workflows
       description: >-
-        Returns all stored workflow metadata. Each entry includes id, name,
+        Returns stored workflow metadata, optionally filtered by search query
+        (matches name, description, or tags). Each entry includes id, name,
         description, nodeCount, timestamps, and tags. Sorted by modifiedDate
         descending (most recently modified first).
       tags:
         - Workflows
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: >-
+            Free-text search query. Matches against workflow name, description,
+            and tags (case-insensitive substring match).
+          schema:
+            type: string
       responses:
         '200':
           description: List of all workflows
@@ -76,7 +86,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/workflows/{id}:
+  /v1/comfy/workflows/{id}:
     get:
       operationId: getWorkflow
       summary: Get a specific workflow
@@ -97,6 +107,40 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetWorkflowResponse'
+        '404':
+          description: Workflow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    patch:
+      operationId: updateWorkflow
+      summary: Update a workflow
+      description: >-
+        Partially updates an existing workflow. Accepts any combination of
+        name, description, and raw workflow JSON. Only provided fields are
+        updated; omitted fields retain their current values.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWorkflowRequest'
+      responses:
+        '200':
+          description: Workflow updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateWorkflowResponse'
         '404':
           description: Workflow not found
           content:
@@ -129,7 +173,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/queue:
+  /v1/comfy/queue:
     get:
       operationId: getQueue
       summary: Get the generation queue
@@ -171,7 +215,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/queue/{id}:
+  /v1/comfy/queue/{id}:
     delete:
       operationId: cancelQueueItem
       summary: Cancel a queue item
@@ -198,7 +242,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/status:
+  /v1/comfy/status:
     get:
       operationId: getStatus
       summary: Get server status
@@ -215,7 +259,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ServerStatusResponse'
 
-  /api/cloud/create:
+  /v1/comfy/cloud/create:
     get:
       operationId: cloudCreate
       summary: Spawn a new ComfyUI pod on Beam
@@ -247,7 +291,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/cloud/prompt:
+  /v1/comfy/cloud/prompt:
     post:
       operationId: cloudPrompt
       summary: Send a workflow to a spawned pod and stream results
@@ -420,6 +464,35 @@ components:
         id:
           type: string
 
+    UpdateWorkflowRequest:
+      type: object
+      description: >-
+        Partial update for an existing workflow. Only include fields that
+        should change; omitted fields retain their current values.
+      properties:
+        name:
+          type: string
+          description: New name for the workflow.
+        description:
+          type: string
+          description: New description for the workflow.
+        raw:
+          type: object
+          description: >-
+            Updated raw ComfyUI workflow JSON. When provided, the node list
+            and nodeCount are re-extracted from this object.
+        tags:
+          type: array
+          items:
+            type: string
+          description: Replacement tag list.
+
+    UpdateWorkflowResponse:
+      type: object
+      properties:
+        workflow:
+          $ref: '#/components/schemas/Workflow'
+
     WorkflowListResponse:
       type: object
       properties:
@@ -516,7 +589,7 @@ components:
           format: uri
           description: >-
             Public URL of the spawned pod's Tier 2 API proxy.
-            Use this URL for subsequent POST /api/cloud/prompt calls.
+            Use this URL for subsequent POST /v1/comfy/cloud/prompt calls.
           example: https://test-pod-abc123.beam.cloud:8188
       required: [container_id, pod_url]
 
@@ -550,7 +623,7 @@ components:
     CloudPromptStreamEvent:
       type: object
       description: >-
-        One line in the NDJSON stream returned by POST /api/cloud/prompt.
+        One line in the NDJSON stream returned by POST /v1/comfy/cloud/prompt.
         Every event is {"type": "<EventType>", "data": <event-specific>}.
       properties:
         type:
