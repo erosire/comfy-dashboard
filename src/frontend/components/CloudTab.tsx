@@ -237,34 +237,10 @@ const WorkflowItemName = styled('div')({
     whiteSpace: 'nowrap' as const,
 });
 
-const WorkflowItemMeta = styled('div')({
-    fontSize: theme.fontSize.xs,
-    color: theme.textFaint,
-    marginTop: 2,
-    display: 'flex',
-    flexDirection: 'row',
-    gap: 6,
-    overflow: 'hidden',
-});
-
 const WorkflowItemCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.accent2,
-});
-
-const WorkflowItemDate = styled('span')({
-    fontSize: theme.fontSize.xs,
-    color: theme.textFaint,
-});
-
-const WorkflowItemActions = styled('div')({
-    display: 'flex',
-    flexDirection: 'row',
-    gap: 4,
-    marginTop: 4,
-    opacity: 0,
-    transition: `opacity ${theme.transition}`,
-    // Show on hover of parent
+    fontWeight: 400,
 });
 
 const SidebarCount = styled('span')({
@@ -605,25 +581,6 @@ function eventSummary(event: CloudStreamEvent): string {
             return `◉ Binary preview frame`;
         default:
             return `${event.type}`;
-    }
-}
-
-function formatDate(iso: string): string {
-    if (!iso) return '';
-    try {
-        const d = new Date(iso);
-        const now = new Date();
-        const diffMs = now.getTime() - d.getTime();
-        const diffMins = Math.floor(diffMs / 60000);
-        if (diffMins < 1) return 'just now';
-        if (diffMins < 60) return `${diffMins}m ago`;
-        const diffHours = Math.floor(diffMins / 60);
-        if (diffHours < 24) return `${diffHours}h ago`;
-        const diffDays = Math.floor(diffHours / 24);
-        if (diffDays < 7) return `${diffDays}d ago`;
-        return d.toLocaleDateString();
-    } catch {
-        return iso;
     }
 }
 
@@ -1019,55 +976,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                             style={isActive ? {} : undefined}
                             className={(isActive ? '' : '')}
                         >
-                            <WorkflowItemName>{wf.name}</WorkflowItemName>
-                            <WorkflowItemMeta>
-                                <WorkflowItemCount>{wf.nodeCount} nodes</WorkflowItemCount>
-                                <WorkflowItemDate>{formatDate(wf.modifiedDate)}</WorkflowItemDate>
-                            </WorkflowItemMeta>
-                            {wf.tags && wf.tags.length > 0 && (
-                                <div style={{
-                                    display: 'flex',
-                                    gap: 3,
-                                    marginTop: 3,
-                                    flexWrap: 'wrap' as const,
-                                }}>
-                                    {wf.tags.slice(0, 3).map((tag) => (
-                                        <span
-                                            key={tag}
-                                            style={{
-                                                fontSize: theme.fontSize.xs,
-                                                color: theme.accent2,
-                                                padding: '1px 5px',
-                                                borderRadius: theme.radiusSm,
-                                                backgroundColor: 'rgba(147, 180, 212, 0.08)',
-                                                border: '1px solid rgba(147, 180, 212, 0.15)',
-                                            }}
-                                        >
-                                            {tag}
-                                        </span>
-                                    ))}
-                                </div>
-                            )}
-                            {isActive && (
-                                <WorkflowItemActions style={{ opacity: 1 }}>
-                                    <Btn
-                                        className="sg-hover"
-                                        onClick={(e) => { e.stopPropagation(); handleClone(); }}
-                                        style={{ padding: '2px 8px', fontSize: theme.fontSize.xs }}
-                                        title="Clone workflow"
-                                    >
-                                        Clone
-                                    </Btn>
-                                    <BtnDanger
-                                        className="sg-danger"
-                                        onClick={(e) => { e.stopPropagation(); handleDelete(); }}
-                                        style={{ padding: '2px 8px', fontSize: theme.fontSize.xs }}
-                                        title="Delete workflow"
-                                    >
-                                        Delete
-                                    </BtnDanger>
-                                </WorkflowItemActions>
-                            )}
+                            <WorkflowItemName>{wf.name} <WorkflowItemCount>({wf.nodeCount} nodes)</WorkflowItemCount></WorkflowItemName>
                         </Item>
                     );
                 })}
