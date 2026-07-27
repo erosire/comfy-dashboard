@@ -1,2 +1,2 @@
 // This describe
-export type ComfyNodeStructure = {};
+export type Structure = {};
