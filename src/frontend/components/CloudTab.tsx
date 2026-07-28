@@ -30,9 +30,11 @@ import { MODE_LABELS, MODE_STYLES } from '../nodes/node-type';
 
 type PodEntry = {
     id: string;
+    podNumber: number;
     name: string;
     pod_url: string;
     status: 'spawning' | 'ready' | 'error';
+    run: RunState;
     health?: CloudPodStatusResult;
     error?: string;
 };
@@ -133,53 +135,6 @@ const ToggleButton = styled('button')({
     lineHeight: 1,
     padding: 0,
     transition: `background-color ${theme.transition}, border-color ${theme.transition}`
-});
-
-// ── Styled: pod badges ────────────────────────────────────────────────
-
-const PodBadge = styled('div')({
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 4,
-    fontSize: theme.fontSize.xs,
-    fontWeight: 500,
-    padding: '3px 6px 3px 8px',
-    borderRadius: theme.radiusSm,
-    backgroundColor: theme.surface2,
-    border: `1px solid ${theme.border}`,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap' as const,
-    userSelect: 'none' as const,
-    transition: `background-color ${theme.transition}, border-color ${theme.transition}`
-});
-
-const PodDot = styled('span')({
-    width: 6,
-    height: 6,
-    borderRadius: '50%',
-    flex: '0 0 auto'
-});
-
-const PodCloseBtn = styled('button')({
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 16,
-    height: 16,
-    borderRadius: '50%',
-    fontSize: 10,
-    lineHeight: 1,
-    cursor: 'pointer',
-    color: theme.textDim,
-    backgroundColor: 'transparent',
-    border: 'none',
-    padding: 0,
-    marginLeft: 2,
-    transition: `color ${theme.transition}, background-color ${theme.transition}`,
-    '&:hover': {
-        color: theme.danger,
-        backgroundColor: theme.dangerSoft
-    }
 });
 
 const HeaderTitle = styled('span')({
@@ -409,75 +364,12 @@ const LinkBadge = styled('span')({
     border: '1px solid rgba(147, 180, 212, 0.25)'
 });
 
-// ── Styled: save dialog ──────────────────────────────────────────────
-
-const DialogOverlay = styled('div')({
-    position: 'fixed' as const,
-    inset: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 100
-});
-
-const DialogBox = styled('div')({
-    backgroundColor: theme.surface2,
-    border: `1px solid ${theme.border}`,
-    borderRadius: theme.radiusLg,
-    padding: 20,
-    minWidth: 360,
-    maxWidth: 480,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12
-});
-
-const DialogTitle = styled('div')({
-    fontSize: theme.fontSize.lg,
-    fontWeight: 600,
-    color: theme.text
-});
-
-const DialogField = styled('div')({
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4
-});
-
-const DialogLabel = styled('label')({
-    fontSize: theme.fontSize.sm,
-    fontWeight: 600,
-    color: theme.textDim
-});
-
-const DialogInput = styled('input')({
-    padding: '6px 10px',
-    fontSize: theme.fontSize.sm,
-    fontFamily: theme.fontSans,
-    color: theme.text,
-    backgroundColor: theme.surface3,
-    border: `1px solid ${theme.border}`,
-    borderRadius: theme.radiusSm,
-    outline: 'none',
-    transition: `border-color ${theme.transition}`
-});
-
-const DialogActions = styled('div')({
-    display: 'flex',
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 8,
-    marginTop: 4
-});
-
 // ── SubgraphNodeCard — renders a UINode with the same card as regular nodes ─
 
 const SubgraphNodeCard: React.FC<{
     node: UINode;
-    isRunning: boolean;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
-}> = React.memo(({ node, isRunning, updateNodeWidget }) => {
+}> = React.memo(({ node, updateNodeWidget }) => {
     const isSubgraph = !!node.subgraphDef;
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
@@ -550,7 +442,7 @@ const SubgraphNodeCard: React.FC<{
                             type="text"
                             value={displayValue(widget.value)}
                             onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
-                            readOnly={isRunning}
+                            readOnly={false}
                         />
                     </InputRow>
                 ))}
@@ -645,7 +537,6 @@ const SubgraphNodeCard: React.FC<{
                                 <SubgraphNodeCard
                                     key={inner.id}
                                     node={inner}
-                                    isRunning={isRunning}
                                     updateNodeWidget={updateNodeWidget}
                                 />
                             ))}
@@ -1308,10 +1199,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [rawJson, setRawJson] = React.useState<Record<string, unknown> | null>(null);
     const [fileName, setFileName] = React.useState('');
     const [pods, setPods] = React.useState<PodEntry[]>([]);
-    const [selectedPodId, setSelectedPodId] = React.useState<string | null>(null);
-    const [run, setRun] = React.useState<RunState>({ status: 'idle' });
     const [dragOver, setDragOver] = React.useState(false);
-    const [spawnDialogOpen, setSpawnDialogOpen] = React.useState(false);
     const [sidebarOpen, setSidebarOpen] = React.useState(() => {
         if (typeof window !== 'undefined' && window.matchMedia) {
             return window.matchMedia('(min-width: 768px)').matches;
@@ -1334,7 +1222,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         if (sidebarScrollRef.current) {
             sidebarScrollRef.current.scrollTop = sidebarScrollRef.current.scrollHeight;
         }
-    }, [run]);
+    }, [pods]);
 
     // Debounced search
     const handleSearchChange = React.useCallback(
@@ -1369,8 +1257,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             setNodes(renumberNodes(sortNodes(parseWorkflowJson(full.raw))));
             setFileName(`${full.name}.json`);
             setPods([]);
-            setSelectedPodId(null);
-            setRun({ status: 'idle' });
         }
     }, [store.selectedWorkflow]);
 
@@ -1404,8 +1290,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
                     setFileName(file.name);
                     setPods([]);
-            setSelectedPodId(null);
-                    setRun({ status: 'idle' });
                     // Auto-save the workflow with the filename as the name
                     autoSaveWorkflow(parsed, name);
                 } catch {
@@ -1519,60 +1403,91 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             setRawJson(null);
             setFileName('');
             setPods([]);
-            setSelectedPodId(null);
-            setRun({ status: 'idle' });
         } catch (err: any) {
             alert(`Failed to delete: ${err.message ?? String(err)}`);
         }
     }, [editingWorkflowId, deleteWorkflow]);
 
-    // ── Pod spawning ─────────────────────────────────────────────────
+    // ── Pod auto-numbering ──────────────────────────────────────────
+    // Finds the lowest available number, reusing gaps.
+    // e.g. if pods (1), (2), (5) exist → next is 3.
 
-    const handleSpawn = React.useCallback(
-        async (name?: string) => {
-            const id = `pod-${Date.now()}`;
-            const displayName = name || `pod-${Date.now() % 10000}`;
-            setPods((prev) => [...prev, { id, name: displayName, pod_url: '', status: 'spawning' }]);
-            setSelectedPodId(id);
-            try {
-                const result = await cloud(baseUrl, { type: 'create', name: name || undefined });
-                if (!('pod_url' in result)) throw new Error('Unexpected response from create');
-                setPods((prev) =>
-                    prev.map((p) => (p.id === id ? { ...p, pod_url: result.pod_url, status: 'ready' } : p))
-                );
-            } catch (err: any) {
-                setPods((prev) =>
-                    prev.map((p) =>
-                        p.id === id ? { ...p, status: 'error', error: err.message ?? String(err) } : p
-                    )
-                );
-            }
-        },
-        [baseUrl]
-    );
+    const nextPodNumber = React.useCallback((): number => {
+        const used = new Set(pods.map((p) => p.podNumber));
+        let n = 1;
+        while (used.has(n)) n++;
+        return n;
+    }, [pods]);
 
-    // ── Remove pod ───────────────────────────────────────────────────
+    // ── Automated submit flow ───────────────────────────────────────
+    // Spawns a new auto-numbered pod, waits for it to become ready,
+    // then automatically submits the current workflow to it.
 
-    const handleRemovePod = React.useCallback(
-        (id: string) => {
-            setPods((prev) => prev.filter((p) => p.id !== id));
-            setSelectedPodId((prev) => {
-                if (prev === id) {
-                    // Select another ready pod, or null
-                    const remaining = pods.filter((p) => p.id !== id && p.status === 'ready');
-                    return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
-                }
-                return prev;
-            });
-        },
-        [pods]
-    );
-
-    // ── Select pod ───────────────────────────────────────────────────
-
-    const handleSelectPod = React.useCallback((id: string) => {
-        setSelectedPodId(id);
+    /** Helper to update a single pod's run state. */
+    const updatePodRun = React.useCallback((podId: string, runState: RunState) => {
+        setPods((prev) => prev.map((p) => (p.id === podId ? { ...p, run: runState } : p)));
     }, []);
+
+    const handleSpawnAndSubmit = React.useCallback(async () => {
+        if (nodes.length === 0) return;
+
+        const num = nextPodNumber();
+        const id = `pod-${Date.now()}`;
+        const displayName = String(num);
+
+        // Add pod in spawning state
+        setPods((prev) => [
+            ...prev,
+            { id, podNumber: num, name: displayName, pod_url: '', status: 'spawning', run: { status: 'idle' } }
+        ]);
+
+        try {
+            // Spawn the pod
+            const result = await cloud(baseUrl, { type: 'create', name: displayName });
+            if (!('pod_url' in result)) throw new Error('Unexpected response from create');
+
+            const podUrl = result.pod_url;
+
+            // Mark ready
+            setPods((prev) =>
+                prev.map((p) => (p.id === id ? { ...p, pod_url: podUrl, status: 'ready' } : p))
+            );
+
+            // Automatically submit the workflow to the new pod
+            updatePodRun(id, { status: 'running', events: [] });
+            const prompt = buildPrompt();
+
+            const response = await cloudPrompt(baseUrl, { pod_url: podUrl, prompt });
+
+            const events: CloudStreamEvent[] = [];
+            for await (const event of cloudReadNdjson(response)) {
+                events.push(event);
+                updatePodRun(id, { status: 'running', events: [...events] });
+
+                if (
+                    event.type === 'proxy_done' ||
+                    event.type === 'execution_error' ||
+                    event.type === 'proxy_error' ||
+                    event.type === 'execution_interrupted'
+                ) {
+                    const isErr = event.type !== 'proxy_done';
+                    updatePodRun(id, { status: isErr ? 'error' : 'done', events, message: isErr ? eventSummary(event) : '' });
+                    return;
+                }
+            }
+            updatePodRun(id, { status: 'done', events });
+        } catch (err: any) {
+            // Mark pod as error if it was a spawn failure
+            setPods((prev) =>
+                prev.map((p) =>
+                    p.id === id && p.status !== 'ready'
+                        ? { ...p, status: 'error', error: err.message ?? String(err) }
+                        : p
+                )
+            );
+            updatePodRun(id, { status: 'error', events: [], message: err.message ?? String(err) });
+        }
+    }, [baseUrl, nodes, buildPrompt, nextPodNumber, updatePodRun]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection.
@@ -1617,45 +1532,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         return () => clearInterval(interval);
     }, [baseUrl]);
 
-    // ── Submit prompt ────────────────────────────────────────────────
-
-    const selectedPod = pods.find((p) => p.id === selectedPodId && p.status === 'ready');
-
-    const handleSubmit = React.useCallback(async () => {
-        if (!selectedPod || nodes.length === 0) return;
-
-        setRun({ status: 'running', events: [] });
-        const prompt = buildPrompt();
-
-        try {
-            const response = await cloudPrompt(baseUrl, { pod_url: selectedPod.pod_url, prompt });
-
-            const events: CloudStreamEvent[] = [];
-            for await (const event of cloudReadNdjson(response)) {
-                events.push(event);
-                setRun({ status: 'running', events: [...events] });
-
-                if (
-                    event.type === 'proxy_done' ||
-                    event.type === 'execution_error' ||
-                    event.type === 'proxy_error' ||
-                    event.type === 'execution_interrupted'
-                ) {
-                    const isErr = event.type !== 'proxy_done';
-                    setRun({ status: isErr ? 'error' : 'done', events, message: isErr ? eventSummary(event) : '' });
-                    return;
-                }
-            }
-            setRun({ status: 'done', events });
-        } catch (err: any) {
-            setRun({ status: 'error', events: [], message: err.message ?? String(err) });
-        }
-    }, [baseUrl, selectedPod, nodes, buildPrompt]);
-
     // ── Derived ──────────────────────────────────────────────────────
-
-    const isRunning = run.status === 'running';
-    const hasEvents = 'events' in run && run.events.length > 0;
 
     // ── Sidebar: workflow list panel ────────────────────────────────
 
@@ -1951,7 +1828,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                     onChange={(e) =>
                                                         updateNodeWidget(node.id, widget.index, e.target.value)
                                                     }
-                                                    readOnly={isRunning}
+                                                    readOnly={false}
                                                     data-testid={`cloud-widget-${node.id}-${widget.index}`}
                                                 />
                                             </InputRow>
@@ -2070,7 +1947,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                         <SubgraphNodeCard
                                                             key={inner.id}
                                                             node={inner}
-                                                            isRunning={isRunning}
                                                             updateNodeWidget={updateNodeWidget}
                                                         />
                                                     ))}
@@ -2089,42 +1965,99 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     // ── Footer: action bar ───────────────────────────────────────────
 
-    const hasSpawningPods = pods.some((p) => p.status === 'spawning');
-    const hasReadyPods = pods.some((p) => p.status === 'ready');
-    const hasAnyPods = pods.length > 0;
-
     const footer = (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
-            {/* Run status */}
-            {hasEvents && (
-                <Badge
-                    style={{
-                        color:
-                            run.status === 'error' ? theme.danger : run.status === 'done' ? theme.success : theme.accent
-                    }}
-                >
-                    {run.status === 'running' && (
-                        <>
-                            <SpinnerEl /> Running...
-                        </>
-                    )}
-                    {run.status === 'done' && '✓ Done'}
-                    {run.status === 'error' && `✗ Error`}
-                </Badge>
-            )}
+            {/* Pod number badges — color reflects pod + run state */}
+            {pods.map((p) => {
+                const isPodRunning = p.run.status === 'running';
+                const isPodDone = p.run.status === 'done';
+                const isPodError = p.run.status === 'error' || p.status === 'error';
+
+                const badgeColor =
+                    isPodRunning
+                        ? theme.accent
+                        : isPodDone
+                          ? theme.success
+                          : isPodError
+                            ? theme.danger
+                            : p.status === 'spawning'
+                              ? theme.textDim
+                              : theme.success;
+                const bgColor =
+                    isPodRunning
+                        ? theme.accentSoft
+                        : isPodDone
+                          ? theme.successSoft
+                          : isPodError
+                            ? theme.dangerSoft
+                            : p.status === 'spawning'
+                              ? theme.surface2
+                              : theme.successSoft;
+
+                const label = p.status === 'spawning'
+                    ? ''
+                    : isPodRunning
+                      ? `${p.podNumber}`
+                      : isPodDone
+                        ? `${p.podNumber}✓`
+                        : isPodError
+                          ? `${p.podNumber}✗`
+                          : String(p.podNumber);
+
+                return (
+                    <span
+                        key={p.id}
+                        title={
+                            p.status === 'spawning'
+                                ? `Pod ${p.podNumber} — starting up…`
+                                : isPodRunning
+                                  ? `Pod ${p.podNumber} — processing…`
+                                  : isPodDone
+                                    ? `Pod ${p.podNumber} — done`
+                                    : isPodError
+                                      ? `Pod ${p.podNumber} — ${p.run.status === 'error' ? p.run.message : ''} ${p.error || 'error'}`
+                                      : `Pod ${p.podNumber} — ready`
+                        }
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            minWidth: 28,
+                            height: 28,
+                            borderRadius: 14,
+                            fontSize: theme.fontSize.xs,
+                            fontWeight: 600,
+                            color: badgeColor,
+                            backgroundColor: bgColor,
+                            border: `1px solid ${badgeColor}`,
+                            flex: '0 0 auto',
+                            padding: '0 6px',
+                            gap: 3
+                        }}
+                    >
+                        {p.status === 'spawning' ? (
+                            <SpinnerEl />
+                        ) : (
+                            <>
+                                {isPodRunning && <SpinnerEl />}
+                                {label}
+                            </>
+                        )}
+                    </span>
+                );
+            })}
 
             <div style={{ flex: '1 1 auto' }} />
 
-            {hasSpawningPods && (
-                <Badge>
-                    <SpinnerEl /> Spawning...
-                </Badge>
-            )}
-            {selectedPod && (
-                <BtnPrimary className="sg-primary" onClick={handleSubmit} disabled={isRunning || nodes.length === 0}>
-                    {isRunning ? 'Running...' : 'Submit'}
-                </BtnPrimary>
-            )}
+            {/* Submit: always available — spawns a new pod + submits */}
+            <BtnPrimary
+                className="sg-primary"
+                onClick={handleSpawnAndSubmit}
+                disabled={nodes.length === 0}
+                title={nodes.length === 0 ? 'Load a workflow first' : 'Spawn pod & submit workflow'}
+            >
+                Submit
+            </BtnPrimary>
         </div>
     );
 
@@ -2137,55 +2070,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             </ToggleButton>
             <HeaderTitle>Comfy Dashboard</HeaderTitle>
 
-            {/* Pod badges — left of the + button */}
-            {pods.map((p) => {
-                const dotColor =
-                    p.status === 'ready'
-                        ? theme.success
-                        : p.status === 'spawning'
-                          ? theme.warning
-                          : theme.danger;
-                const isActive = p.id === selectedPodId;
-                return (
-                    <PodBadge
-                        key={p.id}
-                        onClick={() => handleSelectPod(p.id)}
-                        style={
-                            isActive
-                                ? { borderColor: theme.accentRing, backgroundColor: theme.accentSoft }
-                                : undefined
-                        }
-                        title={p.pod_url || p.error || p.name}
-                    >
-                        {p.status === 'spawning' ? (
-                            <SpinnerEl />
-                        ) : (
-                            <PodDot style={{ backgroundColor: dotColor }} />
-                        )}
-                        {p.name}
-                        <PodCloseBtn
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                handleRemovePod(p.id);
-                            }}
-                            aria-label={`Remove ${p.name}`}
-                        >
-                            ×
-                        </PodCloseBtn>
-                    </PodBadge>
-                );
-            })}
-
-            {/* (+) spawn button */}
-            <ToggleButton onClick={() => setSpawnDialogOpen(true)} className="sg-hover" aria-label="Spawn pod">
-                +
-            </ToggleButton>
-
             {store.loadWarning && (
                 <Badge style={{ marginLeft: 8, color: theme.warning, borderColor: theme.warningSoft }}>
                     ⚠ {store.loadWarning}
                 </Badge>
             )}
+
             <div style={{ flex: '1 1 auto' }} />
         </>
     );
@@ -2193,65 +2083,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     // ── Layout ───────────────────────────────────────────────────────
 
     return (
-        <>
-            <ComfyDashboard
-                sidebarOpen={sidebarOpen}
-                onOverlayClick={toggleSidebar}
-                headerControls={header}
-                sidebar={sidebar}
-                content={content}
-                footer={footer}
-            />
-
-            {/* Spawn Pod dialog */}
-            {spawnDialogOpen && <SpawnDialog
-                onClose={() => setSpawnDialogOpen(false)}
-                onSpawn={(name) => {
-                    setSpawnDialogOpen(false);
-                    handleSpawn(name);
-                }}
-            />}
-        </>
+        <ComfyDashboard
+            sidebarOpen={sidebarOpen}
+            onOverlayClick={toggleSidebar}
+            headerControls={header}
+            sidebar={sidebar}
+            content={content}
+            footer={footer}
+        />
     );
 });
 
-// ── Spawn Dialog (separate component for local state) ──────────────
-
-const SpawnDialog: React.FC<{
-    onClose: () => void;
-    onSpawn: (name?: string) => void;
-}> = React.memo(({ onClose, onSpawn }) => {
-    const [podName, setPodName] = React.useState('');
-
-    return (
-        <DialogOverlay onClick={onClose}>
-            <DialogBox onClick={(e) => e.stopPropagation()} data-testid="spawn-dialog">
-                <DialogTitle>Spawn Pod</DialogTitle>
-                <DialogField>
-                    <DialogLabel htmlFor="spawn-name">Pod name (optional)</DialogLabel>
-                    <DialogInput
-                        id="spawn-name"
-                        type="text"
-                        value={podName}
-                        onChange={(e) => setPodName(e.target.value)}
-                        placeholder="Leave blank for auto-generated name"
-                        autoFocus
-                        data-testid="spawn-name-input"
-                    />
-                </DialogField>
-                <DialogActions>
-                    <Btn className="sg-hover" onClick={onClose}>
-                        Cancel
-                    </Btn>
-                    <BtnPrimary
-                        className="sg-primary"
-                        onClick={() => onSpawn(podName.trim() || undefined)}
-                        data-testid="spawn-confirm-btn"
-                    >
-                        Spawn
-                    </BtnPrimary>
-                </DialogActions>
-            </DialogBox>
-        </DialogOverlay>
-    );
-});
