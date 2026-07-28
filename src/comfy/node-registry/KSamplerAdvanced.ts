@@ -5,6 +5,11 @@ export const KSamplerAdvanced: NodeWidgetLayout = {
     nodeType: 'KSamplerAdvanced',
     displayName: 'KSampler (Advanced)',
     category: 'sampling',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_kSamplerAdvanced.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'noise_seed',

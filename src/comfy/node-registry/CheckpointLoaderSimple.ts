@@ -4,6 +4,11 @@ export const CheckpointLoaderSimple: NodeWidgetLayout = {
     nodeType: 'CheckpointLoaderSimple',
     displayName: 'Load Checkpoint',
     category: 'loaders',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'ckpt_name',

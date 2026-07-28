@@ -4,6 +4,11 @@ export const CLIPTextEncodeFlux: NodeWidgetLayout = {
     nodeType: 'CLIPTextEncodeFlux',
     displayName: 'CLIP Text Encode (Flux)',
     category: 'conditioning',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_flux.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'clip_l',

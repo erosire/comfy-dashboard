@@ -4,6 +4,11 @@ export const ImageToMask: NodeWidgetLayout = {
     nodeType: 'ImageToMask',
     displayName: 'Image to Mask',
     category: 'mask',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'channel',

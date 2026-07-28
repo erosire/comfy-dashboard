@@ -4,6 +4,11 @@ export const CLIPTextEncode: NodeWidgetLayout = {
     nodeType: 'CLIPTextEncode',
     displayName: 'CLIP Text Encode (Prompt)',
     category: 'conditioning',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'text',

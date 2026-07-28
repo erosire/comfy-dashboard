@@ -4,6 +4,11 @@ export const EmptyLatentAudio: NodeWidgetLayout = {
     nodeType: 'EmptyLatentAudio',
     displayName: 'Empty Latent Audio',
     category: 'latent/audio',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_audio.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'seconds',

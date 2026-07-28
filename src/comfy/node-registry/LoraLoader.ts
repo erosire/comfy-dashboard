@@ -4,6 +4,11 @@ export const LoraLoader: NodeWidgetLayout = {
     nodeType: 'LoraLoader',
     displayName: 'Load LoRA',
     category: 'loaders',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'lora_name',

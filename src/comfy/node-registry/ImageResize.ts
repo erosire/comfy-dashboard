@@ -4,6 +4,11 @@ export const ImageResize: NodeWidgetLayout = {
     nodeType: 'ImageResize',
     displayName: 'Image Resize',
     category: 'image/transform',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_image_resize.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'width',

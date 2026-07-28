@@ -5,6 +5,11 @@ export const ImageScale: NodeWidgetLayout = {
     nodeType: 'ImageScale',
     displayName: 'Image Scale',
     category: 'image/transform',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'upscale_method',

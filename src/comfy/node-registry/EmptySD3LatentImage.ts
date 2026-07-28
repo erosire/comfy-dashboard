@@ -4,6 +4,11 @@ export const EmptySD3LatentImage: NodeWidgetLayout = {
     nodeType: 'EmptySD3LatentImage',
     displayName: 'Empty SD3 Latent',
     category: 'latent',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_sd3.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'width',

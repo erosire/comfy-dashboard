@@ -4,6 +4,11 @@ export const EmptyLatentImage: NodeWidgetLayout = {
     nodeType: 'EmptyLatentImage',
     displayName: 'Empty Latent Image',
     category: 'latent',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'width',

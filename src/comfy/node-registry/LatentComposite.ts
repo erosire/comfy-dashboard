@@ -4,6 +4,11 @@ export const LatentComposite: NodeWidgetLayout = {
     nodeType: 'LatentComposite',
     displayName: 'Latent Composite',
     category: 'latent/transform',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'x',

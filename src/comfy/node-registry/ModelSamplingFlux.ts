@@ -4,6 +4,11 @@ export const ModelSamplingFlux: NodeWidgetLayout = {
     nodeType: 'ModelSamplingFlux',
     displayName: 'Model Sampling Flux',
     category: 'model/advanced',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_flux.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'max_shift',

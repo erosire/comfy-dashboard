@@ -4,6 +4,11 @@ export const VAEEncodeTiled: NodeWidgetLayout = {
     nodeType: 'VAEEncodeTiled',
     displayName: 'VAE Encode (Tiled)',
     category: 'latent',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_upscale_model.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'tile_size',

@@ -4,6 +4,11 @@ export const CLIPTextEncodeSDXL: NodeWidgetLayout = {
     nodeType: 'CLIPTextEncodeSDXL',
     displayName: 'CLIP Text Encode SDXL',
     category: 'conditioning',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_sd3.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'text_g',

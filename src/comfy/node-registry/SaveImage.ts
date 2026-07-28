@@ -4,6 +4,11 @@ export const SaveImage: NodeWidgetLayout = {
     nodeType: 'SaveImage',
     displayName: 'Save Image',
     category: 'image',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'filename_prefix',

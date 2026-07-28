@@ -4,6 +4,11 @@ export const EmptyFlux2LatentImage: NodeWidgetLayout = {
     nodeType: 'EmptyFlux2LatentImage',
     displayName: 'Empty Flux 2 Latent',
     category: 'latent/flux',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_flux.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'width',

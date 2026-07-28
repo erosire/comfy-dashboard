@@ -5,6 +5,11 @@ export const KSampler: NodeWidgetLayout = {
     nodeType: 'KSampler',
     displayName: 'KSampler',
     category: 'sampling',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'seed',

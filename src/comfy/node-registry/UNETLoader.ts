@@ -4,6 +4,11 @@ export const UNETLoader: NodeWidgetLayout = {
     nodeType: 'UNETLoader',
     displayName: 'Load Diffusion Model',
     category: 'loaders',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_models.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'unet_name',

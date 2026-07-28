@@ -4,6 +4,11 @@ export const LatentUpscale: NodeWidgetLayout = {
     nodeType: 'LatentUpscale',
     displayName: 'Latent Upscale',
     category: 'latent/transform',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'nodes.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'upscale_method',

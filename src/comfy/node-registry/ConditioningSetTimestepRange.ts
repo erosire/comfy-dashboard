@@ -4,6 +4,11 @@ export const ConditioningSetTimestepRange: NodeWidgetLayout = {
     nodeType: 'ConditioningSetTimestepRange',
     displayName: 'Set Timestep Range',
     category: 'conditioning',
+    github: {
+        repo: 'https://github.com/comfyanonymous/ComfyUI',
+        path: 'comfy_extras/nodes_conditioning.py',
+        extension: 'ComfyUI',
+    },
     widgets: [
         {
             name: 'start',

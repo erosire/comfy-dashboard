@@ -21,6 +21,7 @@ export type {
     NumberDisplayMode,
     WidgetDef,
     NodeWidgetLayout,
+    GitHubSource,
 } from './types';
 
 export {
@@ -84,6 +85,8 @@ import { MaskToImage } from './MaskToImage';
 import { ImageToMask } from './ImageToMask';
 
 import { ModelSamplingFlux } from './ModelSamplingFlux';
+
+import { ClownsharKSampler_Beta } from './ClownsharKSampler_Beta';
 
 /**
  * The primary node widget registry.
@@ -159,6 +162,9 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
 
     // Model / Flux
     ModelSamplingFlux,
+
+    // Third-party / Custom nodes
+    ClownsharKSampler_Beta,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

@@ -82,6 +82,18 @@ export interface WidgetDef {
 // ── Node Widget Layout ───────────────────────────────────────────────────────
 
 /**
+ * GitHub repository metadata for a node's source.
+ */
+export interface GitHubSource {
+    /** GitHub repository URL (e.g. "https://github.com/user/repo"). */
+    repo: string;
+    /** Path to the node's Python source file within the repo (optional). */
+    path?: string;
+    /** Extension / custom node pack name. */
+    extension?: string;
+}
+
+/**
  * Widget layout for a node type — an ordered list of widget definitions.
  * The order matches the `widgets_values` array order.
  */
@@ -94,6 +106,8 @@ export interface NodeWidgetLayout {
     category: string;
     /** Ordered widget definitions — index N maps to widgets_values[N]. */
     widgets: WidgetDef[];
+    /** GitHub source repository where this node originates. */
+    github?: GitHubSource;
 }
 
 // ── Enum Constants ───────────────────────────────────────────────────────────
