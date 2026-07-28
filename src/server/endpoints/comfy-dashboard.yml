@@ -181,10 +181,10 @@ paths:
         Dual-purpose endpoint for Beam cloud pod management:
 
         **Create a pod** — Send an empty body `{}` or `{"name": "my-pod"}`.
-        Spawns a fresh, isolated ComfyUI pod via the Beam spawner (Tier 1)
-        and returns the pod's container ID and public proxy URL. The pod
-        runs ComfyUI with a FastAPI proxy on its public port and scales to
-        zero ~120s after the last active connection.
+        Sends a GET to the Beam spawner URL which returns a 302 redirect to
+        the spawned pod's public proxy URL. The pod runs ComfyUI with a
+        FastAPI proxy on its public port and scales to zero ~120s after the
+        last active connection.
 
         **Check pod status** — Send `{"pod_url": "<pod_url>"}`. Probes the
         Tier 2 proxy of an existing pod and returns its health, system stats,
@@ -215,7 +215,7 @@ paths:
           description: >-
             Pod created or status returned successfully.
             The response shape depends on the request:
-            - **Create**: `{ container_id, pod_url }`
+              - **Create**: `{ pod_url }`
             - **Status**: `{ health, models_dir, models }`
           content:
             application/json:
@@ -227,7 +227,6 @@ paths:
                 create_result:
                   summary: Pod created successfully
                   value:
-                    container_id: "5f8c1b2a-3d4e-4f5a-9b8c-7e6d5c4b3a2d"
                     pod_url: "https://test-pod-abc123.beam.cloud:8188"
                 status_result:
                   summary: Pod status returned
@@ -511,21 +510,19 @@ components:
 
     CloudCreateResponse:
       type: object
-      description: Response from spawning a new ComfyUI pod via Beam.
+      description: >-
+        Response from spawning a new ComfyUI pod via the Beam spawner.
+        The spawner URL returns a 302 redirect; this is the Location URL.
       properties:
-        container_id:
-          type: string
-          format: uuid
-          description: Beam container ID of the spawned pod.
-          example: 5f8c1b2a-3d4e-4f5a-9b8c-7e6d5c4b3a2d
         pod_url:
           type: string
           format: uri
           description: >-
-            Public URL of the spawned pod's Tier 2 API proxy.
-            Use this URL for submitting prompts directly to the pod.
+            Public URL of the spawned pod's Tier 2 API proxy (obtained from
+            the 302 redirect Location header). Use this URL for status
+            checks and prompt submission.
           example: https://test-pod-abc123.beam.cloud:8188
-      required: [container_id, pod_url]
+      required: [pod_url]
 
     CloudPodStatusResponse:
       type: object

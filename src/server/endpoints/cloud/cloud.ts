@@ -1,8 +1,9 @@
 // Cloud pod endpoint — POST /v1/comfy/cloud
 //
 // Dual-purpose endpoint:
-//   1. Create mode: body = {} or {"name": "..."} → spawn a new ComfyUI pod
-//      via the Beam spawner (Tier 1) and return { container_id, pod_url }.
+//   1. Create mode: body = {} or {"name": "..."} → GET the Beam spawner URL,
+//      which returns a 302 redirect to the spawned pod's public proxy URL.
+//      Returns { pod_url } to the UI.
 //   2. Status mode: body = {"pod_url": "..."} → probe the Tier 2 proxy of
 //      an existing pod and return { health, models_dir, models }.
 
@@ -10,7 +11,7 @@ import { asHandlerMethod } from '@underload/service';
 import { beamComfyCloud } from '@runtime/secret/private';
 
 // This is the spawner URL
-const DEFAULT_SPAWNER_URL = beamComfyCloud;
+const DEFAULT_SPAWNER_URL = beamComfyCloud.lancerDiffusion;
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
     const spawnerUrl: string = _variables?.spawnerUrl ?? DEFAULT_SPAWNER_URL;
@@ -66,42 +67,59 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
     }
 
     // ── Create mode: spawn a new pod ──────────────────────────────
+    // The spawner URL is a direct endpoint. GET it → 302 redirect to the
+    // spawned pod's public proxy URL. Use ?name=<pod_name> to name the pod.
     const podName: string | undefined = body.name;
 
-    const url = new URL('/spawn.json', spawnerUrl);
+    let spawnUrl: URL;
+    try {
+        spawnUrl = new URL(String(spawnerUrl));
+    } catch {
+        console.error(`[cloud] Invalid spawner URL: ${spawnerUrl}`);
+        return {
+            status: 500,
+            response: { error: 'Server misconfigured: invalid spawner URL' }
+        };
+    }
     if (podName) {
-        url.searchParams.set('name', podName);
+        spawnUrl.searchParams.set('name', podName);
     }
 
     try {
-        const upstream = await fetch(url.toString(), {
+        const upstream = await fetch(spawnUrl.toString(), {
             method: 'GET',
-            headers: { Accept: 'application/json' }
+            redirect: 'manual' // Don't follow the 302 — we need the Location header
         });
 
-        if (!upstream.ok) {
-            const errorBody = await upstream.text().catch(() => '');
-            console.error(`[cloud] Spawner returned ${upstream.status}: ${errorBody}`);
+        if (upstream.status === 302 || upstream.status === 301) {
+            const location = upstream.headers.get('location');
+            if (!location) {
+                console.error(`[cloud] Spawner returned ${upstream.status} but no Location header`);
+                return {
+                    status: 502,
+                    response: { error: 'Spawner returned redirect with no Location header' }
+                };
+            }
             return {
-                status: 502,
+                status: 200,
                 response: {
-                    error: `Spawner returned HTTP ${upstream.status}`,
-                    detail: errorBody || undefined
+                    pod_url: location
                 }
             };
         }
 
-        const data = (await upstream.json()) as { container_id: string; url: string };
-
+        // Non-redirect response is unexpected
+        const errorBody = await upstream.text().catch(() => '');
+        console.error(`[cloud] Spawner returned ${upstream.status} (expected 302): ${errorBody}`);
         return {
-            status: 200,
+            status: 502,
             response: {
-                container_id: data.container_id,
-                pod_url: data.url
+                error: `Spawner returned HTTP ${upstream.status} (expected 302 redirect)`,
+                detail: errorBody || undefined
             }
         };
     } catch (err: any) {
-        console.error(`[cloud] Failed to reach spawner at ${spawnerUrl}:`, err.message);
+        console.error(`[cloud] Failed to reach spawner at ${spawnUrl}:`, err.message);
         return {
             status: 502,
             response: {

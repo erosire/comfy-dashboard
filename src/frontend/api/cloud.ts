@@ -4,7 +4,7 @@
 // http://192.168.8.128:5000). See src/server/endpoints/comfy-dashboard.yml.
 //
 // Routes:
-//   POST /v1/comfy/cloud          → { container_id, pod_url }  (create)
+//   POST /v1/comfy/cloud          → { pod_url }  (create — spawner 302 redirect)
 //                                or { health, models_dir, models } (status)
 //   POST /v1/comfy/cloud/prompt   → NDJSON stream (raw Response)
 //
@@ -17,7 +17,6 @@
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type CloudCreateResult = {
-    container_id: string;
     pod_url: string;
 };
 
@@ -74,7 +73,7 @@ function isStatusRequest(req: CloudRequest): req is { type: 'status'; pod_url: s
  * All requests go through the server proxy at `baseUrl`.
  *
  * - `{ type: 'create', name? }` → `POST <baseUrl>/cloud` with `{}` or `{name}`.
- *   The server spawns a pod via Beam and returns `{ container_id, pod_url }`.
+ *   The server hits the Beam spawner (302 redirect) and returns `{ pod_url }`.
  *
  * - `{ type: 'status', pod_url }` → `POST <baseUrl>/cloud` with `{pod_url}`.
  *   The server probes the pod's Tier 2 proxy and returns
@@ -113,7 +112,7 @@ async function cloudCreate(
     });
 
     if (!response.ok) {
-        let message = `Failed to create cloud pod (HTTP ${response.status})`;
+        let message = `Failed to spawn cloud pod (HTTP ${response.status})`;
         try {
             const data = await response.json();
             if (data?.error) message = data.error;
