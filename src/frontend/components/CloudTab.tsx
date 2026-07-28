@@ -13,7 +13,7 @@ import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
 import { cloudCreate, cloudPrompt, cloudReadNdjson } from '../api/cloud';
 import { useDashboardStore } from '../context';
-import { isApiLinkRef } from '../../comfy';
+import { isApiLinkRef, comfyNodeRegistry, getWidgetLabel } from '../../comfy';
 import type { CloudStreamEvent } from '../api/cloud';
 import type { WorkflowMeta } from '../api';
 import type {
@@ -459,11 +459,13 @@ const SubgraphNodeCard: React.FC<{
     node: UINode;
     isRunning: boolean;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
-}> = React.memo(({ node, isRunning, updateNodeWidget }) => (
+}> = React.memo(({ node, isRunning, updateNodeWidget }) => {
+    const registryEntry = comfyNodeRegistry[node.classType];
+    return (
     <NodeCard style={{ marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }}>
         <NodeHeader>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                <NodeClassType>{node.classType}</NodeClassType>
+                <NodeClassType>{registryEntry?.displayName ?? node.classType}</NodeClassType>
                 {node.mode !== 0 && (
                     <span style={{
                         fontSize: theme.fontSize.xs,
@@ -497,7 +499,7 @@ const SubgraphNodeCard: React.FC<{
             ))}
             {node.widgets.map((widget) => (
                 <InputRow key={`w${widget.index}`}>
-                    <InputLabel>#{widget.index + 1}</InputLabel>
+                    <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
                     <InputField
                         type="text"
                         value={displayValue(widget.value)}
@@ -580,7 +582,8 @@ const SubgraphNodeCard: React.FC<{
             )}
         </NodeInputs>
     </NodeCard>
-));
+    );
+});
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -1670,6 +1673,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                         </div>
                         {nodes.map((node) => {
                             const isSubgraph = !!node.subgraphDef;
+                            const registryEntry = comfyNodeRegistry[node.classType];
                             return (
                             <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}
                                 style={isSubgraph ? { border: `1px solid ${theme.accent}40` } : undefined}
@@ -1686,8 +1690,17 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                             </span>
                                         )}
                                         <NodeClassType style={isSubgraph ? { color: theme.accent } : undefined}>
-                                            {node.classType}
+                                            {registryEntry?.displayName ?? node.classType}
                                         </NodeClassType>
+                                        {registryEntry?.category && (
+                                            <span style={{
+                                                fontSize: theme.fontSize.xs,
+                                                color: theme.textFaint,
+                                                fontFamily: theme.fontMono,
+                                            }}>
+                                                {registryEntry.category}
+                                            </span>
+                                        )}
                                         {node.mode !== 0 && (
                                             <span style={{
                                                 fontSize: theme.fontSize.xs,
@@ -1726,7 +1739,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                     {/* Widget values */}
                                     {node.widgets.map((widget) => (
                                         <InputRow key={`w${widget.index}`}>
-                                            <InputLabel>#{widget.index + 1}</InputLabel>
+                                            <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
                                             <InputField
                                                 type="text"
                                                 value={displayValue(widget.value)}
