@@ -13,7 +13,7 @@ import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
 import { cloudCreate, cloudPrompt, cloudReadNdjson } from '../api/cloud';
 import { useDashboardStore } from '../context';
-import { isApiLinkRef } from '../../comfy/structure';
+import { isApiLinkRef } from '../../comfy';
 import type { CloudStreamEvent } from '../api/cloud';
 import type { WorkflowMeta } from '../api';
 import type {
@@ -25,7 +25,7 @@ import type {
     ComfyLinkTuple,
     DataType,
     SubgraphDefinition,
-} from '../../comfy/structure';
+} from '../../comfy';
 import type {
     UINode,
     UIInputConnection,
@@ -613,6 +613,181 @@ function findSubgraphDef(
     return subs.find((sg) => sg.id === subgraphId) as SubgraphDefinition | undefined;
 }
 
+// ── Recursive subgraph-aware node parser ────────────────────────────────────
+
+/**
+ * Normalized link for boundary rewriting — works for both v0.4 tuple and v1
+ * object formats.  Used to resolve external inputs flowing into a subgraph.
+ */
+type BoundaryLink = {
+    targetNodeId: string;
+    targetSlot: number;
+    sourceNodeId: string;
+    sourceSlot: number;
+};
+
+/**
+ * Normalize top-level links into BoundaryLink[] for subgraph boundary
+ * rewriting.  Handles both v0.4 tuple and v1 object link formats.
+ */
+function buildBoundaryLinks(
+    linkTuples: ComfyLinkTuple[],
+    v1Links: ComfyLink[],
+): BoundaryLink[] {
+    const result: BoundaryLink[] = [];
+    if (linkTuples.length > 0) {
+        for (const tuple of linkTuples) {
+            if (Array.isArray(tuple) && tuple.length >= 6) {
+                result.push({
+                    targetNodeId: String(tuple[3]),
+                    targetSlot: Number(tuple[4]),
+                    sourceNodeId: String(tuple[1]),
+                    sourceSlot: Number(tuple[2]),
+                });
+            }
+        }
+    } else if (v1Links.length > 0) {
+        for (const link of v1Links) {
+            if (link && typeof link === 'object' && 'target_id' in link) {
+                result.push({
+                    targetNodeId: String(link.target_id),
+                    targetSlot: Number(link.target_slot),
+                    sourceNodeId: String(link.origin_id),
+                    sourceSlot: Number(link.origin_slot),
+                });
+            }
+        }
+    }
+    return result;
+}
+
+/**
+ * Parse WorkflowNodes into UINodes, recursively expanding subgraph nodes.
+ *
+ * This is the core recursive function that handles unlimited nesting depth
+ * of ComfyUI subgraph (group node) definitions.  Each level of nesting:
+ *
+ *   1. Detects UUID-typed nodes (subgraph references)
+ *   2. Looks up the SubgraphDefinition from the top-level workflow
+ *   3. Builds an internal link map from the subgraph's own links
+ *   4. Rewrites boundary links (external → internal via inputNode -10)
+ *   5. Recursively parses the subgraph's internal nodes
+ *   6. Produces a UINode with `subgraphDef` / `subgraphNodes` populated
+ */
+function parseNodesRecursive(
+    rawWorkflow: Record<string, unknown>,
+    nodes: WorkflowNode[],
+    parentLinkMap: Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>,
+    parentBoundaryLinks: BoundaryLink[],
+    sourceFormat: 'workflow-v1' | 'workflow-v04',
+): UINode[] {
+    const result: UINode[] = [];
+
+    for (const n of nodes) {
+        const nodeType = n.type ?? '';
+
+        // Subgraph node: UUID type matching a definition → expand inline
+        if (isSubgraphType(nodeType)) {
+            const sgDef = findSubgraphDef(rawWorkflow, nodeType);
+            if (sgDef) {
+                const sgNodeId = String(n.id);
+
+                // Build internal link map from subgraph definition
+                const internalLinks = ((sgDef as any).links ?? []) as ComfyLink[];
+                const internalLinkMap = buildLinkMapFromObjects(internalLinks);
+
+                // Find boundary links targeting this subgraph node
+                const externalInputByPort = new Map<number, { sourceNodeId: string; sourceSlot: number }>();
+                for (const bl of parentBoundaryLinks) {
+                    if (bl.targetNodeId === sgNodeId) {
+                        externalInputByPort.set(bl.targetSlot, {
+                            sourceNodeId: bl.sourceNodeId,
+                            sourceSlot: bl.sourceSlot,
+                        });
+                    }
+                }
+
+                // Rewrite internal links from -10 (inputNode) → external source
+                (sgDef.inputs ?? []).forEach((inp, portIndex) => {
+                    const ext = externalInputByPort.get(portIndex);
+                    if (!ext) return;
+                    for (const linkId of (inp.linkIds ?? [])) {
+                        const existing = internalLinkMap.get(linkId);
+                        if (existing && String(existing.sourceNodeId) === '-10') {
+                            internalLinkMap.set(linkId, {
+                                ...existing,
+                                sourceNodeId: ext.sourceNodeId,
+                                sourceSlot: ext.sourceSlot,
+                            });
+                        }
+                    }
+                });
+
+                // Build boundary links for nested subgraphs within this subgraph
+                const nestedBoundaryLinks: BoundaryLink[] = internalLinks.map((link) => ({
+                    targetNodeId: String(link.target_id),
+                    targetSlot: Number(link.target_slot),
+                    sourceNodeId: String(link.origin_id),
+                    sourceSlot: Number(link.origin_slot),
+                }));
+
+                // Parse internal nodes RECURSIVELY (handles unlimited nesting)
+                const internalNodes = ((sgDef as any).nodes ?? []) as WorkflowNode[];
+                const subgraphNodes = parseNodesRecursive(
+                    rawWorkflow,
+                    internalNodes,
+                    internalLinkMap,
+                    nestedBoundaryLinks,
+                    sourceFormat,
+                );
+
+                // Build the parent subgraph UINode with definition ports
+                const sgInputConnections: UIInputConnection[] = (sgDef.inputs ?? []).map((inp) => ({
+                    name: inp.name,
+                    type: inp.type as DataType,
+                    sourceNodeId: '',
+                    sourceSlot: -1,
+                    linkId: undefined,
+                }));
+
+                const sgOutputSlots: UIOutputSlot[] = (sgDef.outputs ?? []).map((out, i) => ({
+                    name: out.name,
+                    type: out.type as DataType,
+                    connectionCount: 0,
+                    slotIndex: i,
+                }));
+
+                result.push({
+                    id: sgNodeId,
+                    classType: (sgDef as any).name ?? nodeType,
+                    connections: sgInputConnections,
+                    outputs: sgOutputSlots,
+                    widgets: [],
+                    mode: n.mode ?? 0,
+                    order: n.order ?? 0,
+                    properties: n.properties ?? {},
+                    flags: n.flags ?? {},
+                    position: n.pos ?? [0, 0],
+                    size: n.size ?? [200, 100],
+                    color: n.color,
+                    bgColor: n.bgcolor,
+                    _raw: n,
+                    _sourceFormat: sourceFormat,
+                    subgraphDef: sgDef,
+                    subgraphNodes,
+                    subgraphLinks: internalLinks,
+                });
+                continue;
+            }
+        }
+
+        // Regular node
+        result.push(workflowNodeToUINode(n, parentLinkMap, sourceFormat));
+    }
+
+    return result;
+}
+
 // ── Link map builders ───────────────────────────────────────────────────
 
 /** Build a link map from v0.4 tuple links: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]. */
@@ -800,113 +975,8 @@ function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
         }
 
         const nodes = raw.nodes as WorkflowNode[];
-        const result: UINode[] = [];
-
-        for (const n of nodes) {
-            const nodeType = n.type ?? '';
-
-            // Subgraph node: UUID type matching a definition → expand inline
-            if (isSubgraphType(nodeType)) {
-                const sgDef = findSubgraphDef(raw, nodeType);
-                if (sgDef) {
-                    const sgNodeId = String(n.id);
-
-                    // Build internal link map from subgraph definition
-                    const internalLinks = ((sgDef as any).links ?? []) as ComfyLink[];
-                    const internalLinkMap = buildLinkMapFromObjects(internalLinks);
-
-                    // Rewrite boundary: find external links targeting this subgraph
-                    // Works for both v0.4 (tuples) and v1 (object links)
-                    const externalInputByPort = new Map<number, { sourceNodeId: string; sourceSlot: number }>();
-                    // v0.4 tuple format: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]
-                    for (const tuple of linkTuples) {
-                        if (tuple.length >= 6 && String(tuple[3]) === sgNodeId) {
-                            externalInputByPort.set(Number(tuple[4]), {
-                                sourceNodeId: String(tuple[1]),
-                                sourceSlot: Number(tuple[2]),
-                            });
-                        }
-                    }
-                    // v1 object format: { target_id, target_slot, origin_id, origin_slot }
-                    if (linkTuples.length === 0 && Array.isArray(raw.links) && raw.links.length > 0) {
-                        const v1Links = raw.links as ComfyLink[];
-                        for (const link of v1Links) {
-                            if (link && typeof link === 'object' && 'target_id' in link && String(link.target_id) === sgNodeId) {
-                                externalInputByPort.set(Number(link.target_slot), {
-                                    sourceNodeId: String(link.origin_id),
-                                    sourceSlot: Number(link.origin_slot),
-                                });
-                            }
-                        }
-                    }
-
-                    // Rewrite internal links from -10 (inputNode) → external source
-                    (sgDef.inputs ?? []).forEach((inp, portIndex) => {
-                        const ext = externalInputByPort.get(portIndex);
-                        if (!ext) return;
-                        for (const linkId of (inp.linkIds ?? [])) {
-                            const existing = internalLinkMap.get(linkId);
-                            if (existing && String(existing.sourceNodeId) === '-10') {
-                                internalLinkMap.set(linkId, {
-                                    ...existing,
-                                    sourceNodeId: ext.sourceNodeId,
-                                    sourceSlot: ext.sourceSlot,
-                                });
-                            }
-                        }
-                    });
-
-                    // Parse internal nodes with rewritten link map
-                    const internalNodes = ((sgDef as any).nodes ?? []) as WorkflowNode[];
-                    const subgraphNodes = internalNodes.map((inode) =>
-                        workflowNodeToUINode(inode, internalLinkMap, sourceFormat)
-                    );
-
-                    // Build the parent subgraph UINode with definition ports
-                    const sgInputConnections: UIInputConnection[] = (sgDef.inputs ?? []).map((inp) => ({
-                        name: inp.name,
-                        type: inp.type as DataType,
-                        sourceNodeId: '',
-                        sourceSlot: -1,
-                        linkId: undefined,
-                    }));
-
-                    const sgOutputSlots: UIOutputSlot[] = (sgDef.outputs ?? []).map((out, i) => ({
-                        name: out.name,
-                        type: out.type as DataType,
-                        connectionCount: 0,
-                        slotIndex: i,
-                    }));
-
-                    result.push({
-                        id: sgNodeId,
-                        classType: (sgDef as any).name ?? nodeType,
-                        connections: sgInputConnections,
-                        outputs: sgOutputSlots,
-                        widgets: [],
-                        mode: n.mode ?? 0,
-                        order: n.order ?? 0,
-                        properties: n.properties ?? {},
-                        flags: n.flags ?? {},
-                        position: n.pos ?? [0, 0],
-                        size: n.size ?? [200, 100],
-                        color: n.color,
-                        bgColor: n.bgcolor,
-                        _raw: n,
-                        _sourceFormat: sourceFormat,
-                        subgraphDef: sgDef,
-                        subgraphNodes,
-                        subgraphLinks: internalLinks,
-                    });
-                    continue;
-                }
-            }
-
-            // Regular node
-            result.push(workflowNodeToUINode(n, linkMap, sourceFormat));
-        }
-
-        return result;
+        const parentBoundaryLinks = buildBoundaryLinks(linkTuples, (raw.links as ComfyLink[]) ?? []);
+        return parseNodesRecursive(raw, nodes, linkMap, parentBoundaryLinks, sourceFormat);
     }
 
     // ── API prompt format ─────────────────────────────────────────────
@@ -1026,7 +1096,12 @@ function renumberSubgraphNodes(
             // Unknown source — keep as-is
             return conn;
         });
-        return { ...n, id: internalIdMap.get(n.id)!, connections };
+        // Recursively renumber deeper subgraph nesting levels
+        const myNewId = internalIdMap.get(n.id)!;
+        const subgraphNodes = n.subgraphNodes && n.subgraphNodes.length > 0
+            ? renumberSubgraphNodes(n.subgraphNodes, myNewId, internalIdMap)
+            : undefined;
+        return { ...n, id: myNewId, connections, subgraphNodes };
     });
 }
 

@@ -16,7 +16,7 @@ import type {
     SubgraphDefinition,
     ComfyLink,
     Group,
-} from '../../comfy/structure';
+} from '../../comfy';
 
 // ── UI Node (display-friendly representation) ────────────────────────────────
 
