@@ -445,21 +445,58 @@ const LinkBadge = styled('span')({
 const SubgraphNodeCard: React.FC<{
     node: UINode;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
-}> = React.memo(({ node, updateNodeWidget }) => {
+    executingNodeId?: string | null;
+}> = React.memo(({ node, updateNodeWidget, executingNodeId }) => {
     const isSubgraph = !!node.subgraphDef;
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
+    const isExecuting = node.id === executingNodeId;
     return (
         <NodeCard
             style={
-                isUnregistered
-                    ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
-                    : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }
+                isExecuting
+                    ? {
+                          marginLeft: 8,
+                          border: `2px solid ${theme.accent}`,
+                          backgroundColor: theme.accentSoft,
+                          boxShadow: `0 0 12px rgba(129, 140, 248, 0.35)`
+                      }
+                    : isUnregistered
+                      ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
+                      : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }
             }
         >
-            <NodeHeader style={isUnregistered ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' } : undefined}>
+            <NodeHeader
+                style={
+                    isExecuting
+                        ? { backgroundColor: 'rgba(129, 140, 248, 0.25)' }
+                        : isUnregistered
+                          ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' }
+                          : undefined
+                }
+            >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                    <NodeClassType style={isUnregistered ? { color: theme.danger } : undefined}>
+                    {isExecuting && (
+                        <span
+                            style={{
+                                fontSize: theme.fontSize.xs,
+                                color: theme.accent,
+                                marginRight: 2
+                            }}
+                            title="Currently executing"
+                        >
+                            ▶
+                        </span>
+                    )}
+                    <NodeClassType
+                        style={
+                            isExecuting
+                                ? { color: theme.accent }
+                                : isUnregistered
+                                  ? { color: theme.danger }
+                                  : undefined
+                        }
+                    >
                         {registryEntry?.displayName ?? node.classType}
                     </NodeClassType>
                     {isUnregistered && (
@@ -614,6 +651,7 @@ const SubgraphNodeCard: React.FC<{
                                     key={inner.id}
                                     node={inner}
                                     updateNodeWidget={updateNodeWidget}
+                                    executingNodeId={executingNodeId}
                                 />
                             ))}
                         </div>
@@ -2520,6 +2558,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                             key={inner.id}
                                                             node={inner}
                                                             updateNodeWidget={updateNodeWidget}
+                                                            executingNodeId={executingNodeId}
                                                         />
                                                     ))}
                                                 </div>
