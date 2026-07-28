@@ -88,6 +88,41 @@ import { ModelSamplingFlux } from './ModelSamplingFlux';
 
 import { ClownsharKSampler_Beta } from './ClownsharKSampler_Beta';
 
+// Built-in ComfyUI nodes (additional)
+import { ConditioningZeroOut } from './ConditioningZeroOut';
+import { ReferenceLatent } from './ReferenceLatent';
+import { GetImageSize } from './GetImageSize';
+
+// KJNodes
+import { ImageResizeKJv2 } from './ImageResizeKJv2';
+
+// rgthree-comfy
+import { PowerLoraLoaderrgthree } from './PowerLoraLoaderrgthree';
+import { Seedrgthree } from './Seedrgthree';
+import { Contextrgthree } from './Contextrgthree';
+import { ContextBigrgthree } from './ContextBigrgthree';
+import { ContextSwitchrgthree } from './ContextSwitchrgthree';
+import { ContextSwitchBigrgthree } from './ContextSwitchBigrgthree';
+import { ContextMergergthree } from './ContextMergergthree';
+import { ContextMergeBigrgthree } from './ContextMergeBigrgthree';
+import { DisplayIntrgthree } from './DisplayIntrgthree';
+import { DisplayAnyrgthree } from './DisplayAnyrgthree';
+import { LoraLoaderStackrgthree } from './LoraLoaderStackrgthree';
+import { ImageInsetCropprgthree } from './ImageInsetCropprgthree';
+import { PowerPromptrgthree } from './PowerPromptrgthree';
+import { PowerPromptSimplergthree } from './PowerPromptSimplergthree';
+import { KSamplerConfigrgthree } from './KSamplerConfigrgthree';
+import { SDXLEmptyLatentImagergthree } from './SDXLEmptyLatentImagergthree';
+import { SDXLPowerPromptPositivergthree } from './SDXLPowerPromptPositivergthree';
+import { SDXLPowerPromptSimplenegativethree } from './SDXLPowerPromptSimplenegativethree';
+import { AnySwitchrgthree } from './AnySwitchrgthree';
+import { ImageComparerrgthree } from './ImageComparerrgthree';
+import { PowerPrimitivergthree } from './PowerPrimitivergthree';
+import { ImageOrLatentSizergthree } from './ImageOrLatentSizergthree';
+import { ImageResizergthree } from './ImageResizergthree';
+import { PowerPuttergthree } from './PowerPuttergthree';
+import { FastGroupsMuterthree } from './FastGroupsMuterthree';
+
 /**
  * The primary node widget registry.
  *
@@ -165,6 +200,41 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
 
     // Third-party / Custom nodes
     ClownsharKSampler_Beta,
+
+    // Additional built-in ComfyUI nodes
+    ConditioningZeroOut,
+    ReferenceLatent,
+    GetImageSize,
+
+    // KJNodes (kijai)
+    ImageResizeKJv2,
+
+    // rgthree-comfy
+    PowerLoraLoaderrgthree,
+    Seedrgthree,
+    Contextrgthree,
+    ContextBigrgthree,
+    ContextSwitchrgthree,
+    ContextSwitchBigrgthree,
+    ContextMergergthree,
+    ContextMergeBigrgthree,
+    DisplayIntrgthree,
+    DisplayAnyrgthree,
+    LoraLoaderStackrgthree,
+    ImageInsetCropprgthree,
+    PowerPromptrgthree,
+    PowerPromptSimplergthree,
+    KSamplerConfigrgthree,
+    SDXLEmptyLatentImagergthree,
+    SDXLPowerPromptPositivergthree,
+    SDXLPowerPromptSimplenegativethree,
+    AnySwitchrgthree,
+    ImageComparerrgthree,
+    PowerPrimitivergthree,
+    ImageOrLatentSizergthree,
+    ImageResizergthree,
+    PowerPuttergthree,
+    FastGroupsMuterthree,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
