@@ -19,6 +19,8 @@
 // Status:
 //   GET /v1/comfy/status             → { status: ServerStatus }
 
+import type { CloudStreamEvent } from './cloud';
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type WorkflowMeta = {
@@ -79,6 +81,8 @@ export type GenerationEntry = {
     error: string | null;
     prompt: Record<string, unknown>;
     result: GenerationResultItem[];
+    /** Raw NDJSON events streamed back from POST /v1/comfy/cloud/prompt. */
+    stream: CloudStreamEvent[];
 };
 
 // ── API Functions ──────────────────────────────────────────────────────
@@ -283,12 +287,12 @@ export async function fetchGenerations(
     return { generations: Array.isArray(data.generations) ? data.generations : [] };
 }
 
-// Update a generation entry (PUT) — e.g. with results after agent completion.
+// Update a generation entry (PUT) — e.g. with results + stream after agent completion.
 export async function updateGeneration(
     baseUrl: string,
     workflowId: string,
     generateId: string,
-    body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>
+    body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>
 ): Promise<{ generation: GenerationEntry }> {
     const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}`;
     const response = await fetch(url, {

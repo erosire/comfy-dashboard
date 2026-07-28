@@ -4,8 +4,13 @@ info:
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
     CRUD for workflows, generation snapshots, and a unified endpoint for
-    spawning/checking Beam cloud pods.
-  version: 0.3.0
+    spawning/checking Beam cloud pods. Prompt processing happens
+    server-side: POST /v1/comfy/cloud/prompt (with workflow_id +
+    generation_id) consumes the pod's NDJSON stream in the background and
+    keeps the generation json updated — clients poll
+    GET /v1/comfy/workflows/{id}/generate for progress instead of
+    streaming.
+  version: 0.4.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -368,18 +373,25 @@ paths:
   /v1/comfy/cloud/prompt:
     post:
       operationId: cloudPrompt
-      summary: Submit a prompt to a spawned pod and stream results as NDJSON
+      summary: Submit a prompt to a spawned pod — server-side processing (202) or NDJSON proxy stream (200)
       description: >-
-        Sends a ComfyUI workflow graph to a spawned pod's Tier 2 proxy and
-        streams the results back as `application/x-ndjson` — one JSON object
-        per line.
+        Two modes:
 
-        The server proxies the request to `POST <pod_url>/` on the Tier 2
-        ComfyProxy endpoint. The connection stays open while ComfyUI executes
-        the prompt; each WS event is forwarded as an NDJSON line.
+        **Server-side processing** — include `workflow_id` and
+        `generation_id` in the body. The server forwards the prompt to
+        `POST <pod_url>/` on the Tier 2 ComfyProxy endpoint, consumes the
+        resulting NDJSON event stream in the background, and keeps the
+        generation json updated by itself (status → processing/completed/
+        failed, results, stream, timing — the same file written by
+        /v1/comfy/workflows/{id}/generate). Returns 202 immediately;
+        clients poll GET /v1/comfy/workflows/{id}/generate for progress.
 
-        **Clients must read the response body as a stream**, parsing one JSON
-        document per line, until they receive:
+        **Legacy proxy mode** — no workflow reference. Streams the pod's
+        results back as `application/x-ndjson` — one JSON object per line.
+        The connection stays open while ComfyUI executes the prompt; each
+        WS event is forwarded as an NDJSON line. **Clients must read the
+        response body as a stream**, parsing one JSON document per line,
+        until they receive:
         - `{"type":"proxy_done","data":{}}` — run completed normally, or
         - `{"type":"execution_error",...}` / `{"type":"proxy_error",...}` — failure.
       tags:
@@ -415,9 +427,30 @@ paths:
                         ckpt_name: sd_xl_base_1.0.safetensors
                   client_id: "abc123def4567890fedcba0987654321"
       responses:
+        '202':
+          description: >-
+            Accepted for server-side processing (workflow_id and
+            generation_id were provided). The server consumes the pod's
+            NDJSON stream in the background and updates the generation
+            json file itself. There is no response stream — poll
+            GET /v1/comfy/workflows/{id}/generate for progress.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: boolean
+                    example: true
+                  workflow_id:
+                    type: string
+                  generation_id:
+                    type: string
+                required: [accepted, workflow_id, generation_id]
         '200':
           description: >-
-            Chunked NDJSON stream of progress events from the ComfyUI pod.
+            Chunked NDJSON stream of progress events from the ComfyUI pod
+            (legacy proxy mode — no workflow reference provided).
             See beam_comfy_service.yaml ProxyStreamEvent for the full event
             vocabulary (proxy_enqueue, progress, executing, executed,
             execution_success, execution_error, proxy_done, etc.).
@@ -608,6 +641,13 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GenerationResultItem'
+        stream:
+          type: array
+          description: >-
+            Raw NDJSON event stream captured from POST /v1/comfy/cloud/prompt
+            while processing this generation.
+          items:
+            $ref: '#/components/schemas/CloudStreamEvent'
         generatedTime:
           type: string
           nullable: true
@@ -659,6 +699,13 @@ components:
           description: Array of generated outputs (images, videos, etc.)
           items:
             $ref: '#/components/schemas/GenerationResultItem'
+        stream:
+          type: array
+          description: >-
+            Raw NDJSON event stream captured from POST /v1/comfy/cloud/prompt
+            while processing this generation (empty until processed).
+          items:
+            $ref: '#/components/schemas/CloudStreamEvent'
       required: [id, status, createdDate, prompt, result]
 
     GenerationResultItem:
@@ -882,6 +929,23 @@ components:
         number:
           type: number
           description: Optional. Forwarded to ComfyUI POST /prompt.
+        workflow_id:
+          type: string
+          description: >-
+            Optional. When provided together with generation_id, enables
+            server-side processing: the server consumes the pod's NDJSON
+            stream in the background and keeps the generation json updated
+            (same file written by /v1/comfy/workflows/{id}/generate).
+            The request returns 202 immediately — clients poll
+            GET /v1/comfy/workflows/{id}/generate for progress instead of
+            reading the stream.
+          example: "a1b2c3d4"
+        generation_id:
+          type: string
+          description: >-
+            Generation entry id to update while processing (server-side
+            processing mode only).
+          example: "20260729-101530"
       required:
         - pod_url
         - prompt

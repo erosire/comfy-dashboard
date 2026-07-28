@@ -6,7 +6,12 @@
 // Routes:
 //   POST /v1/comfy/cloud          → { pod_url }  (create — spawner 302 redirect)
 //                                or { health, models_dir, models } (status)
-//   POST /v1/comfy/cloud/prompt   → NDJSON stream (raw Response)
+//   POST /v1/comfy/cloud/prompt   → 202 { accepted } when workflow_id +
+//                                generation_id are given (server consumes the
+//                                pod stream and updates the generation json
+//                                itself — poll /workflows/:id/generate for
+//                                progress); otherwise NDJSON stream (raw
+//                                Response) for the client to consume.
 //
 // The two-tier architecture mirrors beam_comfy_service.yaml:
 //   Tier 1 — Spawner: GET /spawn.json on the Beam spawner creates a fresh
@@ -60,6 +65,16 @@ export type CloudPromptBody = {
     extra_data?: Record<string, unknown>;
     front?: boolean;
     number?: number;
+    /**
+     * Server-side processing mode. When both are provided, the server
+     * consumes the pod's NDJSON stream in the background and keeps the
+     * generation json (same file the workflow generation API writes)
+     * updated by itself. The request returns 202 immediately — observe
+     * progress by polling the workflow's generation list.
+     */
+    workflow_id?: string;
+    /** Generation entry id the server should update while processing. */
+    generation_id?: string;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -155,14 +170,19 @@ async function cloudStatus(
 // ── Prompt streaming ──────────────────────────────────────────────────
 
 /**
- * Submit a workflow to a spawned pod and stream results back.
+ * Submit a workflow to a spawned pod.
  *
- * Calls `POST <baseUrl>/cloud/prompt` with the full PromptRequest body
- * (pod_url, prompt, client_id?, extra_data?, front?, number?).
- * Returns the raw Response object — the caller must read it as a stream
- * of newline-delimited JSON (NDJSON). Each line is a CloudStreamEvent.
+ * Calls `POST <baseUrl>/cloud/prompt` with the full body (pod_url, prompt,
+ * client_id?, extra_data?, front?, number?, workflow_id?, generation_id?).
  *
- * The stream ends when the caller receives:
+ * Server-side processing mode (workflow_id + generation_id provided):
+ * returns immediately with 202 — the server consumes the pod stream and
+ * updates the generation json itself; poll the generation list for
+ * progress. The returned Response body is plain JSON and NOT a stream.
+ *
+ * Legacy mode: returns the raw Response object — the caller must read it
+ * as a stream of newline-delimited JSON (NDJSON). Each line is a
+ * CloudStreamEvent. The stream ends when the caller receives:
  *   - `{"type":"proxy_done","data":{}}` — success
  *   - `{"type":"execution_error",...}` — failure
  *   - `{"type":"proxy_error",...}` — proxy-level failure

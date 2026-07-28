@@ -107,7 +107,7 @@ type DashboardStoreContextValue = {
     refreshStatus: () => Promise<void>;
     refreshGenerations: (workflowId: string) => Promise<void>;
     generateWorkflow: (workflowId: string) => Promise<GenerationEntry>;
-    updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>) => Promise<void>;
+    updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>) => Promise<void>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
@@ -308,7 +308,7 @@ export const DashboardStoreProvider: React.FC<{
     const updateGeneration = useCallback(async (
         workflowId: string,
         generateId: string,
-        body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>
+        body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>
     ) => {
         await updateGenerationApi(`${store.config.baseUrl}`, workflowId, generateId, body);
         // Refresh generations after update

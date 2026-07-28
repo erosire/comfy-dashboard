@@ -12,25 +12,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
-
-type GenerationResultItem = {
-    type: 'image' | 'video';
-    url: string;
-    mimeType: string;
-    size: number;
-    nodeId: string;
-};
-
-type GenerationEntry = {
-    id: string;
-    status: 'pending' | 'processing' | 'completed' | 'failed';
-    createdDate: string;
-    completedDate: string | null;
-    generatedTime: string | null;
-    error: string | null;
-    prompt: Record<string, unknown>;
-    result: GenerationResultItem[];
-};
+import {
+    patchGenerationFile,
+    type GenerationEntry,
+    type GenerationPatch
+} from './generation-store';
 
 function timestampFile(date: Date): string {
     const pad = (n: number) => String(n).padStart(2, '0');
@@ -78,7 +64,8 @@ export const workflowGenerateList = asHandlerMethod(async (_, parameters, variab
                 generatedTime: data.generatedTime ?? null,
                 error: data.error ?? null,
                 prompt: data.prompt ?? {},
-                result: Array.isArray(data.result) ? data.result : []
+                result: Array.isArray(data.result) ? data.result : [],
+                stream: Array.isArray(data.stream) ? data.stream : []
             });
         } catch {
             // Skip corrupted files
@@ -147,7 +134,8 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         generatedTime: null,
         error: null,
         prompt: workflowData,
-        result: []
+        result: [],
+        stream: []
     };
 
     fs.writeFileSync(filePath, JSON.stringify(generation, null, 2), 'utf-8');
@@ -173,34 +161,14 @@ export const workflowGenerateUpdate = asHandlerMethod(async (_, parameters, vari
         return { status: 400, response: { error: 'generate_id is required' } };
     }
 
-    const generationDir = path.join(
-        projectRoot, 'temporary/database/comfy-workflows', workflowId, 'generation'
-    );
-    const filePath = path.join(generationDir, `${generateId}.json`);
-
-    if (!fs.existsSync(filePath)) {
-        return { status: 404, response: { error: `Generation '${generateId}' not found` } };
-    }
-
-    // Read existing generation
-    let existing: GenerationEntry;
-    try {
-        existing = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    } catch {
-        return { status: 500, response: { error: 'Failed to read generation file' } };
-    }
-
     // Parse the request body from parameters.body
-    const body = (parameters.body ?? {}) as Record<string, unknown>;
+    const body = (parameters.body ?? {}) as GenerationPatch;
 
     // Merge updates — only overwrite provided fields
-    if (body.status !== undefined) existing.status = body.status as GenerationEntry['status'];
-    if (body.completedDate !== undefined) existing.completedDate = body.completedDate as string | null;
-    if (body.generatedTime !== undefined) existing.generatedTime = body.generatedTime as string | null;
-    if (body.error !== undefined) existing.error = body.error as string | null;
-    if (body.result !== undefined) existing.result = body.result as GenerationResultItem[];
-
-    fs.writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf-8');
+    const existing = patchGenerationFile(projectRoot, workflowId, generateId, body);
+    if (!existing) {
+        return { status: 404, response: { error: `Generation '${generateId}' not found` } };
+    }
 
     return {
         status: 200,

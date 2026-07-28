@@ -34,7 +34,19 @@ type PodEntry = {
     name: string;
     pod_url: string;
     status: 'spawning' | 'ready' | 'error';
+    /**
+     * Consecutive heartbeat failures. Reset to 0 on every successful probe.
+     * The pod (and its "Pod#N" button) is removed once this reaches
+     * MAX_POD_FAILURES — i.e. when the pod_url has stopped working.
+     */
+    failCount: number;
     run: RunState;
+    /**
+     * Generation currently being processed for this pod (server-side).
+     * Set on submission; the generations polling effect watches it and
+     * settles run.status to done/error once the server finishes.
+     */
+    activeGenerationId?: string;
     health?: CloudPodStatusResult;
     error?: string;
 };
@@ -45,8 +57,44 @@ type RunState =
     | { status: 'done'; events: CloudStreamEvent[] }
     | { status: 'error'; events: CloudStreamEvent[]; message: string };
 
+/** Approximate byte size of a base64 payload (accounts for padding). */
+function base64ByteSize(b64: string): number {
+    const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
+}
+
+/**
+ * Convert a data: URL into a fresh object URL for viewing.
+ * The caller owns the returned URL and MUST revokeObjectURL it when done.
+ * Returns null for non-data URLs or undecodable payloads.
+ */
+function dataUrlToBlobUrl(dataUrl: string): string | null {
+    if (!dataUrl.startsWith('data:')) return null;
+    const commaIdx = dataUrl.indexOf(',');
+    if (commaIdx === -1) return null;
+    try {
+        const meta = dataUrl.substring(0, commaIdx);
+        const b64 = dataUrl.substring(commaIdx + 1);
+        const mime = /^data:(.*?);/.exec(meta)?.[1] ?? 'image/png';
+        const byteChars = atob(b64);
+        const byteArray = new Uint8Array(byteChars.length);
+        for (let i = 0; i < byteChars.length; i++) {
+            byteArray[i] = byteChars.charCodeAt(i);
+        }
+        return URL.createObjectURL(new Blob([byteArray], { type: mime }));
+    } catch {
+        return null;
+    }
+}
+
 /** Maximum number of workflow items to display in the sidebar. */
 const MAX_SIDEBAR_ITEMS = 10;
+
+/** Heartbeat probe interval — keeps pods warm and detects dead pod_urls. */
+const POD_HEARTBEAT_MS = 30_000;
+
+/** Consecutive heartbeat failures before a dead pod removes itself. */
+const MAX_POD_FAILURES = 2;
 
 // ── Styled: shared ────────────────────────────────────────────────────
 
@@ -1616,8 +1664,50 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [viewerItems, setViewerItems] = React.useState<GenerationResultItem[]>([]);
     const [viewerIndex, setViewerIndex] = React.useState(0);
 
+    // ── Viewer blob lifecycle ───────────────────────────────────────
+    // Generation results persist data: URLs in the server-side json.
+    // Blob URLs are generated fresh each time the viewer opens (cheap,
+    // avoids re-rendering megabytes of base64 through React) and revoked
+    // when it closes — blobs are view-time only, never persisted.
+
+    const viewerBlobUrlsRef = React.useRef<string[]>([]);
+
+    const revokeViewerBlobs = React.useCallback(() => {
+        for (const url of viewerBlobUrlsRef.current) {
+            URL.revokeObjectURL(url);
+        }
+        viewerBlobUrlsRef.current = [];
+    }, []);
+
+    const openViewer = React.useCallback(
+        (items: GenerationResultItem[], index = 0) => {
+            revokeViewerBlobs(); // free blobs from any previously viewed generation
+            const mapped = items.map((item) => {
+                if (!item.url.startsWith('data:')) return item;
+                const blobUrl = dataUrlToBlobUrl(item.url);
+                if (!blobUrl) return item; // fall back to the raw URL (still renders)
+                viewerBlobUrlsRef.current.push(blobUrl);
+                return { ...item, url: blobUrl };
+            });
+            setViewerItems(mapped);
+            setViewerIndex(index);
+            setViewerOpen(true);
+        },
+        [revokeViewerBlobs]
+    );
+
+    const closeViewer = React.useCallback(() => {
+        setViewerOpen(false);
+        revokeViewerBlobs();
+    }, [revokeViewerBlobs]);
+
+    // Revoke any outstanding viewer blobs when the component unmounts.
+    React.useEffect(() => revokeViewerBlobs, [revokeViewerBlobs]);
+
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Monotonic counter for naming generation pods ("Pod#1", "Pod#2", …)
+    const podCounterRef = React.useRef(0);
 
     const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
 
@@ -1641,6 +1731,33 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }, 5000);
         return () => clearInterval(interval);
     }, [editingWorkflowId, refreshGenerations]);
+
+    // ── Sync pod buttons from polled generations ────────────────────
+    // Pod processing lives on the server; polling the generation list is
+    // what settles each "Pod#N" button's running → done/error state.
+
+    React.useEffect(() => {
+        setPods((prev) => {
+            let changed = false;
+            const next = prev.map((p): PodEntry => {
+                if (!p.activeGenerationId || p.run.status !== 'running') return p;
+                const gen = store.generations.find((g) => g.id === p.activeGenerationId);
+                if (!gen || gen.status === 'pending' || gen.status === 'processing') return p;
+                changed = true;
+                if (gen.status === 'completed') {
+                    const run: RunState = { status: 'done', events: [] };
+                    return { ...p, activeGenerationId: undefined, run };
+                }
+                const run: RunState = {
+                    status: 'error',
+                    events: [],
+                    message: gen.error ?? 'Generation failed'
+                };
+                return { ...p, activeGenerationId: undefined, run };
+            });
+            return changed ? next : prev;
+        });
+    }, [store.generations]);
 
     // Debounced search
     const handleSearchChange = React.useCallback(
@@ -1675,6 +1792,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(full.raw))));
             setFileName(`${full.name}.json`);
             setPods([]);
+            podCounterRef.current = 0;
         }
     }, [store.selectedWorkflow]);
 
@@ -1708,6 +1826,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
                     setFileName(file.name);
                     setPods([]);
+                    podCounterRef.current = 0;
                     // Auto-save the workflow with the filename as the name
                     autoSaveWorkflow(parsed, name);
                 } catch {
@@ -1840,6 +1959,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             setRawJson(null);
             setFileName('');
             setPods([]);
+            podCounterRef.current = 0;
         } catch (err: any) {
             alert(`Failed to delete: ${err.message ?? String(err)}`);
         }
@@ -1865,17 +1985,138 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }
     }, [editingWorkflowId, renameValue, updateWorkflow]);
 
+    // ── Run a generation on a cloud pod ────────────────────────────
+    // Shared by "Generate" (spawns a fresh pod) and "Pod#N" (reuses a pod).
+    //
+    // 1. Creates a generation snapshot via the workflow generation API —
+    //    the prompt json lands in the same place as before
+    //    (POST /v1/comfy/workflows/:id/generate).
+    // 2. Submits it to POST /v1/comfy/cloud/prompt with the pod_url and the
+    //    workflow/generation ids. The SERVER consumes the pod's NDJSON
+    //    stream and updates the generation json by itself — this call
+    //    returns immediately (202).
+    // 3. Client-side we are done: the continuous generations polling
+    //    updates the sidebar with progress, and settles the pod button's
+    //    running → done/error state (see the sync effect below).
+
+    const runGenerationOnPod = React.useCallback(
+        async (podUrl: string, podId?: string) => {
+            if (nodes.length === 0 || !editingWorkflowId) return;
+
+            const updatePod = (patch: Partial<PodEntry>) => {
+                if (!podId) return;
+                setPods((prev) => prev.map((p) => (p.id === podId ? { ...p, ...patch } : p)));
+            };
+
+            // Step 1 — snapshot the workflow into a generation json (same
+            // place as the workflow generation API).
+            const generation = await generateWorkflow(editingWorkflowId);
+            console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
+
+            try {
+                // Step 2 — submit and be done. The server processes the
+                // pod stream in the background from here.
+                const apiPrompt = workflowToApiPrompt(generation.prompt);
+                await cloudPrompt(baseUrl, {
+                    pod_url: podUrl,
+                    prompt: apiPrompt,
+                    workflow_id: editingWorkflowId,
+                    generation_id: generation.id,
+                    extra_data: {
+                        workflow_id: editingWorkflowId,
+                        generation_id: generation.id
+                    }
+                });
+                // Accepted — mark the pod busy until polling settles it.
+                updatePod({ run: { status: 'running', events: [] }, activeGenerationId: generation.id });
+            } catch (err: any) {
+                updatePod({ run: { status: 'error', events: [], message: err.message ?? String(err) } });
+                throw err;
+            }
+        },
+        [baseUrl, nodes.length, editingWorkflowId, generateWorkflow]
+    );
+
     // ── Generate workflow ──────────────────────────────────────────
-    // Sends the current workflow to the server to create a generation file.
+    // Creates a cloud pod first, then runs a new generation snapshot on it
+    // via POST /v1/comfy/cloud/prompt. The "Pod#N" button appears
+    // IMMEDIATELY on click — in "spawning" state (spinner) while the
+    // pod_url is being resolved — then flips to ready. Clicking a ready
+    // Pod#N does the same thing but reuses that pod (skipping pod creation).
+    //
+    // Generate is NEVER blocked: every click spawns a fresh pod, as fast
+    // as the user can click. Per-pod status (spawning, running, done/error)
+    // lives on the individual "Pod#N" button, not on Generate.
 
     const handleGenerate = React.useCallback(async () => {
         if (nodes.length === 0 || !editingWorkflowId) return;
+
+        // Step 1 — register the pod entry immediately so the "Pod#N"
+        // button shows up while the pod_url is still being resolved.
+        podCounterRef.current += 1;
+        const podNumber = podCounterRef.current;
+        const podEntry: PodEntry = {
+            id: `gen-pod-${Date.now()}-${podNumber}`,
+            podNumber,
+            name: `Pod#${podNumber}`,
+            pod_url: '',
+            status: 'spawning',
+            failCount: 0,
+            run: { status: 'idle' }
+        };
+        setPods((prev) => [...prev, podEntry]);
+
+        // Step 2 — create the cloud pod
+        console.log(`[Generate] Spawning Pod#${podNumber}...`);
+        let podUrl: string;
         try {
-            await generateWorkflow(editingWorkflowId);
+            const result = await cloud(baseUrl, { type: 'create' });
+            if (!('pod_url' in result)) {
+                throw new Error('Pod spawn response did not contain pod_url');
+            }
+            podUrl = (result as { pod_url: string }).pod_url;
+        } catch (err: any) {
+            // Spawn failed — no pod_url ever existed; remove the button.
+            setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
+            alert(`Failed to spawn Pod#${podNumber}: ${err.message ?? String(err)}`);
+            return;
+        }
+        console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl}`);
+
+        // Step 3 — pod_url exists: the pod is now usable
+        setPods((prev) =>
+            prev.map((p) =>
+                p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p
+            )
+        );
+
+        // Step 4 — snapshot + submit for server-side processing.
+        // A failure here keeps the pod — its button shows the run error
+        // and stays reusable.
+        try {
+            await runGenerationOnPod(podUrl, podEntry.id);
         } catch (err: any) {
             alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
-    }, [editingWorkflowId, nodes.length, generateWorkflow]);
+    }, [nodes.length, editingWorkflowId, baseUrl, runGenerationOnPod]);
+
+    // ── Pod#N: same as Generate but reuses an existing pod_url ──────
+    // Independent per pod: only blocked while THIS pod has a run in
+    // flight — other pods (and Generate) stay fully interactive.
+
+    const handlePodGenerate = React.useCallback(
+        async (pod: PodEntry) => {
+            if (nodes.length === 0 || !editingWorkflowId) return;
+            if (!pod.pod_url || pod.status !== 'ready' || pod.run.status === 'running') return;
+            try {
+                console.log(`[Pod#${pod.podNumber}] Reusing pod ${pod.pod_url}`);
+                await runGenerationOnPod(pod.pod_url, pod.id);
+            } catch (err: any) {
+                alert(`Failed to generate: ${err.message ?? String(err)}`);
+            }
+        },
+        [nodes.length, editingWorkflowId, runGenerationOnPod]
+    );
 
     // ── Spawn agent: create a cloud pod and run all pending generations ──
     //
@@ -1961,7 +2202,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             executionStartMs = now;
                         }
 
-                        // Capture imagepreview.update — extract base64 and collect as result
+                        // Capture imagepreview.update — store the data URL as-is.
+                        // (blob: URLs die with the page and MUST NOT be persisted
+                        // in the generation json; data URLs survive, and the viewer
+                        // converts them to throwaway blob URLs on open.)
                         if (event.type === 'imagepreview.update') {
                             const imageData = (event.data as any)?.image as string | undefined;
                             const imageNodeId = (event.data as any)?.node_id as string | undefined;
@@ -1972,24 +2216,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     const b64 = imageData.substring(commaIdx + 1);
                                     const mimeMatch = meta.match(/^data:(.*?);/);
                                     const mime = mimeMatch ? mimeMatch[1] : 'image/png';
-                                    const byteChars = atob(b64);
-                                    const byteArray = new Uint8Array(byteChars.length);
-                                    for (let k = 0; k < byteChars.length; k++) {
-                                        byteArray[k] = byteChars.charCodeAt(k);
-                                    }
-                                    const blob = new Blob([byteArray], { type: mime });
-                                    const blobUrl = URL.createObjectURL(blob);
                                     console.log(
                                         `[Agent] Image from node ${imageNodeId}:`,
-                                        `Blob URL: ${blobUrl}`,
                                         `MIME: ${mime}`,
-                                        `Size: ${blob.size} bytes`
+                                        `Size: ${base64ByteSize(b64)} bytes`
                                     );
                                     collectedResults.push({
                                         type: 'image',
-                                        url: blobUrl,
+                                        url: imageData,
                                         mimeType: mime,
-                                        size: blob.size,
+                                        size: base64ByteSize(b64),
                                         nodeId: imageNodeId ?? ''
                                     });
                                 }
@@ -2061,12 +2297,43 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     }, [agentRunning, baseUrl, store.generations, editingWorkflowId, updateGeneration, refreshGenerations]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
-    // Pods scale to zero ~120s after the last active connection.
-    // HIT GET <pod_url>/ periodically to reset that idle timer.
+    // Pods scale to zero ~120s after the last active connection, so probing
+    // periodically both resets that idle timer AND detects dead pods.
+    //
+    // Every probe resets the pod's strike counter on success. A failure
+    // (pod unreachable, or health.healthy === false) records a strike:
+    // the first strike marks the pod as error (button disabled, stays
+    // visible in case it recovers); once strikes reach MAX_POD_FAILURES
+    // the pod's pod_url is considered dead and the pod is removed
+    // entirely — its "Pod#N" button and badge disappear.
+    //
     // Skips the tick if the previous one is still in flight (cold start).
 
     const podsRef = React.useRef(pods);
     podsRef.current = pods;
+
+    // Record a failed heartbeat probe for a pod. Reads the freshest entry
+    // from state so concurrent success/reset can't clobber the count.
+    const strikePod = React.useCallback((podId: string, message: string) => {
+        setPods((prev) => {
+            const current = prev.find((ep) => ep.id === podId);
+            if (!current) return prev;
+            const failCount = current.failCount + 1;
+            if (failCount >= MAX_POD_FAILURES) {
+                console.warn(
+                    `[Heartbeat] Pod#${current.podNumber} removed — pod_url stopped working ` +
+                    `(${failCount} consecutive probe failures, last: ${message})`
+                );
+                return prev.filter((ep) => ep.id !== podId);
+            }
+            console.warn(
+                `[Heartbeat] Pod#${current.podNumber} probe failed (${failCount}/${MAX_POD_FAILURES}): ${message}`
+            );
+            return prev.map((ep) =>
+                ep.id === podId ? { ...ep, status: 'error', failCount, error: message } : ep
+            );
+        });
+    }, []);
 
     React.useEffect(() => {
         let running = false;
@@ -2076,32 +2343,42 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             try {
                 const currentPods = podsRef.current;
                 for (const p of currentPods) {
-                    if (p.status !== 'ready' || !p.pod_url) continue;
+                    // Probe ready AND previously-failed pods so they can
+                    // either recover or accumulate the final strike.
+                    if (p.status === 'spawning' || !p.pod_url) continue;
                     try {
                         const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
-                        if ('health' in result) {
+                        const statusResult = result as CloudPodStatusResult;
+                        const healthy =
+                            'health' in result ? statusResult.health?.healthy !== false : true;
+                        if (healthy) {
+                            // Alive — clear strikes, refresh health, mark ready
                             setPods((prev) =>
                                 prev.map((ep) =>
-                                    ep.id === p.id ? { ...ep, health: result as CloudPodStatusResult } : ep
+                                    ep.id === p.id
+                                        ? {
+                                              ...ep,
+                                              status: 'ready',
+                                              failCount: 0,
+                                              error: undefined,
+                                              health: statusResult
+                                          }
+                                        : ep
                                 )
                             );
+                        } else {
+                            strikePod(p.id, statusResult.health?.error ?? 'pod reported unhealthy');
                         }
                     } catch (err: any) {
-                        setPods((prev) =>
-                            prev.map((ep) =>
-                                ep.id === p.id
-                                    ? { ...ep, status: 'error', error: err.message ?? String(err) }
-                                    : ep
-                            )
-                        );
+                        strikePod(p.id, err.message ?? String(err));
                     }
                 }
             } finally {
                 running = false;
             }
-        }, 30_000);
+        }, POD_HEARTBEAT_MS);
         return () => clearInterval(interval);
-    }, [baseUrl]);
+    }, [baseUrl, strikePod]);
 
     // ── Sidebar: workflow list panel ────────────────────────────────
 
@@ -2195,15 +2472,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                             ? { cursor: 'pointer', transition: `border-color ${theme.transition}` }
                                             : undefined
                                     }
-                                    onClick={
-                                        hasResults
-                                            ? () => {
-                                                  setViewerItems(gen.result);
-                                                  setViewerIndex(0);
-                                                  setViewerOpen(true);
-                                              }
-                                            : undefined
-                                    }
+                                    onClick={hasResults ? () => openViewer(gen.result) : undefined}
                                 >
                                     <QueueItemHeader>
                                         <QueueItemName title={gen.id}>
@@ -2744,12 +3013,65 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
             <div style={{ flex: '1 1 auto' }} />
 
-            {/* Generate: saves the workflow to a generation file on the server */}
+            {/* Pod#N: re-run generation on an existing pod (skips pod creation).
+                Appears the moment Generate is clicked (spawning spinner while the
+                pod_url resolves) and carries its own status: spinner while
+                spawning / while ITS run is in flight, colored border for the
+                last result, heartbeat removal when the pod_url dies. */}
+            {pods.map((p) => {
+                const isSpawning = p.status === 'spawning';
+                const isRunning = p.run.status === 'running';
+                const isDisabled =
+                    isSpawning || isRunning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
+                return (
+                    <Btn
+                        key={p.id}
+                        className="sg-hover"
+                        onClick={() => handlePodGenerate(p)}
+                        disabled={isDisabled}
+                        title={
+                            isSpawning
+                                ? `Pod#${p.podNumber} — starting up…`
+                                : p.status !== 'ready'
+                                  ? `Pod#${p.podNumber} — ${p.error || 'unavailable'} ` +
+                                    `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
+                                  : isRunning
+                                    ? `Pod#${p.podNumber} — generation running on ${p.pod_url}`
+                                    : `Run a new generation on ${p.pod_url}`
+                        }
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            borderColor:
+                                isSpawning || isRunning
+                                    ? theme.accent
+                                    : p.run.status === 'error'
+                                      ? theme.dangerBorder
+                                      : p.run.status === 'done'
+                                        ? theme.success
+                                        : theme.border
+                        }}
+                        data-testid={`pod-generate-${p.podNumber}`}
+                    >
+                        {(isSpawning || isRunning) && <SpinnerEl />}
+                        Pod#{p.podNumber}
+                    </Btn>
+                );
+            })}
+
+            {/* Generate: spawns a fresh cloud pod, snapshots the workflow, and
+                streams the run back via POST /v1/comfy/cloud/prompt.
+                Never blocked — every click spawns another pod. */}
             <BtnPrimary
                 className="sg-primary"
                 onClick={handleGenerate}
                 disabled={nodes.length === 0}
-                title={nodes.length === 0 ? 'Load a workflow first' : 'Generate workflow'}
+                title={
+                    nodes.length === 0
+                        ? 'Load a workflow first'
+                        : 'Spawn a new cloud pod and generate'
+                }
             >
                 Generate
             </BtnPrimary>
@@ -2884,9 +3206,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         justifyContent: 'center',
                         backgroundColor: 'rgba(0,0,0,0.85)'
                     }}
-                    onClick={() => setViewerOpen(false)}
+                    onClick={closeViewer}
                     onKeyDown={(e) => {
-                        if (e.key === 'Escape') setViewerOpen(false);
+                        if (e.key === 'Escape') closeViewer();
                         if (e.key === 'ArrowLeft') setViewerIndex((i) => (i > 0 ? i - 1 : viewerItems.length - 1));
                         if (e.key === 'ArrowRight') setViewerIndex((i) => (i < viewerItems.length - 1 ? i + 1 : 0));
                     }}
