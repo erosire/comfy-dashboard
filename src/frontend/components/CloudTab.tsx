@@ -1674,13 +1674,17 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                         {nodes.map((node) => {
                             const isSubgraph = !!node.subgraphDef;
                             const registryEntry = comfyNodeRegistry[node.classType];
+                            const isUnregistered = !isSubgraph && !registryEntry;
                             return (
                             <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}
-                                style={isSubgraph ? { border: `1px solid ${theme.accent}40` } : undefined}
+                                style={isUnregistered
+                                    ? { border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
+                                    : isSubgraph ? { border: `1px solid ${theme.accent}40` } : undefined}
                             >
                                 <NodeHeader style={{
                                     backgroundColor: node.color
                                         ? node.color
+                                        : isUnregistered ? 'rgba(248, 113, 113, 0.20)'
                                         : isSubgraph ? 'rgba(129, 140, 248, 0.15)' : undefined,
                                 }}>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -1689,9 +1693,25 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                                 ◈
                                             </span>
                                         )}
-                                        <NodeClassType style={isSubgraph ? { color: theme.accent } : undefined}>
+                                        <NodeClassType style={
+                                            isSubgraph ? { color: theme.accent }
+                                            : isUnregistered ? { color: theme.danger }
+                                            : undefined
+                                        }>
                                             {registryEntry?.displayName ?? node.classType}
                                         </NodeClassType>
+                                        {isUnregistered && (
+                                            <span style={{
+                                                fontSize: theme.fontSize.xs,
+                                                color: theme.danger,
+                                                border: `1px solid ${theme.dangerBorder}`,
+                                                borderRadius: theme.radiusSm,
+                                                padding: '0 4px',
+                                                backgroundColor: theme.dangerSoft,
+                                            }}>
+                                                not registered
+                                            </span>
+                                        )}
                                         {registryEntry?.category && (
                                             <span style={{
                                                 fontSize: theme.fontSize.xs,
