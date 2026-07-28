@@ -7,14 +7,13 @@ import React, { useEffect } from 'react';
 import { useDashboardStore } from '../context';
 
 export const BootstrapLayer: React.FC = () => {
-    const { refreshWorkflows, refreshQueue, refreshStatus, refreshCloudQueue } = useDashboardStore();
+    const { refreshWorkflows, refreshQueue, refreshStatus } = useDashboardStore();
 
     useEffect(() => {
         refreshWorkflows();
         refreshQueue();
         refreshStatus();
-        refreshCloudQueue();
-    }, [refreshWorkflows, refreshQueue, refreshStatus, refreshCloudQueue]);
+    }, [refreshWorkflows, refreshQueue, refreshStatus]);
 
     return null;
 };

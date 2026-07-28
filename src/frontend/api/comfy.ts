@@ -227,6 +227,24 @@ export async function fetchStatus(baseUrl: string): Promise<ServerStatus> {
     return (await response.json()) as ServerStatus;
 }
 
+// Generate a workflow — creates a generation file on the server.
+export async function generateWorkflow(
+    baseUrl: string,
+    workflowId: string
+): Promise<{ generated: string }> {
+    const url = `${baseUrl}/${encodeURIComponent(workflowId)}/generate`;
+    const response = await fetch(url, { method: 'POST' });
+    if (!response.ok) {
+        let message = `Failed to generate workflow (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    return (await response.json()) as { generated: string };
+}
+
 // Poll a URL at intervals until a stop condition is met.
 export type PollFinalResult<T> =
     | { status: 'data'; data: T }

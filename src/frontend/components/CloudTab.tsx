@@ -11,8 +11,8 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
-import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta, CloudQueueItem } from '../api';
-import { cloud, cloudPrompt, cloudReadNdjson } from '../api';
+import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta } from '../api';
+import { cloud } from '../api';
 import { useDashboardStore } from '../context';
 import type {
     ApiPromptNode,
@@ -247,85 +247,6 @@ const SidebarCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
     fontWeight: 400
-});
-
-// ── Styled: right sidebar (queued tasks) ─────────────────────────────
-
-const QueueScroll = styled('div')({
-    flex: '1 1 auto',
-    overflowY: 'auto',
-    padding: '0 6px 12px'
-});
-
-const QueueItemEl = styled('div')({
-    display: 'flex',
-    flexDirection: 'column',
-    padding: '8px 10px',
-    borderRadius: theme.radiusMd,
-    border: `1px solid ${theme.border}`,
-    marginBottom: 4,
-    backgroundColor: theme.surface2
-});
-
-const QueueItemHeader = styled('div')({
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4
-});
-
-const QueueItemName = styled('div')({
-    fontSize: theme.fontSize.sm,
-    fontWeight: 600,
-    color: theme.text,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
-    flex: '1 1 auto',
-    minWidth: 0
-});
-
-const QueueItemMeta = styled('div')({
-    fontSize: theme.fontSize.xs,
-    color: theme.textFaint,
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6
-});
-
-const QueueStatusBadge = styled('span')({
-    display: 'inline-flex',
-    alignItems: 'center',
-    fontSize: theme.fontSize.xs,
-    padding: '1px 6px',
-    borderRadius: theme.radiusSm,
-    fontWeight: 600,
-    flex: '0 0 auto'
-});
-
-const QueueDeleteBtn = styled('button')({
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 22,
-    height: 22,
-    flex: '0 0 auto',
-    borderRadius: theme.radiusSm,
-    border: `1px solid transparent`,
-    backgroundColor: 'transparent',
-    color: theme.textFaint,
-    cursor: 'pointer',
-    fontSize: theme.fontSize.xs,
-    lineHeight: 1,
-    padding: 0,
-    transition: `color ${theme.transition}, background-color ${theme.transition}`,
-    '&:hover': {
-        color: theme.danger,
-        backgroundColor: theme.dangerSoft,
-        border: `1px solid ${theme.dangerBorder}`
-    }
 });
 
 // ── Styled: right content (editor) ────────────────────────────────────
@@ -1225,23 +1146,6 @@ function dataTypeLabel(type: DataType): string {
     return String(type);
 }
 
-/** Format an ISO timestamp as a relative time string (e.g. "2m ago"). */
-function formatRelativeTime(isoString: string | null): string {
-    if (!isoString) return '';
-    const date = new Date(isoString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
-}
-
 function eventSummary(event: CloudStreamEvent): string {
     switch (event.type) {
         case 'proxy_enqueue':
@@ -1294,13 +1198,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const {
         store,
         createWorkflow,
+        updateWorkflow,
         deleteWorkflow,
         cloneWorkflow,
         selectWorkflow,
         searchWorkflows,
-        refreshCloudQueue,
-        submitCloudPrompt,
-        deleteCloudPrompt
+        generateWorkflow
     } = useDashboardStore();
 
     const [nodes, setNodes] = React.useState<UINode[]>([]);
@@ -1315,20 +1218,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         return true;
     });
     const [searchText, setSearchText] = React.useState(store.searchQuery);
+    const [renameOpen, setRenameOpen] = React.useState(false);
+    const [renameValue, setRenameValue] = React.useState('');
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
-
-    // Refresh cloud queue on mount and periodically
-    React.useEffect(() => {
-        refreshCloudQueue();
-        const interval = setInterval(() => {
-            refreshCloudQueue();
-        }, 10000); // Poll every 10s
-        return () => clearInterval(interval);
-    }, [refreshCloudQueue]);
 
     // Determine if we're editing a saved workflow (loaded from sidebar)
     const editingWorkflowId = store.selectedId;
@@ -1525,114 +1421,37 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }
     }, [editingWorkflowId, deleteWorkflow]);
 
-    // ── Pod auto-numbering ──────────────────────────────────────────
-    // Finds the lowest available number, reusing gaps.
-    // e.g. if pods (1), (2), (5) exist → next is 3.
+    // ── Rename workflow ────────────────────────────────────────────
 
-    const nextPodNumber = React.useCallback((): number => {
-        const used = new Set(pods.map((p) => p.podNumber));
-        let n = 1;
-        while (used.has(n)) n++;
-        return n;
-    }, [pods]);
+    const openRename = React.useCallback(() => {
+        if (!editingWorkflowId || !store.selectedWorkflow) return;
+        setRenameValue(store.selectedWorkflow.name);
+        setRenameOpen(true);
+    }, [editingWorkflowId, store.selectedWorkflow]);
 
-    // ── Automated submit flow ───────────────────────────────────────
-    // Spawns a new auto-numbered pod, waits for it to become ready,
-    // then automatically submits the current workflow to it.
-
-    /** Helper to update a single pod's run state. */
-    const updatePodRun = React.useCallback((podId: string, runState: RunState) => {
-        setPods((prev) => prev.map((p) => (p.id === podId ? { ...p, run: runState } : p)));
-    }, []);
-
-    const handleSpawnAndSubmit = React.useCallback(async () => {
-        if (nodes.length === 0) return;
-
-        const num = nextPodNumber();
-        const id = `pod-${Date.now()}`;
-        const displayName = String(num);
-
-        // Add pod in spawning state
-        setPods((prev) => [
-            ...prev,
-            { id, podNumber: num, name: displayName, pod_url: '', status: 'spawning', run: { status: 'idle' } }
-        ]);
-
+    const submitRename = React.useCallback(async () => {
+        if (!editingWorkflowId) return;
+        const trimmed = renameValue.trim();
+        if (!trimmed) return;
         try {
-            // Spawn the pod
-            const result = await cloud(baseUrl, { type: 'create', name: displayName });
-            if (!('pod_url' in result)) throw new Error('Unexpected response from create');
-
-            const podUrl = result.pod_url;
-
-            // Mark ready
-            setPods((prev) =>
-                prev.map((p) => (p.id === id ? { ...p, pod_url: podUrl, status: 'ready' } : p))
-            );
-
-            // Automatically submit the workflow to the new pod
-            updatePodRun(id, { status: 'running', events: [] });
-            const prompt = buildPrompt();
-
-            const response = await cloudPrompt(baseUrl, { pod_url: podUrl, prompt });
-
-            const events: CloudStreamEvent[] = [];
-            for await (const event of cloudReadNdjson(response)) {
-                events.push(event);
-                updatePodRun(id, { status: 'running', events: [...events] });
-
-                if (
-                    event.type === 'proxy_done' ||
-                    event.type === 'execution_error' ||
-                    event.type === 'proxy_error' ||
-                    event.type === 'execution_interrupted'
-                ) {
-                    const isErr = event.type !== 'proxy_done';
-                    updatePodRun(id, { status: isErr ? 'error' : 'done', events, message: isErr ? eventSummary(event) : '' });
-                    return;
-                }
-            }
-            updatePodRun(id, { status: 'done', events });
+            await updateWorkflow(editingWorkflowId, { name: trimmed });
+            setRenameOpen(false);
         } catch (err: any) {
-            // Mark pod as error if it was a spawn failure
-            setPods((prev) =>
-                prev.map((p) =>
-                    p.id === id && p.status !== 'ready'
-                        ? { ...p, status: 'error', error: err.message ?? String(err) }
-                        : p
-                )
-            );
-            updatePodRun(id, { status: 'error', events: [], message: err.message ?? String(err) });
+            alert(`Failed to rename: ${err.message ?? String(err)}`);
         }
-    }, [baseUrl, nodes, buildPrompt, nextPodNumber, updatePodRun]);
+    }, [editingWorkflowId, renameValue, updateWorkflow]);
 
-    // ── Queue submit flow ────────────────────────────────────────
-    // Submits the current workflow to the cloud queue for server-side
-    // processing. Stores enough information for later execution.
+    // ── Generate workflow ──────────────────────────────────────────
+    // Sends the current workflow to the server to create a generation file.
 
-    const handleQueueSubmit = React.useCallback(async () => {
-        if (nodes.length === 0) return;
-
+    const handleGenerate = React.useCallback(async () => {
+        if (nodes.length === 0 || !editingWorkflowId) return;
         try {
-            const prompt = buildPrompt();
-            await submitCloudPrompt({
-                prompt,
-                workflowId: editingWorkflowId ?? undefined,
-                workflowName: store.selectedWorkflow?.name ?? (fileName.replace(/\.json$/i, '') || 'Untitled'),
-                nodeCount: nodes.length
-            });
+            await generateWorkflow(baseUrl, editingWorkflowId);
         } catch (err: any) {
-            alert(`Failed to queue prompt: ${err.message ?? String(err)}`);
+            alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
-    }, [nodes, buildPrompt, editingWorkflowId, store.selectedWorkflow, fileName, submitCloudPrompt]);
-
-    const handleDeleteQueueItem = React.useCallback(async (promptId: string) => {
-        try {
-            await deleteCloudPrompt(promptId);
-        } catch (err: any) {
-            alert(`Failed to remove from queue: ${err.message ?? String(err)}`);
-        }
-    }, [deleteCloudPrompt]);
+    }, [baseUrl, editingWorkflowId, nodes.length]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection.
@@ -1676,19 +1495,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }, 30_000);
         return () => clearInterval(interval);
     }, [baseUrl]);
-
-    // ── Derived ──────────────────────────────────────────────────────
-
-    const queueStatusColor = (status: string) => {
-        switch (status) {
-            case 'queued': return { color: theme.textDim, bg: theme.surface2 };
-            case 'processing': return { color: theme.accent, bg: theme.accentSoft };
-            case 'completed': return { color: theme.success, bg: theme.successSoft };
-            case 'failed': return { color: theme.danger, bg: theme.dangerSoft };
-            case 'cancelled': return { color: theme.textFaint, bg: theme.surface2 };
-            default: return { color: theme.textDim, bg: theme.surface2 };
-        }
-    };
 
     // ── Sidebar: workflow list panel ────────────────────────────────
 
@@ -1741,63 +1547,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     </EmptyHint>
                 )}
             </SidebarScroll>
-
-            {/* ── Queued Tasks section ──────────────────────── */}
-            <div style={{ borderTop: `1px solid ${theme.border}`, margin: '0 6px' }} />
-            <SidebarHeader>
-                <span>
-                    Queued Tasks <SidebarCount>({store.cloudQueue.length})</SidebarCount>
-                </span>
-            </SidebarHeader>
-            <QueueScroll className="sg-scroll" data-testid="queue-list" style={{ flex: '1 1 auto', overflowY: 'auto', padding: '0 6px 12px' }}>
-                {store.cloudQueue.length === 0 && (
-                    <EmptyHint>No queued tasks.</EmptyHint>
-                )}
-                {store.cloudQueue.map((item) => {
-                    const sc = queueStatusColor(item.status);
-                    return (
-                        <QueueItemEl key={item.prompt_id} data-testid={`queue-item-${item.prompt_id}`}>
-                            <QueueItemHeader>
-                                <QueueItemName title={item.workflowName ?? item.prompt_id}>
-                                    {item.workflowName ?? 'Unnamed'}
-                                </QueueItemName>
-                                {item.status === 'queued' && (
-                                    <QueueDeleteBtn
-                                        onClick={() => handleDeleteQueueItem(item.prompt_id)}
-                                        title="Remove from queue"
-                                        data-testid={`queue-delete-${item.prompt_id}`}
-                                    >
-                                        ✕
-                                    </QueueDeleteBtn>
-                                )}
-                            </QueueItemHeader>
-                            <QueueItemMeta>
-                                <QueueStatusBadge style={{ color: sc.color, backgroundColor: sc.bg }}>
-                                    {item.status}
-                                </QueueStatusBadge>
-                                {item.nodeCount > 0 && (
-                                    <span>{item.nodeCount} nodes</span>
-                                )}
-                                <span title={item.submittedAt}>
-                                    {formatRelativeTime(item.submittedAt)}
-                                </span>
-                            </QueueItemMeta>
-                            {item.error && (
-                                <div style={{
-                                    fontSize: theme.fontSize.xs,
-                                    color: theme.danger,
-                                    marginTop: 4,
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                    whiteSpace: 'nowrap' as const
-                                }} title={item.error}>
-                                    {item.error}
-                                </div>
-                            )}
-                        </QueueItemEl>
-                    );
-                })}
-            </QueueScroll>
         </SidebarPanel>
     );
 
@@ -1880,15 +1629,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                         {store.selectedWorkflow.description}
                                     </span>
                                 )}
-                                <span
-                                    style={{
-                                        fontSize: theme.fontSize.xs,
-                                        color: theme.textFaint,
-                                        whiteSpace: 'nowrap' as const
-                                    }}
-                                >
-                                    ({nodes.length} nodes)
-                                </span>
+
                             </div>
                             {nodes.length > 0 && (
                                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
@@ -2271,24 +2012,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
             <div style={{ flex: '1 1 auto' }} />
 
-            {/* Submit: always available — spawns a new pod + submits */}
+            {/* Generate: saves the workflow to a generation file on the server */}
             <BtnPrimary
                 className="sg-primary"
-                onClick={handleSpawnAndSubmit}
+                onClick={handleGenerate}
                 disabled={nodes.length === 0}
-                title={nodes.length === 0 ? 'Load a workflow first' : 'Spawn pod & submit workflow'}
+                title={nodes.length === 0 ? 'Load a workflow first' : 'Generate workflow'}
             >
-                Submit
+                Generate
             </BtnPrimary>
-
-            {/* Queued: saves the workflow to the server queue for later processing */}
-            <Btn
-                onClick={handleQueueSubmit}
-                disabled={nodes.length === 0}
-                title={nodes.length === 0 ? 'Load a workflow first' : 'Add workflow to server queue'}
-            >
-                Queued
-            </Btn>
         </div>
     );
 
@@ -2299,7 +2031,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             <ToggleButton onClick={toggleSidebar} className="sg-hover" aria-label="Toggle sidebar">
                 ☰
             </ToggleButton>
-            <HeaderTitle>Comfy Dashboard</HeaderTitle>
+            <HeaderTitle
+                onClick={isEditingSaved ? openRename : undefined}
+                style={isEditingSaved ? { cursor: 'pointer' } : undefined}
+            >
+                {isEditingSaved && store.selectedWorkflow ? store.selectedWorkflow.name : 'Comfy Dashboard'}
+            </HeaderTitle>
 
             {store.loadWarning && (
                 <Badge style={{ marginLeft: 8, color: theme.warning, borderColor: theme.warningSoft }}>
@@ -2314,14 +2051,70 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     // ── Layout ───────────────────────────────────────────────────────
 
     return (
-        <ComfyDashboard
-            sidebarOpen={sidebarOpen}
-            onOverlayClick={toggleSidebar}
-            headerControls={header}
-            sidebar={sidebar}
-            content={content}
-            footer={footer}
-        />
+        <>
+            <ComfyDashboard
+                sidebarOpen={sidebarOpen}
+                onOverlayClick={toggleSidebar}
+                headerControls={header}
+                sidebar={sidebar}
+                content={content}
+                footer={footer}
+            />
+
+            {/* Rename dialog */}
+            {renameOpen && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 1000,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: 'rgba(0,0,0,0.5)'
+                    }}
+                    onClick={() => setRenameOpen(false)}
+                >
+                    <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                            backgroundColor: theme.surface2,
+                            border: `1px solid ${theme.border}`,
+                            borderRadius: theme.radiusLg,
+                            padding: 20,
+                            minWidth: 320,
+                            boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+                        }}
+                    >
+                        <div style={{ fontSize: theme.fontSize.sm, fontWeight: 600, color: theme.text, marginBottom: 12 }}>
+                            Rename Workflow
+                        </div>
+                        <input
+                            type="text"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') submitRename(); }}
+                            autoFocus
+                            style={{
+                                width: '100%',
+                                padding: '6px 10px',
+                                fontSize: theme.fontSize.sm,
+                                borderRadius: theme.radiusMd,
+                                border: `1px solid ${theme.border}`,
+                                backgroundColor: theme.surface1,
+                                color: theme.text,
+                                outline: 'none',
+                                boxSizing: 'border-box' as const
+                            }}
+                        />
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+                            <Btn onClick={() => setRenameOpen(false)}>Cancel</Btn>
+                            <BtnPrimary onClick={submitRename}>Save</BtnPrimary>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
     );
 });
 

@@ -7,9 +7,6 @@
 //   POST /v1/comfy/cloud          → { pod_url }  (create — spawner 302 redirect)
 //                                or { health, models_dir, models } (status)
 //   POST /v1/comfy/cloud/prompt   → NDJSON stream (raw Response)
-//   POST /v1/comfy/cloud/queue    → { prompt_id } (submit to queue)
-//    GET /v1/comfy/cloud/queue    → { queue: CloudQueueItem[] } (list queue)
-//  DELETE /v1/comfy/cloud/queue/:promptId → { success } (remove from queue)
 //
 // The two-tier architecture mirrors beam_comfy_service.yaml:
 //   Tier 1 — Spawner: GET /spawn.json on the Beam spawner creates a fresh
@@ -44,34 +41,6 @@ export type CloudPodStatusResult = {
 export type CloudStreamEvent = {
     type: string;
     data: Record<string, unknown>;
-};
-
-// ── Cloud Queue Types ─────────────────────────────────────────────────
-
-export type CloudQueueItem = {
-    prompt_id: string;
-    pod_url: string | null;
-    workflowId: string | null;
-    workflowName: string | null;
-    nodeCount: number;
-    status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
-    submittedAt: string;
-    startedAt: string | null;
-    completedAt: string | null;
-    error: string | null;
-};
-
-/** Request body for submitting a prompt to the cloud queue. */
-export type CloudQueueSubmitBody = {
-    prompt: Record<string, unknown>;
-    pod_url?: string;
-    client_id?: string;
-    extra_data?: Record<string, unknown>;
-    front?: boolean;
-    number?: number;
-    workflowId?: string;
-    workflowName?: string;
-    nodeCount?: number;
 };
 
 // ── Request types ─────────────────────────────────────────────────────
@@ -278,80 +247,4 @@ export async function* cloudReadNdjson(
     } finally {
         reader.releaseLock();
     }
-}
-
-// ── Cloud Queue API ─────────────────────────────────────────────────
-
-/**
- * Submit a prompt to the cloud queue for server-side processing.
- *
- * Calls `POST <baseUrl>/cloud/queue` which stores the prompt in the
- * server-side queue and returns a `prompt_id` for tracking.
- */
-export async function submitCloudPrompt(
-    baseUrl: string,
-    body: CloudQueueSubmitBody
-): Promise<{ prompt_id: string }> {
-    const response = await fetch(`${baseUrl}/cloud/queue`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-        let message = `Failed to submit prompt to queue (HTTP ${response.status})`;
-        try {
-            const data = await response.json();
-            if (data?.error) message = data.error;
-        } catch { /* ignore */ }
-        throw new Error(message);
-    }
-
-    const data = (await response.json()) as { prompt_id: string };
-    return { prompt_id: data.prompt_id };
-}
-
-/**
- * Fetch all items in the cloud queue.
- *
- * Calls `GET <baseUrl>/cloud/queue` which returns all queued prompts
- * sorted by submittedAt descending (newest first).
- */
-export async function fetchCloudQueue(
-    baseUrl: string
-): Promise<{ queue: CloudQueueItem[] }> {
-    const response = await fetch(`${baseUrl}/cloud/queue`);
-    if (!response.ok) {
-        let message = `Failed to fetch cloud queue (HTTP ${response.status})`;
-        try {
-            const data = await response.json();
-            if (data?.error) message = data.error;
-        } catch { /* ignore */ }
-        throw new Error(message);
-    }
-    const data = (await response.json()) as { queue: CloudQueueItem[] };
-    return { queue: Array.isArray(data.queue) ? data.queue : [] };
-}
-
-/**
- * Delete a prompt from the cloud queue.
- *
- * Calls `DELETE <baseUrl>/cloud/queue/<promptId>` which removes
- * the queued prompt from server-side storage.
- */
-export async function deleteCloudPrompt(
-    baseUrl: string,
-    promptId: string
-): Promise<{ success: boolean; prompt_id: string }> {
-    const url = `${baseUrl}/cloud/queue/${encodeURIComponent(promptId)}`;
-    const response = await fetch(url, { method: 'DELETE' });
-    if (!response.ok) {
-        let message = `Failed to delete prompt from queue (HTTP ${response.status})`;
-        try {
-            const data = await response.json();
-            if (data?.error) message = data.error;
-        } catch { /* ignore */ }
-        throw new Error(message);
-    }
-    return (await response.json()) as { success: boolean; prompt_id: string };
 }
