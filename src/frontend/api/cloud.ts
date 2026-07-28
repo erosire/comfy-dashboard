@@ -7,6 +7,12 @@
 //   POST /v1/comfy/cloud          → { container_id, pod_url }  (create)
 //                                or { health, models_dir, models } (status)
 //   POST /v1/comfy/cloud/prompt   → NDJSON stream (raw Response)
+//
+// The two-tier architecture mirrors beam_comfy_service.yaml:
+//   Tier 1 — Spawner: GET /spawn.json on the Beam spawner creates a fresh
+//            ComfyUI pod and returns its pod_url.
+//   Tier 2 — ComfyProxy: The pod's public proxy (GET / for health+models,
+//            POST / for prompt execution with NDJSON streaming).
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -36,6 +42,19 @@ export type CloudStreamEvent = {
 export type CloudRequest =
     | { type: 'create'; name?: string }
     | { type: 'status'; pod_url: string };
+
+/**
+ * Prompt submission request body.
+ * Mirrors beam_comfy_service PromptRequest schema.
+ */
+export type CloudPromptBody = {
+    pod_url: string;
+    prompt: Record<string, unknown>;
+    client_id?: string;
+    extra_data?: Record<string, unknown>;
+    front?: boolean;
+    number?: number;
+};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -132,7 +151,8 @@ async function cloudStatus(
 /**
  * Submit a workflow to a spawned pod and stream results back.
  *
- * Calls `POST <baseUrl>/cloud/prompt` with `{ pod_url, prompt, client_id? }`.
+ * Calls `POST <baseUrl>/cloud/prompt` with the full PromptRequest body
+ * (pod_url, prompt, client_id?, extra_data?, front?, number?).
  * Returns the raw Response object — the caller must read it as a stream
  * of newline-delimited JSON (NDJSON). Each line is a CloudStreamEvent.
  *
@@ -143,11 +163,7 @@ async function cloudStatus(
  */
 export async function cloudPrompt(
     baseUrl: string,
-    body: {
-        pod_url: string;
-        prompt: Record<string, unknown>;
-        client_id?: string;
-    }
+    body: CloudPromptBody
 ): Promise<Response> {
     const response = await fetch(`${baseUrl}/cloud/prompt`, {
         method: 'POST',

@@ -269,6 +269,93 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /v1/comfy/cloud/prompt:
+    post:
+      operationId: cloudPrompt
+      summary: Submit a prompt to a spawned pod and stream results as NDJSON
+      description: >-
+        Sends a ComfyUI workflow graph to a spawned pod's Tier 2 proxy and
+        streams the results back as `application/x-ndjson` — one JSON object
+        per line.
+
+        The server proxies the request to `POST <pod_url>/` on the Tier 2
+        ComfyProxy endpoint. The connection stays open while ComfyUI executes
+        the prompt; each WS event is forwarded as an NDJSON line.
+
+        **Clients must read the response body as a stream**, parsing one JSON
+        document per line, until they receive:
+        - `{"type":"proxy_done","data":{}}` — run completed normally, or
+        - `{"type":"execution_error",...}` / `{"type":"proxy_error",...}` — failure.
+      tags:
+        - Cloud
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloudPromptRequest'
+            examples:
+              basic_prompt:
+                summary: Submit a basic txt2img prompt
+                value:
+                  pod_url: "https://test-pod-abc123.beam.cloud:8188"
+                  prompt:
+                    "3":
+                      class_type: KSampler
+                      inputs:
+                        seed: 123456789012345
+                        steps: 20
+                        cfg: 8
+                        sampler_name: euler
+                        scheduler: normal
+                        denoise: 1
+                        model: ["4", 0]
+                        positive: ["6", 0]
+                        negative: ["7", 0]
+                        latent_image: ["5", 0]
+                    "4":
+                      class_type: CheckpointLoaderSimple
+                      inputs:
+                        ckpt_name: sd_xl_base_1.0.safetensors
+                  client_id: "abc123def4567890fedcba0987654321"
+      responses:
+        '200':
+          description: >-
+            Chunked NDJSON stream of progress events from the ComfyUI pod.
+            See beam_comfy_service.yaml ProxyStreamEvent for the full event
+            vocabulary (proxy_enqueue, progress, executing, executed,
+            execution_success, execution_error, proxy_done, etc.).
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/CloudStreamEvent'
+              examples:
+                happy_path:
+                  summary: A successful txt2img run
+                  value: |
+                    {"type":"proxy_enqueue","data":{"prompt_id":"f0c...","number":1,"node_errors":{}}}
+                    {"type":"status","data":{"status":{"queue_running":[],"queue_pending":[]},"sid":"abc..."}}
+                    {"type":"execution_start","data":{"prompt_id":"f0c..."}}
+                    {"type":"progress","data":{"value":1,"max":20,"prompt_id":"f0c...","node":"3"}}
+                    {"type":"progress","data":{"value":20,"max":20,"prompt_id":"f0c...","node":"3"}}
+                    {"type":"executing","data":{"node":"8","prompt_id":"f0c..."}}
+                    {"type":"executed","data":{"node":"9","output":{"images":[{"filename":"ComfyUI_00001_.png","subfolder":"","type":"output"}]},"prompt_id":"f0c..."}}
+                    {"type":"executing","data":{"node":null,"prompt_id":"f0c..."}}
+                    {"type":"execution_success","data":{"prompt_id":"f0c..."}}
+                    {"type":"proxy_done","data":{}}
+        '400':
+          description: Invalid request (missing prompt, invalid pod_url)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Pod unreachable or proxy error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 # =============================================================================
 #  COMPONENTS
 # =============================================================================
@@ -548,3 +635,79 @@ components:
           - wan/lightning_4steps.safetensors
         vae:
           - sdxl_vae.safetensors
+
+    # ── Cloud Prompt ──────────────────────────────────────────────
+
+    CloudPromptRequest:
+      type: object
+      description: >-
+        Request body for POST /v1/comfy/cloud/prompt.
+        Sends a ComfyUI workflow graph to a spawned pod's Tier 2 proxy.
+        Mirrors the beam_comfy_service PromptRequest schema.
+      properties:
+        pod_url:
+          type: string
+          format: uri
+          description: >-
+            Tier 2 proxy URL of the spawned pod (obtained from the
+            create endpoint's pod_url field).
+          example: "https://test-pod-abc123.beam.cloud:8188"
+        prompt:
+          type: object
+          additionalProperties: true
+          description: >-
+            The ComfyUI workflow graph, keyed by node id (string).
+            Each value is {"class_type": "<NodeClassName>", "inputs": {...}}.
+            Same shape as ComfyUI's native POST /prompt API prompt field.
+          example:
+            "3":
+              class_type: KSampler
+              inputs:
+                seed: 123456789012345
+                steps: 20
+                cfg: 8
+        client_id:
+          type: string
+          description: >-
+            Optional. If omitted, the proxy generates uuid4().hex for you.
+            If supplied, must be a 32-char hex string; the proxy overrides
+            the body's client_id with whatever is used for websocket
+            subscription so the linking stays consistent.
+          example: abc123def4567890fedcba0987654321
+        extra_data:
+          type: object
+          additionalProperties: true
+          description: Optional. Passed through to ComfyUI's extra_data field.
+        front:
+          type: boolean
+          description: Optional. Forwarded to ComfyUI POST /prompt queue-front flag.
+        number:
+          type: number
+          description: Optional. Forwarded to ComfyUI POST /prompt.
+      required:
+        - pod_url
+        - prompt
+
+    CloudStreamEvent:
+      type: object
+      description: >-
+        One line in the application/x-ndjson stream returned by
+        POST /v1/comfy/cloud/prompt. Every event is
+        {"type": "<EventType>", "data": <event-specific>} on a single line,
+        terminated by \n.
+      properties:
+        type:
+          type: string
+          description: >-
+            Event type discriminator. Common values:
+            proxy_enqueue, proxy_done, proxy_error, status,
+            execution_start, execution_cached, progress, executing,
+            executed, execution_error, execution_success,
+            execution_interrupted, binary.
+        data:
+          type: object
+          additionalProperties: true
+          description: Event-specific payload. See beam_comfy_service.yaml for details.
+      required:
+        - type
+        - data

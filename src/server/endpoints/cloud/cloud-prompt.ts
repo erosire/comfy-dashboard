@@ -6,7 +6,12 @@
 // The request body must contain:
 //   - pod_url:  the Tier 2 proxy URL (e.g. "https://...beam.cloud:8188")
 //   - prompt:   the ComfyUI workflow graph object
-//   - client_id: optional client identifier
+//
+// Optional fields (forwarded to the Tier 2 proxy per beam_comfy_service.yaml):
+//   - client_id: optional client identifier (32-char hex)
+//   - extra_data: passed through to ComfyUI's POST /prompt extra_data
+//   - front: queue-front flag forwarded to ComfyUI
+//   - number: forwarded to ComfyUI POST /prompt
 //
 // The response is proxied as a raw streaming Response (application/x-ndjson)
 // so the client can read it incrementally, line-by-line.
@@ -18,6 +23,9 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         pod_url?: string;
         prompt?: Record<string, unknown>;
         client_id?: string;
+        extra_data?: Record<string, unknown>;
+        front?: boolean;
+        number?: number;
     };
 
     if (!body?.pod_url) {
@@ -28,7 +36,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         return { status: 400, response: { error: 'prompt object is required' } };
     }
 
-    // Validate pod_url is a valid HTTPS URL
+    // Validate pod_url is a valid URL
     let podUrl: URL;
     try {
         podUrl = new URL(body.pod_url);
@@ -36,23 +44,31 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         return { status: 400, response: { error: `Invalid pod_url: ${body.pod_url}` } };
     }
 
-    // Build the prompt payload
+    // Build the prompt payload per beam_comfy_service PromptRequest schema
     const promptPayload: Record<string, unknown> = {
         prompt: body.prompt,
     };
     if (body.client_id) {
         promptPayload.client_id = body.client_id;
     }
+    if (body.extra_data !== undefined) {
+        promptPayload.extra_data = body.extra_data;
+    }
+    if (body.front !== undefined) {
+        promptPayload.front = body.front;
+    }
+    if (body.number !== undefined) {
+        promptPayload.number = body.number;
+    }
 
     try {
-        // Proxy original request headers through (minus hop-by-hop)
-        const incomingHeaders = request.req.header() as Record<string, string>;
         const forwardedHeaders: Record<string, string> = {
             'Content-Type': 'application/json',
             'Accept': 'application/x-ndjson',
         };
 
         // Forward Authorization if present (for authenticated pods)
+        const incomingHeaders = request.req.header() as Record<string, string>;
         if (incomingHeaders.authorization) {
             forwardedHeaders['Authorization'] = incomingHeaders.authorization;
         }
