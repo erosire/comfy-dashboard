@@ -1278,6 +1278,47 @@ function eventSummary(event: CloudStreamEvent): string {
     }
 }
 
+/**
+ * Convert a ComfyUI workflow JSON (v0.4 or v1 format) into the flat API
+ * prompt format expected by POST /prompt.
+ *
+ * Workflow format has `nodes`, `links`, `groups`, `definitions`, etc.
+ * API prompt format is a flat dict keyed by node ID:
+ *   { "3": { "class_type": "KSampler", "inputs": { "seed": ..., "model": ["4", 0] } } }
+ *
+ * If the input is already in API prompt format, it is returned as-is.
+ */
+function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unknown> {
+    // Already in API prompt format (flat dict of {class_type, inputs})?
+    if (!Array.isArray(raw.nodes)) {
+        return raw;
+    }
+
+    const uiNodes = parseWorkflowJson(raw);
+    const sorted = sortNodes(uiNodes);
+    const renumbered = renumberNodes(sorted);
+
+    const prompt: Record<string, unknown> = {};
+    for (const node of renumbered) {
+        const inputs: Record<string, unknown> = {};
+
+        // Linked connections → [sourceNodeId, sourceSlot]
+        for (const conn of node.connections) {
+            inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
+        }
+
+        // Widget values — use registry name if available, fall back to widget_N
+        const registryEntry = comfyNodeRegistry[node.classType];
+        for (const widget of node.widgets) {
+            const name = registryEntry?.widgets[widget.index]?.name ?? `widget_${widget.index}`;
+            inputs[name] = widget.value;
+        }
+
+        prompt[node.id] = { class_type: node.classType, inputs };
+    }
+    return prompt;
+}
+
 // ── Component ──────────────────────────────────────────────────────────
 
 export type CloudTabProps = {
@@ -1470,10 +1511,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             for (const conn of node.connections) {
                 inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
             }
-            // Add widget values using their names from the original API format if available,
-            // otherwise use widget_${index} keys
+            // Add widget values using registry name if available, otherwise widget_${index}
+            const registryEntry = comfyNodeRegistry[node.classType];
             for (const widget of node.widgets) {
-                inputs[`widget_${widget.index}`] = widget.value;
+                const name = registryEntry?.widgets[widget.index]?.name ?? `widget_${widget.index}`;
+                inputs[name] = widget.value;
             }
             prompt[node.id] = { class_type: node.classType, inputs };
         }
@@ -1486,8 +1528,26 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     const handleCopyJson = React.useCallback(async () => {
         if (!rawJson) return;
+        const text = JSON.stringify(rawJson, null, 2);
         try {
-            await navigator.clipboard.writeText(JSON.stringify(rawJson, null, 2));
+            // Try modern Clipboard API first (requires secure context: HTTPS or localhost)
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+        } catch {
+            // Fall through to legacy approach
+        }
+        // Fallback: temporary textarea + execCommand (works over plain HTTP)
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
         } catch {
             alert('Failed to copy to clipboard');
         }
@@ -1592,9 +1652,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 console.log(`[Agent] Prompt payload:`, JSON.stringify(gen.prompt, null, 2));
 
                 try {
+                    // Convert workflow JSON to the flat API prompt format
+                    // that ComfyUI's POST /prompt expects
+                    const apiPrompt = workflowToApiPrompt(gen.prompt);
+                    console.log(`[Agent] Converted API prompt:`, JSON.stringify(apiPrompt, null, 2));
+
                     const response = await cloudPrompt(baseUrl, {
                         pod_url: podUrl,
-                        prompt: gen.prompt
+                        prompt: apiPrompt
                     });
 
                     // Step 3 — stream NDJSON and log each event
