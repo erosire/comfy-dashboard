@@ -824,14 +824,27 @@ function parseNodesRecursive(
                     sourceFormat
                 );
 
-                // Build the parent subgraph UINode with definition ports
-                const sgInputConnections: UIInputConnection[] = (sgDef.inputs ?? []).map((inp) => ({
-                    name: inp.name,
-                    type: inp.type as DataType,
-                    sourceNodeId: '',
-                    sourceSlot: -1,
-                    linkId: undefined
-                }));
+                // Build the parent subgraph UINode with definition ports.
+                // Only ports that are wired externally become connections, and
+                // they carry the REAL external source (from the parent's link
+                // map) — not placeholder ids. This is required for:
+                //   1. Execution-order sorting: the wrapper must sort after the
+                //      nodes that actually feed it.
+                //   2. Display: the card renders the true source link instead of
+                //      a bogus "→ [-1]" placeholder.
+                const sgInputConnections: UIInputConnection[] = (sgDef.inputs ?? [])
+                    .map((inp, portIndex): UIInputConnection | null => {
+                        const ext = externalInputByPort.get(portIndex);
+                        if (!ext) return null; // port not wired externally
+                        return {
+                            name: inp.name,
+                            type: inp.type as DataType,
+                            sourceNodeId: ext.sourceNodeId,
+                            sourceSlot: ext.sourceSlot,
+                            linkId: undefined
+                        };
+                    })
+                    .filter((c): c is UIInputConnection => c !== null);
 
                 const sgOutputSlots: UIOutputSlot[] = (sgDef.outputs ?? []).map((out, i) => ({
                     name: out.name,
@@ -1046,7 +1059,7 @@ function apiPromptNodeToUINode(id: string, node: ApiPromptNode): UINode {
  *
  * Auto-detects which format based on shape of the JSON.
  */
-function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
+export function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
     // ── Workflow format (v1 or v0.4) ──────────────────────────────────
     // Detected by presence of `nodes` array.
     if (Array.isArray(raw.nodes)) {
@@ -1107,51 +1120,122 @@ function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
     return nodes;
 }
 
-/** Classify and order nodes: inputs (sources) → middle → outputs (sinks). Discard unlinked. */
+/**
+ * Sort nodes into ComfyUI execution order — the order ComfyUI processes the
+ * graph, first to last (a node never executes before its inputs are ready).
+ *
+ * This mirrors how ComfyUI itself orders execution:
+ *
+ *   - Frontend: `LGraph.computeExecutionOrder()` (@comfyorg/litegraph.js,
+ *     src/LGraph.ts) performs Kahn's algorithm (BFS): seed a FIFO queue with
+ *     every node that has no incoming links (in graph order), then repeatedly
+ *     emit the queue head and push each downstream node whose remaining links
+ *     reach zero. The resulting index is written to each node's `order`
+ *     field and serialized into the workflow JSON.
+ *
+ *   - Backend: `ExecutionList` (comfy_execution/graph.py) runs the same
+ *     dependency dissolve at runtime: a node is "ready" once all upstream
+ *     dependencies have executed, and execution walks the ready set —
+ *     dependencies always execute before their dependents. Only nodes that
+ *     are ancestors of an output node are scheduled at all.
+ *
+ * Algorithm (Kahn's / BFS over the link graph):
+ *   1. Seed a FIFO queue with every node that has no incoming links,
+ *      in workflow-array order (LiteGraph iterates the graph's node array).
+ *   2. Emit the queue head, then decrement the remaining-link count of every
+ *      node it feeds — visiting links in output-slot order, then link-id order
+ *      (link ids increase in creation order), like LiteGraph. A downstream
+ *      node whose count reaches zero is appended to the queue.
+ *   3. Any leftovers (dependency cycles — invalid workflows that the ComfyUI
+ *      backend rejects with DependencyCycleError) are appended last in
+ *      original array order, exactly as LiteGraph does.
+ *
+ * Nodes with no links at all (neither incoming nor outgoing) are discarded:
+ * ComfyUI never executes them, since they are not ancestors of an output node.
+ *
+ * Each returned node's `order` field is rewritten to its computed execution
+ * index so downstream consumers see truthful ordering metadata.
+ */
 function sortNodes(nodes: UINode[]): UINode[] {
     const nodeIds = new Set(nodes.map((n) => n.id));
+    const nodeById = new Map(nodes.map((n): [string, UINode] => [n.id, n]));
 
-    // Which nodes does each node receive from? (incoming links)
-    // Which nodes does each node feed into? (outgoing references)
-    const incomingFrom = new Map<string, Set<string>>();
-    const outgoingTo = new Map<string, Set<string>>();
+    // Remaining incoming links per node, and outgoing links per source.
+    // Counts are per-link (not per-source-node): a source feeding the same
+    // target through two inputs blocks it twice, exactly like LiteGraph.
+    const remainingLinks = new Map<string, number>();
+    const outlinks = new Map<string, { targetId: string; sourceSlot: number; linkId: number }[]>();
 
     for (const n of nodes) {
-        incomingFrom.set(n.id, new Set());
-        outgoingTo.set(n.id, new Set());
+        remainingLinks.set(n.id, 0);
+        outlinks.set(n.id, []);
     }
 
     for (const n of nodes) {
         for (const conn of n.connections) {
-            if (nodeIds.has(conn.sourceNodeId)) {
-                incomingFrom.get(n.id)!.add(conn.sourceNodeId);
-                outgoingTo.get(conn.sourceNodeId)!.add(n.id);
-            }
+            // Ignore links to nodes outside this set (e.g. subgraph internals
+            // referencing external nodes — those data are already available).
+            if (!nodeIds.has(conn.sourceNodeId)) continue;
+            remainingLinks.set(n.id, remainingLinks.get(n.id)! + 1);
+            outlinks.get(conn.sourceNodeId)!.push({
+                targetId: n.id,
+                sourceSlot: conn.sourceSlot,
+                linkId: conn.linkId ?? 0
+            });
         }
     }
 
-    const isSource = (n: UINode) => incomingFrom.get(n.id)!.size === 0;
-    const isSink = (n: UINode) => outgoingTo.get(n.id)!.size === 0;
+    // Visit each node's outgoing links in LiteGraph's order:
+    // output slot order, then link id within the slot.
+    for (const links of outlinks.values()) {
+        links.sort((a, b) => a.sourceSlot - b.sourceSlot || a.linkId - b.linkId);
+    }
 
-    const inputs: UINode[] = [];
-    const outputs: UINode[] = [];
-    const middle: UINode[] = [];
-
+    // Seed the FIFO queue with zero-input nodes in the original array order.
+    const queue: string[] = [];
     for (const n of nodes) {
-        const src = isSource(n);
-        const snk = isSink(n);
-        if (src && snk) {
-            // Completely unlinked — discard
-        } else if (src) {
-            inputs.push(n);
-        } else if (snk) {
-            outputs.push(n);
-        } else {
-            middle.push(n);
+        const incoming = remainingLinks.get(n.id)!;
+        const outgoing = outlinks.get(n.id)!.length;
+        if (incoming === 0 && outgoing === 0) continue; // unlinked — never executes
+        if (incoming === 0) queue.push(n.id);
+    }
+
+    const result: UINode[] = [];
+    const emitted = new Set<string>();
+    let head = 0;
+    while (head < queue.length) {
+        const id = queue[head++];
+        if (emitted.has(id)) continue;
+        emitted.add(id);
+        result.push({ ...nodeById.get(id)!, order: result.length });
+        for (const link of outlinks.get(id)!) {
+            if (emitted.has(link.targetId)) continue;
+            const remaining = remainingLinks.get(link.targetId)! - 1;
+            remainingLinks.set(link.targetId, remaining);
+            if (remaining === 0) queue.push(link.targetId);
         }
     }
 
-    return [...inputs, ...middle, ...outputs];
+    // Leftovers (dependency cycles) go last in original array order, as LiteGraph does.
+    for (const n of nodes) {
+        if (!emitted.has(n.id) && remainingLinks.get(n.id)! > 0) {
+            result.push({ ...n, order: result.length });
+        }
+    }
+
+    return result;
+}
+
+/**
+ * Sort a node tree into ComfyUI execution order, recursing into each
+ * subgraph's internal nodes (which form their own dependency graphs).
+ */
+export function sortNodesDeep(nodes: UINode[]): UINode[] {
+    return sortNodes(nodes).map((n) =>
+        n.subgraphNodes && n.subgraphNodes.length > 0
+            ? { ...n, subgraphNodes: sortNodesDeep(n.subgraphNodes) }
+            : n
+    );
 }
 
 /** Re-number node IDs sequentially from 1 and update all link references. */
@@ -1355,7 +1439,7 @@ function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unkno
     }
 
     const uiNodes = parseWorkflowJson(raw);
-    const sorted = sortNodes(uiNodes);
+    const sorted = sortNodesDeep(uiNodes);
     const renumbered = renumberNodes(sorted);
 
     // Flatten subgraph nodes into their internal nodes.
@@ -1588,7 +1672,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         const full = store.selectedWorkflow;
         if (full && full.raw) {
             setRawJson(full.raw);
-            setNodes(renumberNodes(sortNodes(parseWorkflowJson(full.raw))));
+            setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(full.raw))));
             setFileName(`${full.name}.json`);
             setPods([]);
         }
@@ -1620,7 +1704,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 try {
                     const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
                     setRawJson(parsed);
-                    setNodes(renumberNodes(sortNodes(parseWorkflowJson(parsed))));
+                    setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(parsed))));
                     const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
                     setFileName(file.name);
                     setPods([]);
