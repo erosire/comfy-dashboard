@@ -1,9 +1,12 @@
 // Workflow list endpoint — GET /v1/comfy/workflows
 //
 // Returns all stored workflows from the local workflow database directory.
-// Each entry is a JSON file under temporary/database/comfy-workflows/.
-// Sorted by modifiedDate descending (newest first).
+// Each workflow is a folder under temporary/database/comfy-workflows/:
+//   YYYYMMDD-HHMMSS/
+//     ├── workflow.json   (ComfyUI-compatible workflow JSON)
+//     └── meta.json       (dashboard metadata)
 //
+// Sorted by modifiedDate descending (newest first).
 // Supports optional query parameter:
 //   ?q=<search>  — free-text search matching name, description, and tags
 
@@ -34,14 +37,16 @@ export const workflowList = asHandlerMethod(async (_, parameters, variables) => 
     const workflows: WorkflowMeta[] = [];
 
     for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        if (!entry.isDirectory()) continue;
+
+        const metaPath = path.join(databaseDir, entry.name, 'meta.json');
+        if (!fs.existsSync(metaPath)) continue;
 
         try {
-            const raw = fs.readFileSync(path.join(databaseDir, entry.name), 'utf-8');
+            const raw = fs.readFileSync(metaPath, 'utf-8');
             const data = JSON.parse(raw);
-
             const meta: WorkflowMeta = {
-                id: data.id ?? entry.name.replace('.json', ''),
+                id: data.id ?? entry.name,
                 name: data.name ?? 'Untitled Workflow',
                 description: data.description,
                 nodeCount: typeof data.nodeCount === 'number' ? data.nodeCount : 0,
@@ -50,7 +55,6 @@ export const workflowList = asHandlerMethod(async (_, parameters, variables) => 
                 tags: Array.isArray(data.tags) ? data.tags : []
             };
 
-            // Apply search filter if query is provided
             if (searchQuery && searchQuery.trim()) {
                 const q = searchQuery.toLowerCase();
                 const nameMatch = meta.name.toLowerCase().includes(q);
@@ -61,7 +65,7 @@ export const workflowList = asHandlerMethod(async (_, parameters, variables) => 
 
             workflows.push(meta);
         } catch {
-            // Skip corrupted files
+            // Skip corrupted folders
         }
     }
 

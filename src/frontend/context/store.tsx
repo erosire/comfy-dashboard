@@ -14,6 +14,12 @@ import {
     fetchStatus
 } from '../api';
 import type { WorkflowMeta, Workflow, QueueItem, ServerStatus } from '../api';
+import {
+    fetchCloudQueue,
+    submitCloudPrompt as submitCloudPromptApi,
+    deleteCloudPrompt as deleteCloudPromptApi
+} from '../api/cloud';
+import type { CloudQueueItem, CloudQueueSubmitBody } from '../api/cloud';
 
 // ── localStorage helpers ──────────────────────────────────────────────
 const STORAGE_KEY_WORKFLOWS = 'comfyDashboard:workflows';
@@ -82,6 +88,7 @@ export type DashboardStore = {
     searchQuery: string;
     queue: QueueItem[];
     status: ServerStatus | null;
+    cloudQueue: CloudQueueItem[];
     config: {
         baseUrl: string;
         pollIntervalMs: number;
@@ -101,6 +108,9 @@ type DashboardStoreContextValue = {
     refreshWorkflows: () => Promise<void>;
     refreshQueue: () => Promise<void>;
     refreshStatus: () => Promise<void>;
+    refreshCloudQueue: () => Promise<void>;
+    submitCloudPrompt: (body: CloudQueueSubmitBody) => Promise<{ prompt_id: string }>;
+    deleteCloudPrompt: (promptId: string) => Promise<void>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
@@ -122,6 +132,7 @@ export const DashboardStoreProvider: React.FC<{
         searchQuery: initialStore?.searchQuery ?? '',
         queue: initialStore?.queue ?? [],
         status: initialStore?.status ?? null,
+        cloudQueue: initialStore?.cloudQueue ?? [],
         config: { ...DEFAULT_CONFIG, ...configOverrides }
     }));
 
@@ -273,6 +284,41 @@ export const DashboardStoreProvider: React.FC<{
         [store.config.baseUrl, setStore]
     );
 
+    const refreshCloudQueue = useCallback(async () => {
+        try {
+            const { queue } = await fetchCloudQueue(`${store.config.baseUrl}`);
+            setStore((prev) => ({ ...prev, cloudQueue: queue }));
+        } catch {
+            // Queue fetch failures are non-fatal
+        }
+    }, [store.config.baseUrl, setStore]);
+
+    const submitCloudPrompt = useCallback(
+        async (body: CloudQueueSubmitBody) => {
+            const result = await submitCloudPromptApi(`${store.config.baseUrl}`, body);
+            // Refresh the queue after submission
+            try {
+                const { queue } = await fetchCloudQueue(`${store.config.baseUrl}`);
+                setStore((prev) => ({ ...prev, cloudQueue: queue }));
+            } catch {
+                // Non-fatal
+            }
+            return result;
+        },
+        [store.config.baseUrl, setStore]
+    );
+
+    const deleteCloudPrompt = useCallback(
+        async (promptId: string) => {
+            await deleteCloudPromptApi(`${store.config.baseUrl}`, promptId);
+            setStore((prev) => ({
+                ...prev,
+                cloudQueue: prev.cloudQueue.filter((item) => item.prompt_id !== promptId)
+            }));
+        },
+        [store.config.baseUrl, setStore]
+    );
+
     return (
         <DashboardStoreContext.Provider value={{
             store,
@@ -285,7 +331,10 @@ export const DashboardStoreProvider: React.FC<{
             searchWorkflows,
             refreshWorkflows,
             refreshQueue,
-            refreshStatus
+            refreshStatus,
+            refreshCloudQueue,
+            submitCloudPrompt,
+            deleteCloudPrompt
         }}>
             {children}
         </DashboardStoreContext.Provider>

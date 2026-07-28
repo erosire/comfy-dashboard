@@ -3,10 +3,62 @@
 // Partially updates an existing workflow. Accepts any combination of
 // name, description, raw workflow JSON, and tags. Only provided fields
 // are updated; omitted fields retain their current values.
+//
+// Folder format:
+//   YYYYMMDD-HHMMSS/
+//     ├── workflow.json   (ComfyUI-compatible workflow JSON)
+//     └── meta.json       (dashboard metadata)
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
+
+/** Count nodes from raw workflow data (handles multiple ComfyUI formats). */
+function countNodes(raw: Record<string, unknown>): number {
+    const rawNodes = (raw as any).nodes;
+    if (Array.isArray(rawNodes)) {
+        return rawNodes.length;
+    }
+    const promptObj = (raw as any).prompt ?? raw;
+    if (typeof promptObj === 'object' && promptObj !== null) {
+        return Object.keys(promptObj).filter((k) => {
+            const v = promptObj[k];
+            return v && typeof v === 'object' && 'class_type' in v;
+        }).length;
+    }
+    return 0;
+}
+
+/** Extract tags from node types in raw workflow data. */
+function extractTags(raw: Record<string, unknown>): string[] {
+    const rawNodes = (raw as any).nodes;
+    const types = new Set<string>();
+
+    if (Array.isArray(rawNodes)) {
+        for (const node of rawNodes) {
+            if (node.type) types.add(String(node.type).toLowerCase());
+        }
+    } else {
+        const promptObj = (raw as any).prompt ?? raw;
+        if (typeof promptObj === 'object' && promptObj !== null) {
+            for (const [, value] of Object.entries(promptObj)) {
+                const node = value as Record<string, unknown>;
+                if (node && typeof node === 'object' && 'class_type' in node) {
+                    types.add(String(node.class_type).toLowerCase());
+                }
+            }
+        }
+    }
+
+    const tags: string[] = [];
+    let i = 0;
+    for (const t of types) {
+        if (i >= 5) break;
+        tags.push(t);
+        i++;
+    }
+    return tags;
+}
 
 export const workflowPatch = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
@@ -26,95 +78,51 @@ export const workflowPatch = asHandlerMethod(async (_, parameters, variables) =>
         return { status: 400, response: { error: 'At least one field (name, description, raw, tags) must be provided' } };
     }
 
-    const databaseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
-    const filePath = path.join(databaseDir, `${workflowId}.json`);
+    const baseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
+    const metaPath = path.join(baseDir, workflowId, 'meta.json');
+    const workflowJsonPath = path.join(baseDir, workflowId, 'workflow.json');
 
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(metaPath) || !fs.existsSync(workflowJsonPath)) {
         return { status: 404, response: { error: `Workflow '${workflowId}' not found` } };
     }
 
     try {
-        const raw = fs.readFileSync(filePath, 'utf-8');
-        const existing = JSON.parse(raw);
+        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
 
-        // Merge partial updates
-        if (body.name !== undefined) existing.name = body.name;
-        if (body.description !== undefined) existing.description = body.description;
-        if (body.tags !== undefined) existing.tags = body.tags;
-
-        // If raw workflow JSON is updated, re-extract nodes and nodeCount
-        if (body.raw !== undefined) {
-            existing.raw = body.raw;
-
-            const rawNodes = (body.raw as any).nodes;
-            let nodeCount = 0;
-            let storedNodes: unknown[] = [];
-            const newTags: string[] = [];
-
-            if (Array.isArray(rawNodes)) {
-                // UI format: { "nodes": [...] }
-                nodeCount = rawNodes.length;
-                storedNodes = rawNodes;
-            } else {
-                // API format: { "3": { class_type, inputs }, ... } or prompt wrapper
-                const promptObj = (body.raw as any).prompt ?? body.raw;
-                if (typeof promptObj === 'object' && promptObj !== null) {
-                    const entries = Object.entries(promptObj).filter(
-                        ([, v]) => v && typeof v === 'object' && 'class_type' in (v as Record<string, unknown>)
-                    );
-                    nodeCount = entries.length;
-                    storedNodes = entries.map(([id, v]) => ({ id, ...(v as Record<string, unknown>) }));
-                }
-            }
-
-            existing.nodes = storedNodes;
-            existing.nodeCount = nodeCount;
-
-            // Re-extract tags from node types if tags weren't explicitly provided
-            if (body.tags === undefined) {
-                const types = new Set<string>();
-                if (Array.isArray(rawNodes)) {
-                    for (const node of rawNodes) {
-                        if (node.type) types.add(String(node.type).toLowerCase());
-                    }
-                } else {
-                    const promptObj = (body.raw as any).prompt ?? body.raw;
-                    if (typeof promptObj === 'object' && promptObj !== null) {
-                        for (const [, value] of Object.entries(promptObj)) {
-                            const node = value as Record<string, unknown>;
-                            if (node && typeof node === 'object' && 'class_type' in node) {
-                                types.add(String(node.class_type).toLowerCase());
-                            }
-                        }
-                    }
-                }
-                let i = 0;
-                for (const t of types) {
-                    if (i >= 5) break;
-                    newTags.push(t);
-                    i++;
-                }
-                existing.tags = newTags;
-            }
+        if (body.name !== undefined) meta.name = body.name;
+        if (body.description !== undefined) meta.description = body.description;
+        if (body.tags !== undefined) {
+            meta.tags = body.tags;
+        } else if (body.raw !== undefined) {
+            meta.tags = extractTags(body.raw);
         }
 
-        existing.modifiedDate = new Date().toISOString();
+        if (body.raw !== undefined) {
+            meta.nodeCount = countNodes(body.raw);
+        }
 
-        fs.writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf-8');
+        meta.modifiedDate = new Date().toISOString();
+
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+
+        if (body.raw !== undefined) {
+            fs.writeFileSync(workflowJsonPath, JSON.stringify(body.raw, null, 2), 'utf-8');
+        }
+
+        const raw = body.raw ?? JSON.parse(fs.readFileSync(workflowJsonPath, 'utf-8'));
 
         return {
             status: 200,
             response: {
                 workflow: {
-                    id: existing.id,
-                    name: existing.name,
-                    description: existing.description,
-                    nodeCount: existing.nodeCount,
-                    createdDate: existing.createdDate,
-                    modifiedDate: existing.modifiedDate,
-                    tags: existing.tags,
-                    nodes: existing.nodes,
-                    raw: existing.raw
+                    id: meta.id ?? workflowId,
+                    name: meta.name,
+                    description: meta.description,
+                    nodeCount: meta.nodeCount,
+                    createdDate: meta.createdDate,
+                    modifiedDate: meta.modifiedDate,
+                    tags: meta.tags,
+                    raw
                 }
             }
         };

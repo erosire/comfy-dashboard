@@ -11,7 +11,7 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
-import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta } from '../api';
+import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta, CloudQueueItem } from '../api';
 import { cloud, cloudPrompt, cloudReadNdjson } from '../api';
 import { useDashboardStore } from '../context';
 import type {
@@ -44,6 +44,9 @@ type RunState =
     | { status: 'running'; events: CloudStreamEvent[] }
     | { status: 'done'; events: CloudStreamEvent[] }
     | { status: 'error'; events: CloudStreamEvent[]; message: string };
+
+/** Maximum number of workflow items to display in the sidebar. */
+const MAX_SIDEBAR_ITEMS = 10;
 
 // ── Styled: shared ────────────────────────────────────────────────────
 
@@ -244,6 +247,85 @@ const SidebarCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
     fontWeight: 400
+});
+
+// ── Styled: right sidebar (queued tasks) ─────────────────────────────
+
+const QueueScroll = styled('div')({
+    flex: '1 1 auto',
+    overflowY: 'auto',
+    padding: '0 6px 12px'
+});
+
+const QueueItemEl = styled('div')({
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '8px 10px',
+    borderRadius: theme.radiusMd,
+    border: `1px solid ${theme.border}`,
+    marginBottom: 4,
+    backgroundColor: theme.surface2
+});
+
+const QueueItemHeader = styled('div')({
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4
+});
+
+const QueueItemName = styled('div')({
+    fontSize: theme.fontSize.sm,
+    fontWeight: 600,
+    color: theme.text,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    flex: '1 1 auto',
+    minWidth: 0
+});
+
+const QueueItemMeta = styled('div')({
+    fontSize: theme.fontSize.xs,
+    color: theme.textFaint,
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6
+});
+
+const QueueStatusBadge = styled('span')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    fontSize: theme.fontSize.xs,
+    padding: '1px 6px',
+    borderRadius: theme.radiusSm,
+    fontWeight: 600,
+    flex: '0 0 auto'
+});
+
+const QueueDeleteBtn = styled('button')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 22,
+    height: 22,
+    flex: '0 0 auto',
+    borderRadius: theme.radiusSm,
+    border: `1px solid transparent`,
+    backgroundColor: 'transparent',
+    color: theme.textFaint,
+    cursor: 'pointer',
+    fontSize: theme.fontSize.xs,
+    lineHeight: 1,
+    padding: 0,
+    transition: `color ${theme.transition}, background-color ${theme.transition}`,
+    '&:hover': {
+        color: theme.danger,
+        backgroundColor: theme.dangerSoft,
+        border: `1px solid ${theme.dangerBorder}`
+    }
 });
 
 // ── Styled: right content (editor) ────────────────────────────────────
@@ -1143,6 +1225,23 @@ function dataTypeLabel(type: DataType): string {
     return String(type);
 }
 
+/** Format an ISO timestamp as a relative time string (e.g. "2m ago"). */
+function formatRelativeTime(isoString: string | null): string {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    if (diffMs < 0) return 'just now';
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+}
+
 function eventSummary(event: CloudStreamEvent): string {
     switch (event.type) {
         case 'proxy_enqueue':
@@ -1192,8 +1291,17 @@ export type CloudTabProps = {
 };
 
 export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http://192.168.8.128:5000/v1/comfy' }) => {
-    const { store, createWorkflow, deleteWorkflow, cloneWorkflow, selectWorkflow, searchWorkflows } =
-        useDashboardStore();
+    const {
+        store,
+        createWorkflow,
+        deleteWorkflow,
+        cloneWorkflow,
+        selectWorkflow,
+        searchWorkflows,
+        refreshCloudQueue,
+        submitCloudPrompt,
+        deleteCloudPrompt
+    } = useDashboardStore();
 
     const [nodes, setNodes] = React.useState<UINode[]>([]);
     const [rawJson, setRawJson] = React.useState<Record<string, unknown> | null>(null);
@@ -1212,6 +1320,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
+
+    // Refresh cloud queue on mount and periodically
+    React.useEffect(() => {
+        refreshCloudQueue();
+        const interval = setInterval(() => {
+            refreshCloudQueue();
+        }, 10000); // Poll every 10s
+        return () => clearInterval(interval);
+    }, [refreshCloudQueue]);
 
     // Determine if we're editing a saved workflow (loaded from sidebar)
     const editingWorkflowId = store.selectedId;
@@ -1489,6 +1606,34 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }
     }, [baseUrl, nodes, buildPrompt, nextPodNumber, updatePodRun]);
 
+    // ── Queue submit flow ────────────────────────────────────────
+    // Submits the current workflow to the cloud queue for server-side
+    // processing. Stores enough information for later execution.
+
+    const handleQueueSubmit = React.useCallback(async () => {
+        if (nodes.length === 0) return;
+
+        try {
+            const prompt = buildPrompt();
+            await submitCloudPrompt({
+                prompt,
+                workflowId: editingWorkflowId ?? undefined,
+                workflowName: store.selectedWorkflow?.name ?? (fileName.replace(/\.json$/i, '') || 'Untitled'),
+                nodeCount: nodes.length
+            });
+        } catch (err: any) {
+            alert(`Failed to queue prompt: ${err.message ?? String(err)}`);
+        }
+    }, [nodes, buildPrompt, editingWorkflowId, store.selectedWorkflow, fileName, submitCloudPrompt]);
+
+    const handleDeleteQueueItem = React.useCallback(async (promptId: string) => {
+        try {
+            await deleteCloudPrompt(promptId);
+        } catch (err: any) {
+            alert(`Failed to remove from queue: ${err.message ?? String(err)}`);
+        }
+    }, [deleteCloudPrompt]);
+
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection.
     // HIT GET <pod_url>/ periodically to reset that idle timer.
@@ -1534,7 +1679,22 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     // ── Derived ──────────────────────────────────────────────────────
 
+    const queueStatusColor = (status: string) => {
+        switch (status) {
+            case 'queued': return { color: theme.textDim, bg: theme.surface2 };
+            case 'processing': return { color: theme.accent, bg: theme.accentSoft };
+            case 'completed': return { color: theme.success, bg: theme.successSoft };
+            case 'failed': return { color: theme.danger, bg: theme.dangerSoft };
+            case 'cancelled': return { color: theme.textFaint, bg: theme.surface2 };
+            default: return { color: theme.textDim, bg: theme.surface2 };
+        }
+    };
+
     // ── Sidebar: workflow list panel ────────────────────────────────
+
+    const displayedWorkflows = React.useMemo(() => {
+        return store.workflows.slice(0, MAX_SIDEBAR_ITEMS);
+    }, [store.workflows]);
 
     const sidebar = (
         <SidebarPanel>
@@ -1560,7 +1720,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             : 'No saved workflows yet.\nDrop a JSON file and save it.'}
                     </EmptyHint>
                 )}
-                {store.workflows.map((wf) => {
+                {displayedWorkflows.map((wf) => {
                     const isActive = wf.id === editingWorkflowId;
                     const Item = isActive ? WorkflowItemActive : WorkflowItem;
                     return (
@@ -1575,7 +1735,69 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         </Item>
                     );
                 })}
+                {store.workflows.length > MAX_SIDEBAR_ITEMS && (
+                    <EmptyHint style={{ padding: '8px 0' }}>
+                        + {store.workflows.length - MAX_SIDEBAR_ITEMS} more...
+                    </EmptyHint>
+                )}
             </SidebarScroll>
+
+            {/* ── Queued Tasks section ──────────────────────── */}
+            <div style={{ borderTop: `1px solid ${theme.border}`, margin: '0 6px' }} />
+            <SidebarHeader>
+                <span>
+                    Queued Tasks <SidebarCount>({store.cloudQueue.length})</SidebarCount>
+                </span>
+            </SidebarHeader>
+            <QueueScroll className="sg-scroll" data-testid="queue-list" style={{ flex: '1 1 auto', overflowY: 'auto', padding: '0 6px 12px' }}>
+                {store.cloudQueue.length === 0 && (
+                    <EmptyHint>No queued tasks.</EmptyHint>
+                )}
+                {store.cloudQueue.map((item) => {
+                    const sc = queueStatusColor(item.status);
+                    return (
+                        <QueueItemEl key={item.prompt_id} data-testid={`queue-item-${item.prompt_id}`}>
+                            <QueueItemHeader>
+                                <QueueItemName title={item.workflowName ?? item.prompt_id}>
+                                    {item.workflowName ?? 'Unnamed'}
+                                </QueueItemName>
+                                {item.status === 'queued' && (
+                                    <QueueDeleteBtn
+                                        onClick={() => handleDeleteQueueItem(item.prompt_id)}
+                                        title="Remove from queue"
+                                        data-testid={`queue-delete-${item.prompt_id}`}
+                                    >
+                                        ✕
+                                    </QueueDeleteBtn>
+                                )}
+                            </QueueItemHeader>
+                            <QueueItemMeta>
+                                <QueueStatusBadge style={{ color: sc.color, backgroundColor: sc.bg }}>
+                                    {item.status}
+                                </QueueStatusBadge>
+                                {item.nodeCount > 0 && (
+                                    <span>{item.nodeCount} nodes</span>
+                                )}
+                                <span title={item.submittedAt}>
+                                    {formatRelativeTime(item.submittedAt)}
+                                </span>
+                            </QueueItemMeta>
+                            {item.error && (
+                                <div style={{
+                                    fontSize: theme.fontSize.xs,
+                                    color: theme.danger,
+                                    marginTop: 4,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap' as const
+                                }} title={item.error}>
+                                    {item.error}
+                                </div>
+                            )}
+                        </QueueItemEl>
+                    );
+                })}
+            </QueueScroll>
         </SidebarPanel>
     );
 
@@ -2058,6 +2280,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             >
                 Submit
             </BtnPrimary>
+
+            {/* Queued: saves the workflow to the server queue for later processing */}
+            <Btn
+                onClick={handleQueueSubmit}
+                disabled={nodes.length === 0}
+                title={nodes.length === 0 ? 'Load a workflow first' : 'Add workflow to server queue'}
+            >
+                Queued
+            </Btn>
         </div>
     );
 

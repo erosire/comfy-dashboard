@@ -1,11 +1,85 @@
 // Workflow create endpoint — POST /v1/comfy/workflows
 //
-// Creates a new workflow entry. Stores the workflow JSON in the database
-// directory. Extracts node count from the raw workflow JSON.
+// Creates a new workflow entry. Stores the workflow in a timestamped folder:
+//   temporary/database/comfy-workflows/YYYYMMDD-HHMMSS/
+//     ├── workflow.json   (ComfyUI-compatible workflow JSON)
+//     └── meta.json       (dashboard metadata: name, description, tags, etc.)
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
+
+/** Generate YYYYMMDD-HHMMSS folder name from a Date. */
+function timestampFolder(date: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+        date.getFullYear().toString() +
+        pad(date.getMonth() + 1) +
+        pad(date.getDate()) +
+        '-' +
+        pad(date.getHours()) +
+        pad(date.getMinutes()) +
+        pad(date.getSeconds())
+    );
+}
+
+/** Extract the ComfyUI-compatible workflow JSON from the raw input. */
+function extractComfyWorkflow(raw: Record<string, unknown>): Record<string, unknown> {
+    // If it already looks like a ComfyUI workflow (has nodes array), return as-is
+    if ('nodes' in raw && Array.isArray(raw.nodes)) {
+        return raw;
+    }
+    // If it's an API prompt format { "3": { class_type, inputs }, ... }
+    // or wrapped { prompt: { ... } }, return as-is (it's still valid ComfyUI data)
+    return raw;
+}
+
+/** Count nodes from raw workflow data (handles multiple ComfyUI formats). */
+function countNodes(raw: Record<string, unknown>): number {
+    const rawNodes = (raw as any).nodes;
+    if (Array.isArray(rawNodes)) {
+        return rawNodes.length;
+    }
+    const promptObj = (raw as any).prompt ?? raw;
+    if (typeof promptObj === 'object' && promptObj !== null) {
+        return Object.keys(promptObj).filter((k) => {
+            const v = promptObj[k];
+            return v && typeof v === 'object' && 'class_type' in v;
+        }).length;
+    }
+    return 0;
+}
+
+/** Extract tags from node types in raw workflow data. */
+function extractTags(raw: Record<string, unknown>): string[] {
+    const rawNodes = (raw as any).nodes;
+    const types = new Set<string>();
+
+    if (Array.isArray(rawNodes)) {
+        for (const node of rawNodes) {
+            if (node.type) types.add(String(node.type).toLowerCase());
+        }
+    } else {
+        const promptObj = (raw as any).prompt ?? raw;
+        if (typeof promptObj === 'object' && promptObj !== null) {
+            for (const [, value] of Object.entries(promptObj)) {
+                const node = value as Record<string, unknown>;
+                if (node && typeof node === 'object' && 'class_type' in node) {
+                    types.add(String(node.class_type).toLowerCase());
+                }
+            }
+        }
+    }
+
+    const tags: string[] = [];
+    let i = 0;
+    for (const t of types) {
+        if (i >= 5) break;
+        tags.push(t);
+        i++;
+    }
+    return tags;
+}
 
 export const workflowCreate = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
@@ -19,106 +93,49 @@ export const workflowCreate = asHandlerMethod(async (_, parameters, variables) =
         return { status: 400, response: { error: 'raw workflow JSON is required' } };
     }
 
-    // Generate a simple ID from the name + timestamp
-    const id = `wf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-    const now = new Date().toISOString();
+    const now = new Date();
+    const nowIso = now.toISOString();
+    const nodeCount = countNodes(body.raw);
+    const tags = extractTags(body.raw);
+    const comfyWorkflow = extractComfyWorkflow(body.raw);
 
-    // Count nodes from the raw workflow (handles multiple ComfyUI formats)
-    let nodeCount = 0;
-    const rawNodes = (body.raw as any).nodes;
-    if (Array.isArray(rawNodes)) {
-        // UI format: { "nodes": [...] }
-        nodeCount = rawNodes.length;
-    } else {
-        // API format: { "3": { class_type, inputs }, ... } or prompt wrapper
-        const promptObj = (body.raw as any).prompt ?? body.raw;
-        if (typeof promptObj === 'object' && promptObj !== null) {
-            nodeCount = Object.keys(promptObj).filter(
-                (k) => {
-                    const v = promptObj[k];
-                    return v && typeof v === 'object' && 'class_type' in v;
-                }
-            ).length;
-        }
-    }
-
-    // Extract tags from node types
-    const tags: string[] = [];
-    if (Array.isArray(rawNodes)) {
-        const types = new Set<string>();
-        for (const node of rawNodes) {
-            if (node.type) types.add(String(node.type).toLowerCase());
-        }
-        // Include first few unique node types as tags (cap at 5)
-        let i = 0;
-        for (const t of types) {
-            if (i >= 5) break;
-            tags.push(t);
-            i++;
-        }
-    } else {
-        // API format: extract class_types
-        const promptObj = (body.raw as any).prompt ?? body.raw;
-        if (typeof promptObj === 'object' && promptObj !== null) {
-            const types = new Set<string>();
-            for (const [, value] of Object.entries(promptObj)) {
-                const node = value as Record<string, unknown>;
-                if (node && typeof node === 'object' && 'class_type' in node) {
-                    types.add(String(node.class_type).toLowerCase());
-                }
-            }
-            let i = 0;
-            for (const t of types) {
-                if (i >= 5) break;
-                tags.push(t);
-                i++;
-            }
-        }
-    }
-
-    // Build nodes list for storage (normalize from raw)
-    let storedNodes: unknown[] = [];
-    if (Array.isArray(rawNodes)) {
-        storedNodes = rawNodes;
-    } else {
-        const promptObj = (body.raw as any).prompt ?? body.raw;
-        if (typeof promptObj === 'object' && promptObj !== null) {
-            storedNodes = Object.entries(promptObj)
-                .filter(([, v]) => v && typeof v === 'object' && 'class_type' in (v as Record<string, unknown>))
-                .map(([id, v]) => ({ id, ...(v as Record<string, unknown>) }));
-        }
-    }
-
-    const workflow = {
-        id,
-        name: body.name,
-        description: body.description,
-        nodeCount,
-        createdDate: now,
-        modifiedDate: now,
-        tags,
-        nodes: storedNodes,
-        raw: body.raw
-    };
-
+    // Generate folder name from timestamp; handle collisions with a counter suffix
+    const baseFolder = timestampFolder(now);
     const databaseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
     fs.mkdirSync(databaseDir, { recursive: true });
 
-    const filePath = path.join(databaseDir, `${id}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(workflow, null, 2), 'utf-8');
+    let folderName = baseFolder;
+    let folderPath = path.join(databaseDir, folderName);
+    let counter = 1;
+    while (fs.existsSync(folderPath)) {
+        folderName = `${baseFolder}-${String(counter).padStart(2, '0')}`;
+        folderPath = path.join(databaseDir, folderName);
+        counter++;
+    }
+
+    fs.mkdirSync(folderPath, { recursive: true });
+
+    // workflow.json — pure ComfyUI-compatible workflow (drop-in ready)
+    const workflowJsonPath = path.join(folderPath, 'workflow.json');
+    fs.writeFileSync(workflowJsonPath, JSON.stringify(comfyWorkflow, null, 2), 'utf-8');
+
+    // meta.json — dashboard metadata
+    const meta = {
+        id: folderName,
+        name: body.name,
+        description: body.description ?? null,
+        nodeCount,
+        createdDate: nowIso,
+        modifiedDate: nowIso,
+        tags
+    };
+    const metaJsonPath = path.join(folderPath, 'meta.json');
+    fs.writeFileSync(metaJsonPath, JSON.stringify(meta, null, 2), 'utf-8');
 
     return {
         status: 200,
         response: {
-            workflow: {
-                id: workflow.id,
-                name: workflow.name,
-                description: workflow.description,
-                nodeCount: workflow.nodeCount,
-                createdDate: workflow.createdDate,
-                modifiedDate: workflow.modifiedDate,
-                tags: workflow.tags
-            }
+            workflow: meta
         }
     };
 });
