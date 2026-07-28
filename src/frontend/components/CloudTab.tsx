@@ -461,11 +461,29 @@ const SubgraphNodeCard: React.FC<{
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
 }> = React.memo(({ node, isRunning, updateNodeWidget }) => {
     const registryEntry = comfyNodeRegistry[node.classType];
+    const isUnregistered = !registryEntry;
     return (
-    <NodeCard style={{ marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }}>
-        <NodeHeader>
+    <NodeCard style={isUnregistered
+        ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
+        : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }
+    }>
+        <NodeHeader style={isUnregistered ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' } : undefined}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                <NodeClassType>{registryEntry?.displayName ?? node.classType}</NodeClassType>
+                <NodeClassType style={isUnregistered ? { color: theme.danger } : undefined}>
+                    {registryEntry?.displayName ?? node.classType}
+                </NodeClassType>
+                {isUnregistered && (
+                    <span style={{
+                        fontSize: theme.fontSize.xs,
+                        color: theme.danger,
+                        border: `1px solid ${theme.dangerBorder}`,
+                        borderRadius: theme.radiusSm,
+                        padding: '0 4px',
+                        backgroundColor: theme.dangerSoft,
+                    }}>
+                        not registered
+                    </span>
+                )}
                 {node.mode !== 0 && (
                     <span style={{
                         fontSize: theme.fontSize.xs,
