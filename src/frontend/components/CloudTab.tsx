@@ -436,8 +436,9 @@ const SubgraphNodeCard: React.FC<{
     isRunning: boolean;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
 }> = React.memo(({ node, isRunning, updateNodeWidget }) => {
+    const isSubgraph = !!node.subgraphDef;
     const registryEntry = comfyNodeRegistry[node.classType];
-    const isUnregistered = !registryEntry;
+    const isUnregistered = !isSubgraph && !registryEntry;
     return (
     <NodeCard style={isUnregistered
         ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
