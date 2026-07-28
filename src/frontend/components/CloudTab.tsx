@@ -1298,8 +1298,13 @@ function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unkno
     const sorted = sortNodes(uiNodes);
     const renumbered = renumberNodes(sorted);
 
+    // Flatten subgraph nodes into their internal nodes.
+    // Subgraph wrapper nodes have a subgraphDef but no real ComfyUI class_type —
+    // ComfyUI only understands the internal nodes (VAEDecode, KSampler, etc.).
+    const flat = flattenSubgraphNodes(renumbered);
+
     const prompt: Record<string, unknown> = {};
-    for (const node of renumbered) {
+    for (const node of flat) {
         const inputs: Record<string, unknown> = {};
 
         // Linked connections → [sourceNodeId, sourceSlot]
@@ -1317,6 +1322,29 @@ function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unkno
         prompt[node.id] = { class_type: node.classType, inputs };
     }
     return prompt;
+}
+
+/**
+ * Recursively flatten subgraph nodes into a flat list of real ComfyUI nodes.
+ *
+ * Subgraph wrapper nodes (those with `subgraphDef`) are containers — they
+ * have no class_type that ComfyUI recognizes. Their internal nodes (stored
+ * in `subgraphNodes`) are the real nodes that need to be in the prompt.
+ * Internal nodes may themselves be subgraphs (nested), so we recurse.
+ *
+ * Nodes without subgraphDef pass through as-is.
+ */
+function flattenSubgraphNodes(nodes: UINode[]): UINode[] {
+    const result: UINode[] = [];
+    for (const node of nodes) {
+        if (node.subgraphDef && node.subgraphNodes && node.subgraphNodes.length > 0) {
+            // Subgraph wrapper — skip it, but recursively include its internal nodes
+            result.push(...flattenSubgraphNodes(node.subgraphNodes));
+        } else {
+            result.push(node);
+        }
+    }
+    return result;
 }
 
 // ── Component ──────────────────────────────────────────────────────────
