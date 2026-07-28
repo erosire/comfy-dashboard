@@ -251,12 +251,26 @@ export async function fetchStatus(baseUrl: string): Promise<ServerStatus> {
 }
 
 // Generate a workflow — creates a generation file on the server.
+// When `prompt` is provided it is snapshotted instead of the stored
+// workflow.json — the UI passes the API prompt built from its current
+// (possibly edited) node tree, so the generation captures exactly the
+// values visible at click time.
 export async function generateWorkflow(
     baseUrl: string,
-    workflowId: string
+    workflowId: string,
+    prompt?: Record<string, unknown>
 ): Promise<{ generation: GenerationEntry }> {
     const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate`;
-    const response = await fetch(url, { method: 'POST' });
+    const response = await fetch(
+        url,
+        prompt
+            ? {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ prompt })
+              }
+            : { method: 'POST' }
+    );
     if (!response.ok) {
         let message = `Failed to generate workflow (HTTP ${response.status})`;
         try {

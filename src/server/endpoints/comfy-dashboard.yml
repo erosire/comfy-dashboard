@@ -12,7 +12,7 @@ info:
     streaming. Multiple generations may be queued on the same pod
     concurrently; each submission is scoped by its own client_id so only
     its job's events land in its generation json.
-  version: 0.4.1
+  version: 0.4.2
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -210,9 +210,14 @@ paths:
       operationId: generateWorkflow
       summary: Generate a workflow snapshot
       description: >-
-        Creates a generation snapshot of the workflow's current workflow.json.
-        Stores it in a "generation" subfolder inside the workflow's directory
-        as a timestamped JSON file with metadata (status, createdDate, etc.).
+        Creates a generation snapshot and stores it in a "generation"
+        subfolder inside the workflow's directory as a timestamped JSON
+        file with metadata (status, createdDate, stream, etc.).
+        The snapshotted `prompt` is the optional request body's prompt
+        when provided — the UI sends the API prompt built from its live
+        (possibly edited) node tree, so the generation captures exactly
+        the values visible at click time. Without a body, the workflow's
+        stored workflow.json is snapshotted instead.
       tags:
         - Workflows
       parameters:
@@ -221,6 +226,43 @@ paths:
           required: true
           schema:
             type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                prompt:
+                  type: object
+                  additionalProperties: true
+                  description: >-
+                    Optional. The prompt to snapshot instead of the stored
+                    workflow.json — typically the flat API prompt
+                    ({"<nodeId>": {"class_type": ..., "inputs": {...}}})
+                    built from the caller's current edited state.
+            examples:
+              editor_snapshot:
+                summary: Snapshot the caller's edited prompt
+                value:
+                  prompt:
+                    "3":
+                      class_type: KSampler
+                      inputs:
+                        seed: 123456789012345
+                        steps: 20
+                        cfg: 8
+                        sampler_name: euler
+                        scheduler: normal
+                        denoise: 1
+                        model: ["4", 0]
+                        positive: ["6", 0]
+                        negative: ["7", 0]
+                        latent_image: ["5", 0]
+                    "4":
+                      class_type: CheckpointLoaderSimple
+                      inputs:
+                        ckpt_name: sd_xl_base_1.0.safetensors
       responses:
         '200':
           description: Generation file created

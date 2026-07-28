@@ -5,7 +5,11 @@
 //     ├── workflow.json
 //     ├── meta.json
 //     └── generation/
-//           └── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, ... }
+//           └── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, stream, ... }
+//
+//   The snapshotted prompt is the request's optional { prompt } body when
+//   provided (the UI sends the API prompt built from its live edited node
+//   tree), falling back to the stored workflow.json otherwise.
 //
 // GET — Lists all generation files for the workflow.
 
@@ -96,11 +100,25 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         return { status: 404, response: { error: `Workflow '${workflowId}' not found` } };
     }
 
-    // Read the workflow.json
-    let workflowData: Record<string, unknown>;
+    // Read the workflow.json — the default snapshot source
+    let workflowData: Record<string, unknown> | null = null;
     try {
         workflowData = JSON.parse(fs.readFileSync(workflowJsonPath, 'utf-8'));
     } catch {
+        // Tolerated when the request supplies its own prompt below
+    }
+
+    // Optional request body: { prompt } — snapshot THIS instead of the
+    // stored workflow.json. The UI builds the prompt from its live editor
+    // tree (including any widget edits), so the generation captures what
+    // the user actually sees. Omitting it keeps the original behavior.
+    const body = (parameters.body ?? {}) as { prompt?: Record<string, unknown> };
+    const promptData =
+        body.prompt && typeof body.prompt === 'object' && !Array.isArray(body.prompt)
+            ? body.prompt
+            : workflowData;
+
+    if (!promptData) {
         return { status: 500, response: { error: 'Failed to read workflow.json' } };
     }
 
@@ -133,7 +151,7 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         completedDate: null,
         generatedTime: null,
         error: null,
-        prompt: workflowData,
+        prompt: promptData,
         result: [],
         stream: []
     };

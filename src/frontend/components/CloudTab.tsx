@@ -1472,6 +1472,38 @@ function eventSummary(event: CloudStreamEvent): string {
 }
 
 /**
+ * Assemble a flat API prompt from a list of already-flattened UI nodes.
+ *
+ * Linked connections become [sourceNodeId, sourceSlot] tuples; widget
+ * values are keyed by their registry name when available and skipped
+ * otherwise (e.g. TemporaryImagePreview has widgets_values: [""] but its
+ * registry defines widgets: [] — the value is an internal/hidden widget
+ * that has no corresponding API input).
+ */
+function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
+    const prompt: Record<string, unknown> = {};
+    for (const node of flat) {
+        const inputs: Record<string, unknown> = {};
+
+        // Linked connections → [sourceNodeId, sourceSlot]
+        for (const conn of node.connections) {
+            inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
+        }
+
+        const registryEntry = comfyNodeRegistry[node.classType];
+        for (const widget of node.widgets) {
+            const regWidget = registryEntry?.widgets[widget.index];
+            if (regWidget) {
+                inputs[regWidget.name] = widget.value;
+            }
+        }
+
+        prompt[node.id] = { class_type: node.classType, inputs };
+    }
+    return prompt;
+}
+
+/**
  * Convert a ComfyUI workflow JSON (v0.4 or v1 format) into the flat API
  * prompt format expected by POST /prompt.
  *
@@ -1494,33 +1526,17 @@ function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unkno
     // Flatten subgraph nodes into their internal nodes.
     // Subgraph wrapper nodes have a subgraphDef but no real ComfyUI class_type —
     // ComfyUI only understands the internal nodes (VAEDecode, KSampler, etc.).
-    const flat = flattenSubgraphNodes(renumbered);
+    return uiNodesToApiPrompt(flattenSubgraphNodes(renumbered));
+}
 
-    const prompt: Record<string, unknown> = {};
-    for (const node of flat) {
-        const inputs: Record<string, unknown> = {};
-
-        // Linked connections → [sourceNodeId, sourceSlot]
-        for (const conn of node.connections) {
-            inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
-        }
-
-        // Widget values — use registry name if available.
-        // Skip widgets whose index has no matching registry entry (e.g.
-        // TemporaryImagePreview has widgets_values: [""] but its registry
-        // defines widgets: [] — the value is an internal/hidden widget that
-        // has no corresponding API input).
-        const registryEntry = comfyNodeRegistry[node.classType];
-        for (const widget of node.widgets) {
-            const regWidget = registryEntry?.widgets[widget.index];
-            if (regWidget) {
-                inputs[regWidget.name] = widget.value;
-            }
-        }
-
-        prompt[node.id] = { class_type: node.classType, inputs };
-    }
-    return prompt;
+/**
+ * Build the API prompt from the CURRENT editor node tree — every widget
+ * edit the user made is included. This is the source of truth for
+ * Generate: what you see in the UI is exactly what gets snapshotted into
+ * the generation json and submitted to the pod.
+ */
+function editorTreeToApiPrompt(nodes: UINode[]): Record<string, unknown> {
+    return uiNodesToApiPrompt(flattenSubgraphNodes(nodes));
 }
 
 /**
@@ -1895,29 +1911,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         setNodes((prev) => updateInTree(prev));
     }, []);
 
-    // ── Build API prompt ─────────────────────────────────────────────
+    // ── Build API prompt from the current editor tree ────────────────
+    // The editor tree (with all widget edits) is the source of truth —
+    // see editorTreeToApiPrompt(). Prompt construction for Generate no
+    // longer reads the stored workflow json.
 
-    const buildPrompt = React.useCallback((): Record<string, unknown> => {
-        const prompt: Record<string, unknown> = {};
-        for (const node of nodes) {
-            // Merge linked connections with widget values back into the flat inputs dict
-            const inputs: Record<string, unknown> = {};
-            // Add connection link references
-            for (const conn of node.connections) {
-                inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
-            }
-            // Add widget values using registry name if available, otherwise widget_${index}
-            const registryEntry = comfyNodeRegistry[node.classType];
-            for (const widget of node.widgets) {
-                const name = registryEntry?.widgets[widget.index]?.name ?? `widget_${widget.index}`;
-                inputs[name] = widget.value;
-            }
-            prompt[node.id] = { class_type: node.classType, inputs };
-        }
-        return prompt;
-    }, [nodes]);
-
-    // ── Auto-save workflow on drop ──────────────────────────────────
+    // ── Copy JSON to clipboard ───────────────────────────────────────
 
     // ── Copy JSON to clipboard ───────────────────────────────────────
 
@@ -2002,14 +2001,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     // ── Run a generation on a cloud pod ────────────────────────────
     // Shared by "Generate" (spawns a fresh pod) and "Pod#N" (reuses a pod).
     //
-    // 1. Creates a generation snapshot via the workflow generation API —
-    //    the prompt json lands in the same place as before
-    //    (POST /v1/comfy/workflows/:id/generate).
-    // 2. Submits it to POST /v1/comfy/cloud/prompt with the pod_url and the
-    //    workflow/generation ids. The SERVER consumes the pod's NDJSON
-    //    stream and updates the generation json by itself — this call
-    //    returns immediately (202).
-    // 3. Client-side we are done: the continuous generations polling
+    // 1. Builds the API prompt from the CURRENT editor tree — every
+    //    widget edit is included (the stored workflow json is NOT read).
+    // 2. Snapshots that prompt via the workflow generation API (same
+    //    place as before: POST /v1/comfy/workflows/:id/generate, with the
+    //    prompt in the request body) — edited == stored == executed.
+    // 3. Submits the snapshot to POST /v1/comfy/cloud/prompt with the
+    //    pod_url + workflow/generation ids. The SERVER consumes the pod's
+    //    NDJSON stream and updates the generation json by itself — this
+    //    call returns immediately (202).
+    // 4. Client-side we are done: the continuous generations polling
     //    updates the sidebar with progress, and settles the pod button's
     //    running → done/error state (see the sync effect below).
 
@@ -2017,19 +2018,19 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         async (podUrl: string, podId?: string) => {
             if (nodes.length === 0 || !editingWorkflowId) return;
 
-            // Step 1 — snapshot the workflow into a generation json (same
-            // place as the workflow generation API).
-            const generation = await generateWorkflow(editingWorkflowId);
+            // Step 1+2 — build the prompt from the live editor tree and
+            // snapshot it into a generation json.
+            const apiPrompt = editorTreeToApiPrompt(nodes);
+            const generation = await generateWorkflow(editingWorkflowId, apiPrompt);
             console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
 
             try {
-                // Step 2 — submit and be done. The server processes the
+                // Step 3 — submit and be done. The server processes the
                 // pod stream in the background from here (scoped to this
                 // job via a per-submission client_id).
-                const apiPrompt = workflowToApiPrompt(generation.prompt);
                 await cloudPrompt(baseUrl, {
                     pod_url: podUrl,
-                    prompt: apiPrompt,
+                    prompt: generation.prompt,
                     workflow_id: editingWorkflowId,
                     generation_id: generation.id,
                     extra_data: {
@@ -2069,7 +2070,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 throw err;
             }
         },
-        [baseUrl, nodes.length, editingWorkflowId, generateWorkflow]
+        [baseUrl, nodes, editingWorkflowId, generateWorkflow]
     );
 
     // ── Generate workflow ──────────────────────────────────────────
