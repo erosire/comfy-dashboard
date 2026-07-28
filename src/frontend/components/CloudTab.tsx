@@ -12,7 +12,7 @@ import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
 import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta } from '../api';
-import { cloud } from '../api';
+import { cloud, cloudPrompt, cloudReadNdjson } from '../api';
 import { useDashboardStore } from '../context';
 import type {
     ApiPromptNode,
@@ -147,6 +147,29 @@ const HeaderTitle = styled('span')({
     letterSpacing: 0.2,
     whiteSpace: 'nowrap' as const,
     userSelect: 'none' as const
+});
+
+const SpawnAgentBtn = styled('button')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 34,
+    height: 34,
+    flex: '0 0 auto',
+    borderRadius: theme.radiusMd,
+    border: `1px solid ${theme.accent}`,
+    backgroundColor: theme.accent,
+    color: '#ffffff',
+    cursor: 'pointer',
+    fontSize: theme.fontSize.xl,
+    lineHeight: 1,
+    padding: 0,
+    fontWeight: 600,
+    transition: `background-color ${theme.transition}, opacity ${theme.transition}`,
+    '&:disabled': {
+        opacity: 0.5,
+        cursor: 'not-allowed'
+    }
 });
 
 // ── Styled: left sidebar (workflow list) ─────────────────────────────
@@ -1288,6 +1311,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [searchText, setSearchText] = React.useState(store.searchQuery);
     const [renameOpen, setRenameOpen] = React.useState(false);
     const [renameValue, setRenameValue] = React.useState('');
+    const [agentRunning, setAgentRunning] = React.useState(false);
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1530,6 +1554,75 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
     }, [editingWorkflowId, nodes.length, generateWorkflow]);
+
+    // ── Spawn agent: create a cloud pod and run all pending generations ──
+    //
+    // 1. Calls POST /v1/comfy/cloud with {} to spawn a new pod.
+    // 2. Once the pod is ready, iterates store.generations and submits
+    //    each generation.prompt via POST /v1/comfy/cloud/prompt.
+    // 3. Streams the NDJSON response back and logs every event to console.
+
+    const handleSpawnAgent = React.useCallback(async () => {
+        if (agentRunning) return;
+
+        const generations = store.generations;
+        if (generations.length === 0) {
+            console.log('[Agent] No generations to process. Click "Generate" first to create a snapshot.');
+            return;
+        }
+
+        setAgentRunning(true);
+        console.log(`[Agent] Spawning cloud pod...`);
+
+        try {
+            // Step 1 — spawn the pod
+            const result = await cloud(baseUrl, { type: 'create' });
+            if (!('pod_url' in result)) {
+                console.error('[Agent] Spawn response did not contain pod_url', result);
+                setAgentRunning(false);
+                return;
+            }
+            const podUrl = (result as { pod_url: string }).pod_url;
+            console.log(`[Agent] Pod spawned: ${podUrl}`);
+
+            // Step 2 — iterate generations and submit each prompt
+            for (let i = 0; i < generations.length; i++) {
+                const gen = generations[i];
+                console.log(`[Agent] (${i + 1}/${generations.length}) Submitting generation ${gen.id} (status: ${gen.status})...`);
+                console.log(`[Agent] Prompt payload:`, JSON.stringify(gen.prompt, null, 2));
+
+                try {
+                    const response = await cloudPrompt(baseUrl, {
+                        pod_url: podUrl,
+                        prompt: gen.prompt
+                    });
+
+                    // Step 3 — stream NDJSON and log each event
+                    for await (const event of cloudReadNdjson(response)) {
+                        console.log(`[Agent] Event (${gen.id}):`, event.type, event.data);
+
+                        // Terminal events — stop reading this stream
+                        if (
+                            event.type === 'proxy_done' ||
+                            event.type === 'execution_error' ||
+                            event.type === 'proxy_error'
+                        ) {
+                            console.log(`[Agent] Generation ${gen.id} finished with event: ${event.type}`);
+                            break;
+                        }
+                    }
+                } catch (err: any) {
+                    console.error(`[Agent] Failed to submit generation ${gen.id}:`, err.message ?? String(err));
+                }
+            }
+
+            console.log('[Agent] All generations processed.');
+        } catch (err: any) {
+            console.error('[Agent] Spawn failed:', err.message ?? String(err));
+        } finally {
+            setAgentRunning(false);
+        }
+    }, [agentRunning, baseUrl, store.generations]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection.
@@ -2180,6 +2273,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             )}
 
             <div style={{ flex: '1 1 auto' }} />
+
+            <SpawnAgentBtn
+                className="sg-primary"
+                onClick={handleSpawnAgent}
+                disabled={agentRunning}
+                title={agentRunning ? 'Agent running...' : 'Spawn agent to run generations'}
+            >
+                {agentRunning ? <SpinnerEl /> : '+'}
+            </SpawnAgentBtn>
         </>
     );
 
