@@ -11,34 +11,31 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
-import { cloudCreate, cloudPrompt, cloudReadNdjson } from '../api/cloud';
+import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta } from '../api';
+import { cloud, cloudPrompt, cloudReadNdjson } from '../api';
 import { useDashboardStore } from '../context';
-import { isApiLinkRef, comfyNodeRegistry, getWidgetLabel } from '../../comfy';
-import type { CloudStreamEvent } from '../api/cloud';
-import type { WorkflowMeta } from '../api';
 import type {
-    WorkflowNode,
-    NodeInput,
-    NodeOutput,
     ApiPromptNode,
     ComfyLink,
     ComfyLinkTuple,
     DataType,
+    NodeInput,
+    NodeOutput,
     SubgraphDefinition,
+    WorkflowNode
 } from '../../comfy';
-import type {
-    UINode,
-    UIInputConnection,
-    UIOutputSlot,
-    UIWidget,
-} from '../nodes/node-type';
+import { comfyNodeRegistry, getWidgetLabel, isApiLinkRef } from '../../comfy';
+import type { UIInputConnection, UINode, UIOutputSlot, UIWidget } from '../nodes/node-type';
 import { MODE_LABELS, MODE_STYLES } from '../nodes/node-type';
 
-type PodState =
-    | { status: 'idle' }
-    | { status: 'spawning' }
-    | { status: 'ready'; container_id: string; pod_url: string }
-    | { status: 'error'; message: string };
+type PodEntry = {
+    id: string;
+    name: string;
+    pod_url: string;
+    status: 'spawning' | 'ready' | 'error';
+    health?: CloudPodStatusResult;
+    error?: string;
+};
 
 type RunState =
     | { status: 'idle' }
@@ -57,7 +54,7 @@ const Btn = styled('button')({
     border: `1px solid ${theme.border}`,
     backgroundColor: theme.surface1,
     color: theme.textMuted,
-    transition: `background-color ${theme.transition}, color ${theme.transition}, border-color ${theme.transition}`,
+    transition: `background-color ${theme.transition}, color ${theme.transition}, border-color ${theme.transition}`
 });
 
 const BtnPrimary = styled('button')({
@@ -69,7 +66,7 @@ const BtnPrimary = styled('button')({
     border: `1px solid ${theme.accent}`,
     backgroundColor: theme.accent,
     color: '#ffffff',
-    transition: `background-color ${theme.transition}`,
+    transition: `background-color ${theme.transition}`
 });
 
 const BtnDanger = styled('button')({
@@ -81,10 +78,8 @@ const BtnDanger = styled('button')({
     border: `1px solid ${theme.dangerBorder}`,
     backgroundColor: theme.dangerSoft,
     color: theme.danger,
-    transition: `background-color ${theme.transition}, color ${theme.transition}`,
+    transition: `background-color ${theme.transition}, color ${theme.transition}`
 });
-
-
 
 const Badge = styled('span')({
     display: 'inline-flex',
@@ -95,14 +90,14 @@ const Badge = styled('span')({
     padding: '2px 8px',
     borderRadius: theme.radiusSm,
     backgroundColor: theme.surface2,
-    border: `1px solid ${theme.border}`,
+    border: `1px solid ${theme.border}`
 });
 
 const BadgeDot = styled('span')({
     width: 6,
     height: 6,
     borderRadius: '50%',
-    flex: '0 0 auto',
+    flex: '0 0 auto'
 });
 
 const SpinnerEl = styled('span')({
@@ -112,14 +107,14 @@ const SpinnerEl = styled('span')({
     border: `2px solid rgba(129, 140, 248, 0.30)`,
     borderTopColor: theme.accent,
     borderRadius: '50%',
-    animation: 'sg-spin 700ms linear infinite',
+    animation: 'sg-spin 700ms linear infinite'
 });
 
 const SectionLabel = styled('div')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
     color: theme.textDim,
-    marginBottom: 6,
+    marginBottom: 6
 });
 
 const ToggleButton = styled('button')({
@@ -137,7 +132,54 @@ const ToggleButton = styled('button')({
     fontSize: theme.fontSize.xl,
     lineHeight: 1,
     padding: 0,
-    transition: `background-color ${theme.transition}, border-color ${theme.transition}`,
+    transition: `background-color ${theme.transition}, border-color ${theme.transition}`
+});
+
+// ── Styled: pod badges ────────────────────────────────────────────────
+
+const PodBadge = styled('div')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontSize: theme.fontSize.xs,
+    fontWeight: 500,
+    padding: '3px 6px 3px 8px',
+    borderRadius: theme.radiusSm,
+    backgroundColor: theme.surface2,
+    border: `1px solid ${theme.border}`,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap' as const,
+    userSelect: 'none' as const,
+    transition: `background-color ${theme.transition}, border-color ${theme.transition}`
+});
+
+const PodDot = styled('span')({
+    width: 6,
+    height: 6,
+    borderRadius: '50%',
+    flex: '0 0 auto'
+});
+
+const PodCloseBtn = styled('button')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 16,
+    height: 16,
+    borderRadius: '50%',
+    fontSize: 10,
+    lineHeight: 1,
+    cursor: 'pointer',
+    color: theme.textDim,
+    backgroundColor: 'transparent',
+    border: 'none',
+    padding: 0,
+    marginLeft: 2,
+    transition: `color ${theme.transition}, background-color ${theme.transition}`,
+    '&:hover': {
+        color: theme.danger,
+        backgroundColor: theme.dangerSoft
+    }
 });
 
 const HeaderTitle = styled('span')({
@@ -146,7 +188,7 @@ const HeaderTitle = styled('span')({
     color: theme.text,
     letterSpacing: 0.2,
     whiteSpace: 'nowrap' as const,
-    userSelect: 'none' as const,
+    userSelect: 'none' as const
 });
 
 // ── Styled: left sidebar (workflow list) ─────────────────────────────
@@ -155,7 +197,7 @@ const SidebarPanel = styled('div')({
     display: 'flex',
     flexDirection: 'column',
     height: '100%',
-    overflow: 'hidden',
+    overflow: 'hidden'
 });
 
 const SidebarHeader = styled('div')({
@@ -169,12 +211,12 @@ const SidebarHeader = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    justifyContent: 'space-between'
 });
 
 const SidebarSearch = styled('div')({
     padding: '0 12px 8px',
-    flex: '0 0 auto',
+    flex: '0 0 auto'
 });
 
 const SearchInput = styled('input')({
@@ -188,13 +230,13 @@ const SearchInput = styled('input')({
     borderRadius: theme.radiusSm,
     outline: 'none',
     boxSizing: 'border-box' as const,
-    transition: `border-color ${theme.transition}`,
+    transition: `border-color ${theme.transition}`
 });
 
 const SidebarScroll = styled('div')({
     flex: '1 1 auto',
     overflowY: 'auto',
-    padding: '0 6px 12px',
+    padding: '0 6px 12px'
 });
 
 const EmptyHint = styled('div')({
@@ -202,7 +244,7 @@ const EmptyHint = styled('div')({
     fontSize: theme.fontSize.sm,
     color: theme.textFaint,
     textAlign: 'center' as const,
-    lineHeight: 1.5,
+    lineHeight: 1.5
 });
 
 const WorkflowItem = styled('div')({
@@ -213,7 +255,7 @@ const WorkflowItem = styled('div')({
     cursor: 'pointer',
     transition: `background-color ${theme.transition}, border-color ${theme.transition}`,
     border: `1px solid transparent`,
-    marginBottom: 2,
+    marginBottom: 2
 });
 
 const WorkflowItemActive = styled('div')({
@@ -225,7 +267,7 @@ const WorkflowItemActive = styled('div')({
     transition: `background-color ${theme.transition}, border-color ${theme.transition}`,
     border: `1px solid ${theme.accentRing}`,
     marginBottom: 2,
-    backgroundColor: theme.accentSoft,
+    backgroundColor: theme.accentSoft
 });
 
 const WorkflowItemName = styled('div')({
@@ -234,19 +276,19 @@ const WorkflowItemName = styled('div')({
     color: theme.text,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
+    whiteSpace: 'nowrap' as const
 });
 
 const WorkflowItemCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.accent2,
-    fontWeight: 400,
+    fontWeight: 400
 });
 
 const SidebarCount = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
-    fontWeight: 400,
+    fontWeight: 400
 });
 
 // ── Styled: right content (editor) ────────────────────────────────────
@@ -254,7 +296,7 @@ const SidebarCount = styled('span')({
 const EditorArea = styled('div')({
     flex: '1 1 auto',
     overflowY: 'auto',
-    padding: '14px 24px',
+    padding: '14px 24px'
 });
 
 const EditorAreaEmpty = styled('div')({
@@ -270,31 +312,31 @@ const EditorAreaEmpty = styled('div')({
     color: theme.textDim,
     fontSize: theme.fontSize.body,
     boxSizing: 'border-box' as const,
-    flex: '1 1 auto',
+    flex: '1 1 auto'
 });
 
 const DropTitle = styled('div')({
     fontSize: theme.fontSize.lg,
     fontWeight: 600,
-    color: theme.textMuted,
+    color: theme.textMuted
 });
 
 const DropHint = styled('div')({
     fontSize: theme.fontSize.sm,
-    color: theme.textDim,
+    color: theme.textDim
 });
 
 const NodeList = styled('div')({
     display: 'flex',
     flexDirection: 'column',
-    gap: 8,
+    gap: 8
 });
 
 const NodeCard = styled('div')({
     border: `1px solid ${theme.border}`,
     borderRadius: theme.radiusMd,
     backgroundColor: theme.surface1,
-    overflow: 'hidden',
+    overflow: 'hidden'
 });
 
 const NodeHeader = styled('div')({
@@ -304,33 +346,33 @@ const NodeHeader = styled('div')({
     justifyContent: 'space-between',
     padding: '6px 10px',
     backgroundColor: theme.surface2,
-    borderBottom: `1px solid ${theme.border}`,
+    borderBottom: `1px solid ${theme.border}`
 });
 
 const NodeId = styled('span')({
     fontSize: theme.fontSize.xs,
     color: theme.textFaint,
-    fontFamily: theme.fontMono,
+    fontFamily: theme.fontMono
 });
 
 const NodeClassType = styled('span')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
-    color: theme.accent,
+    color: theme.accent
 });
 
 const NodeInputs = styled('div')({
     padding: '8px 10px',
     display: 'flex',
     flexDirection: 'column',
-    gap: 4,
+    gap: 4
 });
 
 const InputRow = styled('div')({
     display: 'flex',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 6
 });
 
 const InputLabel = styled('span')({
@@ -341,7 +383,7 @@ const InputLabel = styled('span')({
     flex: '0 0 auto',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap' as const,
+    whiteSpace: 'nowrap' as const
 });
 
 const InputField = styled('input')({
@@ -354,7 +396,7 @@ const InputField = styled('input')({
     border: `1px solid ${theme.border}`,
     borderRadius: theme.radiusSm,
     outline: 'none',
-    minWidth: 0,
+    minWidth: 0
 });
 
 const LinkBadge = styled('span')({
@@ -364,7 +406,7 @@ const LinkBadge = styled('span')({
     padding: '1px 5px',
     borderRadius: theme.radiusSm,
     backgroundColor: 'rgba(147, 180, 212, 0.12)',
-    border: '1px solid rgba(147, 180, 212, 0.25)',
+    border: '1px solid rgba(147, 180, 212, 0.25)'
 });
 
 // ── Styled: save dialog ──────────────────────────────────────────────
@@ -376,7 +418,7 @@ const DialogOverlay = styled('div')({
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 100,
+    zIndex: 100
 });
 
 const DialogBox = styled('div')({
@@ -388,25 +430,25 @@ const DialogBox = styled('div')({
     maxWidth: 480,
     display: 'flex',
     flexDirection: 'column',
-    gap: 12,
+    gap: 12
 });
 
 const DialogTitle = styled('div')({
     fontSize: theme.fontSize.lg,
     fontWeight: 600,
-    color: theme.text,
+    color: theme.text
 });
 
 const DialogField = styled('div')({
     display: 'flex',
     flexDirection: 'column',
-    gap: 4,
+    gap: 4
 });
 
 const DialogLabel = styled('label')({
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
-    color: theme.textDim,
+    color: theme.textDim
 });
 
 const DialogInput = styled('input')({
@@ -418,7 +460,7 @@ const DialogInput = styled('input')({
     border: `1px solid ${theme.border}`,
     borderRadius: theme.radiusSm,
     outline: 'none',
-    transition: `border-color ${theme.transition}`,
+    transition: `border-color ${theme.transition}`
 });
 
 const DialogActions = styled('div')({
@@ -426,7 +468,7 @@ const DialogActions = styled('div')({
     flexDirection: 'row',
     justifyContent: 'flex-end',
     gap: 8,
-    marginTop: 4,
+    marginTop: 4
 });
 
 // ── SubgraphNodeCard — renders a UINode with the same card as regular nodes ─
@@ -440,143 +482,178 @@ const SubgraphNodeCard: React.FC<{
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
     return (
-    <NodeCard style={isUnregistered
-        ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
-        : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }
-    }>
-        <NodeHeader style={isUnregistered ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' } : undefined}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                <NodeClassType style={isUnregistered ? { color: theme.danger } : undefined}>
-                    {registryEntry?.displayName ?? node.classType}
-                </NodeClassType>
-                {isUnregistered && (
-                    <span style={{
-                        fontSize: theme.fontSize.xs,
-                        color: theme.danger,
-                        border: `1px solid ${theme.dangerBorder}`,
-                        borderRadius: theme.radiusSm,
-                        padding: '0 4px',
-                        backgroundColor: theme.dangerSoft,
-                    }}>
-                        not registered
-                    </span>
-                )}
-                {node.mode !== 0 && (
-                    <span style={{
-                        fontSize: theme.fontSize.xs,
-                        color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
-                        opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
-                        fontStyle: 'italic',
-                    }}>
-                        [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
-                    </span>
-                )}
-            </div>
-            <NodeId>#{node.id}</NodeId>
-        </NodeHeader>
-        <NodeInputs>
-            {node.connections.map((conn) => (
-                <InputRow key={`conn-${conn.name}`}>
-                    <InputLabel style={{ color: dataTypeColor(conn.type) }}>{conn.name}</InputLabel>
-                    <LinkBadge style={{
-                        color: dataTypeColor(conn.type),
-                        borderColor: `${dataTypeColor(conn.type)}40`,
-                        backgroundColor: `${dataTypeColor(conn.type)}12`,
-                    }}>
-                        → {conn.sourceNodeId}[{conn.sourceSlot}]
-                        {conn.type !== '*' && (
-                            <span style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}>
-                                {dataTypeLabel(conn.type)}
-                            </span>
-                        )}
-                    </LinkBadge>
-                </InputRow>
-            ))}
-            {node.widgets.map((widget) => (
-                <InputRow key={`w${widget.index}`}>
-                    <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
-                    <InputField
-                        type="text"
-                        value={displayValue(widget.value)}
-                        onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
-                        readOnly={isRunning}
-                    />
-                </InputRow>
-            ))}
-            {node.outputs.length > 0 && (
-                <div style={{
-                    display: 'flex',
-                    flexWrap: 'wrap' as const,
-                    gap: 4,
-                    marginTop: 4,
-                    paddingTop: 4,
-                    borderTop: `1px solid ${theme.border}`,
-                }}>
-                    <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint, marginRight: 2 }}>outputs:</span>
-                    {node.outputs.map((out) => (
+        <NodeCard
+            style={
+                isUnregistered
+                    ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
+                    : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }
+            }
+        >
+            <NodeHeader style={isUnregistered ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' } : undefined}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                    <NodeClassType style={isUnregistered ? { color: theme.danger } : undefined}>
+                        {registryEntry?.displayName ?? node.classType}
+                    </NodeClassType>
+                    {isUnregistered && (
                         <span
-                            key={`out-${out.slotIndex}`}
                             style={{
                                 fontSize: theme.fontSize.xs,
-                                color: dataTypeColor(out.type),
-                                fontFamily: theme.fontMono,
-                                padding: '0 4px',
+                                color: theme.danger,
+                                border: `1px solid ${theme.dangerBorder}`,
                                 borderRadius: theme.radiusSm,
-                                backgroundColor: `${dataTypeColor(out.type)}12`,
-                                border: `1px solid ${dataTypeColor(out.type)}25`,
+                                padding: '0 4px',
+                                backgroundColor: theme.dangerSoft
                             }}
                         >
-                            {out.name}
-                            {out.connectionCount > 0 && <span style={{ opacity: 0.6 }}> ({out.connectionCount})</span>}
-                            {out.isList && <span style={{ opacity: 0.6 }}> []</span>}
-                        </span>
-                    ))}
-                </div>
-            )}
-            {(node.properties['Node name for S&R'] || node.properties.ver) && (
-                <div style={{
-                    display: 'flex',
-                    flexWrap: 'wrap' as const,
-                    gap: 6,
-                    marginTop: 4,
-                    paddingTop: 4,
-                    borderTop: `1px solid ${theme.border}`,
-                }}>
-                    {node.properties['Node name for S&R'] && (
-                        <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
-                            S&amp;R: {node.properties['Node name for S&R']}
+                            not registered
                         </span>
                     )}
-                    {node.properties.ver && (
-                        <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
-                            v{node.properties.ver}
-                        </span>
-                    )}
-                    {node.properties.cnr_id && (
-                        <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
-                            CNR: {node.properties.cnr_id}
+                    {node.mode !== 0 && (
+                        <span
+                            style={{
+                                fontSize: theme.fontSize.xs,
+                                color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
+                                opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
+                                fontStyle: 'italic'
+                            }}
+                        >
+                            [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
                         </span>
                     )}
                 </div>
-            )}
-            {node.connections.length === 0 && node.widgets.length === 0 && node.outputs.length === 0 && (
-                <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>No inputs</div>
-            )}
-            {/* Recurse into nested subgraphs */}
-            {node.subgraphNodes && node.subgraphNodes.length > 0 && (
-                <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${theme.accent}30` }}>
-                    <div style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600, marginBottom: 4 }}>
-                        ◈ {node.subgraphNodes.length} internal node{node.subgraphNodes.length !== 1 ? 's' : ''}
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {node.subgraphNodes.map((inner) => (
-                            <SubgraphNodeCard key={inner.id} node={inner} isRunning={isRunning} updateNodeWidget={updateNodeWidget} />
+                <NodeId>#{node.id}</NodeId>
+            </NodeHeader>
+            <NodeInputs>
+                {node.connections.map((conn) => (
+                    <InputRow key={`conn-${conn.name}`}>
+                        <InputLabel style={{ color: dataTypeColor(conn.type) }}>{conn.name}</InputLabel>
+                        <LinkBadge
+                            style={{
+                                color: dataTypeColor(conn.type),
+                                borderColor: `${dataTypeColor(conn.type)}40`,
+                                backgroundColor: `${dataTypeColor(conn.type)}12`
+                            }}
+                        >
+                            → {conn.sourceNodeId}[{conn.sourceSlot}]
+                            {conn.type !== '*' && (
+                                <span style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}>
+                                    {dataTypeLabel(conn.type)}
+                                </span>
+                            )}
+                        </LinkBadge>
+                    </InputRow>
+                ))}
+                {node.widgets.map((widget) => (
+                    <InputRow key={`w${widget.index}`}>
+                        <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
+                        <InputField
+                            type="text"
+                            value={displayValue(widget.value)}
+                            onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
+                            readOnly={isRunning}
+                        />
+                    </InputRow>
+                ))}
+                {node.outputs.length > 0 && (
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexWrap: 'wrap' as const,
+                            gap: 4,
+                            marginTop: 4,
+                            paddingTop: 4,
+                            borderTop: `1px solid ${theme.border}`
+                        }}
+                    >
+                        <span
+                            style={{
+                                fontSize: theme.fontSize.xs,
+                                color: theme.textFaint,
+                                marginRight: 2
+                            }}
+                        >
+                            outputs:
+                        </span>
+                        {node.outputs.map((out) => (
+                            <span
+                                key={`out-${out.slotIndex}`}
+                                style={{
+                                    fontSize: theme.fontSize.xs,
+                                    color: dataTypeColor(out.type),
+                                    fontFamily: theme.fontMono,
+                                    padding: '0 4px',
+                                    borderRadius: theme.radiusSm,
+                                    backgroundColor: `${dataTypeColor(out.type)}12`,
+                                    border: `1px solid ${dataTypeColor(out.type)}25`
+                                }}
+                            >
+                                {out.name}
+                                {out.connectionCount > 0 && (
+                                    <span style={{ opacity: 0.6 }}> ({out.connectionCount})</span>
+                                )}
+                                {out.isList && <span style={{ opacity: 0.6 }}> []</span>}
+                            </span>
                         ))}
                     </div>
-                </div>
-            )}
-        </NodeInputs>
-    </NodeCard>
+                )}
+                {(node.properties['Node name for S&R'] || node.properties.ver) && (
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexWrap: 'wrap' as const,
+                            gap: 6,
+                            marginTop: 4,
+                            paddingTop: 4,
+                            borderTop: `1px solid ${theme.border}`
+                        }}
+                    >
+                        {node.properties['Node name for S&R'] && (
+                            <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                                S&amp;R: {node.properties['Node name for S&R']}
+                            </span>
+                        )}
+                        {node.properties.ver && (
+                            <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                                v{node.properties.ver}
+                            </span>
+                        )}
+                        {node.properties.cnr_id && (
+                            <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
+                                CNR: {node.properties.cnr_id}
+                            </span>
+                        )}
+                    </div>
+                )}
+                {node.connections.length === 0 && node.widgets.length === 0 && node.outputs.length === 0 && (
+                    <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>No inputs</div>
+                )}
+                {/* Recurse into nested subgraphs */}
+                {node.subgraphNodes && node.subgraphNodes.length > 0 && (
+                    <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px dashed ${theme.accent}30` }}>
+                        <div
+                            style={{
+                                fontSize: theme.fontSize.xs,
+                                color: theme.accent,
+                                fontWeight: 600,
+                                marginBottom: 4
+                            }}
+                        >
+                            ◈ {node.subgraphNodes.length} internal node{node.subgraphNodes.length !== 1 ? 's' : ''}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {node.subgraphNodes.map((inner) => (
+                                <SubgraphNodeCard
+                                    key={inner.id}
+                                    node={inner}
+                                    isRunning={isRunning}
+                                    updateNodeWidget={updateNodeWidget}
+                                />
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </NodeInputs>
+        </NodeCard>
     );
 });
 
@@ -600,10 +677,7 @@ function isSubgraphType(type: string): boolean {
 }
 
 /** Look up a subgraph definition by UUID from a workflow's definitions. */
-function findSubgraphDef(
-    raw: Record<string, unknown>,
-    subgraphId: string
-): SubgraphDefinition | undefined {
+function findSubgraphDef(raw: Record<string, unknown>, subgraphId: string): SubgraphDefinition | undefined {
     const defs = raw.definitions as Record<string, unknown> | undefined;
     if (!defs) return undefined;
     const subs = defs.subgraphs as Array<Record<string, unknown>> | undefined;
@@ -628,10 +702,7 @@ type BoundaryLink = {
  * Normalize top-level links into BoundaryLink[] for subgraph boundary
  * rewriting.  Handles both v0.4 tuple and v1 object link formats.
  */
-function buildBoundaryLinks(
-    linkTuples: ComfyLinkTuple[],
-    v1Links: ComfyLink[],
-): BoundaryLink[] {
+function buildBoundaryLinks(linkTuples: ComfyLinkTuple[], v1Links: ComfyLink[]): BoundaryLink[] {
     const result: BoundaryLink[] = [];
     if (linkTuples.length > 0) {
         for (const tuple of linkTuples) {
@@ -640,7 +711,7 @@ function buildBoundaryLinks(
                     targetNodeId: String(tuple[3]),
                     targetSlot: Number(tuple[4]),
                     sourceNodeId: String(tuple[1]),
-                    sourceSlot: Number(tuple[2]),
+                    sourceSlot: Number(tuple[2])
                 });
             }
         }
@@ -651,7 +722,7 @@ function buildBoundaryLinks(
                     targetNodeId: String(link.target_id),
                     targetSlot: Number(link.target_slot),
                     sourceNodeId: String(link.origin_id),
-                    sourceSlot: Number(link.origin_slot),
+                    sourceSlot: Number(link.origin_slot)
                 });
             }
         }
@@ -677,7 +748,7 @@ function parseNodesRecursive(
     nodes: WorkflowNode[],
     parentLinkMap: Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>,
     parentBoundaryLinks: BoundaryLink[],
-    sourceFormat: 'workflow-v1' | 'workflow-v04',
+    sourceFormat: 'workflow-v1' | 'workflow-v04'
 ): UINode[] {
     const result: UINode[] = [];
 
@@ -700,7 +771,7 @@ function parseNodesRecursive(
                     if (bl.targetNodeId === sgNodeId) {
                         externalInputByPort.set(bl.targetSlot, {
                             sourceNodeId: bl.sourceNodeId,
-                            sourceSlot: bl.sourceSlot,
+                            sourceSlot: bl.sourceSlot
                         });
                     }
                 }
@@ -709,13 +780,13 @@ function parseNodesRecursive(
                 (sgDef.inputs ?? []).forEach((inp, portIndex) => {
                     const ext = externalInputByPort.get(portIndex);
                     if (!ext) return;
-                    for (const linkId of (inp.linkIds ?? [])) {
+                    for (const linkId of inp.linkIds ?? []) {
                         const existing = internalLinkMap.get(linkId);
                         if (existing && String(existing.sourceNodeId) === '-10') {
                             internalLinkMap.set(linkId, {
                                 ...existing,
                                 sourceNodeId: ext.sourceNodeId,
-                                sourceSlot: ext.sourceSlot,
+                                sourceSlot: ext.sourceSlot
                             });
                         }
                     }
@@ -726,7 +797,7 @@ function parseNodesRecursive(
                     targetNodeId: String(link.target_id),
                     targetSlot: Number(link.target_slot),
                     sourceNodeId: String(link.origin_id),
-                    sourceSlot: Number(link.origin_slot),
+                    sourceSlot: Number(link.origin_slot)
                 }));
 
                 // Parse internal nodes RECURSIVELY (handles unlimited nesting)
@@ -736,7 +807,7 @@ function parseNodesRecursive(
                     internalNodes,
                     internalLinkMap,
                     nestedBoundaryLinks,
-                    sourceFormat,
+                    sourceFormat
                 );
 
                 // Build the parent subgraph UINode with definition ports
@@ -745,14 +816,14 @@ function parseNodesRecursive(
                     type: inp.type as DataType,
                     sourceNodeId: '',
                     sourceSlot: -1,
-                    linkId: undefined,
+                    linkId: undefined
                 }));
 
                 const sgOutputSlots: UIOutputSlot[] = (sgDef.outputs ?? []).map((out, i) => ({
                     name: out.name,
                     type: out.type as DataType,
                     connectionCount: 0,
-                    slotIndex: i,
+                    slotIndex: i
                 }));
 
                 result.push({
@@ -773,7 +844,7 @@ function parseNodesRecursive(
                     _sourceFormat: sourceFormat,
                     subgraphDef: sgDef,
                     subgraphNodes,
-                    subgraphLinks: internalLinks,
+                    subgraphLinks: internalLinks
                 });
                 continue;
             }
@@ -789,7 +860,14 @@ function parseNodesRecursive(
 // ── Link map builders ───────────────────────────────────────────────────
 
 /** Build a link map from v0.4 tuple links: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]. */
-function buildLinkMapFromTuples(links: ComfyLinkTuple[]): Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }> {
+function buildLinkMapFromTuples(links: ComfyLinkTuple[]): Map<
+    number,
+    {
+        sourceNodeId: string;
+        sourceSlot: number;
+        dataType: DataType;
+    }
+> {
     const map = new Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>();
     for (const link of links) {
         // ComfyLinkTuple: [linkId, srcNode, srcSlot, tgtNode, tgtSlot, dataType]
@@ -797,7 +875,7 @@ function buildLinkMapFromTuples(links: ComfyLinkTuple[]): Map<number, { sourceNo
             map.set(Number(link[0]), {
                 sourceNodeId: String(link[1]),
                 sourceSlot: Number(link[2]),
-                dataType: link[5] as DataType,
+                dataType: link[5] as DataType
             });
         }
     }
@@ -805,13 +883,20 @@ function buildLinkMapFromTuples(links: ComfyLinkTuple[]): Map<number, { sourceNo
 }
 
 /** Build a link map from v1 object links. */
-function buildLinkMapFromObjects(links: ComfyLink[]): Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }> {
+function buildLinkMapFromObjects(links: ComfyLink[]): Map<
+    number,
+    {
+        sourceNodeId: string;
+        sourceSlot: number;
+        dataType: DataType;
+    }
+> {
     const map = new Map<number, { sourceNodeId: string; sourceSlot: number; dataType: DataType }>();
     for (const link of links) {
         map.set(link.id, {
             sourceNodeId: String(link.origin_id),
             sourceSlot: Number(link.origin_slot),
-            dataType: link.type,
+            dataType: link.type
         });
     }
     return map;
@@ -825,7 +910,7 @@ function buildOutputSlots(node: WorkflowNode): UIOutputSlot[] {
         type: out.type ?? '*',
         connectionCount: Array.isArray(out.links) ? out.links.length : 0,
         slotIndex: Number(out.slot_index ?? i),
-        isList: out.type_is_list,
+        isList: out.type_is_list
     }));
 }
 
@@ -845,7 +930,7 @@ function resolveConnections(
                 type: ref.dataType,
                 sourceNodeId: ref.sourceNodeId,
                 sourceSlot: ref.sourceSlot,
-                linkId,
+                linkId
             });
         }
     }
@@ -889,7 +974,7 @@ function workflowNodeToUINode(
         color: node.color,
         bgColor: node.bgcolor,
         _raw: node,
-        _sourceFormat: sourceFormat,
+        _sourceFormat: sourceFormat
     };
 }
 
@@ -913,7 +998,7 @@ function apiPromptNodeToUINode(id: string, node: ApiPromptNode): UINode {
                 name: key,
                 type: '*', // API prompt doesn't carry type info per-link
                 sourceNodeId: val[0],
-                sourceSlot: val[1],
+                sourceSlot: val[1]
             });
         } else {
             widgets.push({ value: val, index: widgetIdx++ });
@@ -933,7 +1018,7 @@ function apiPromptNodeToUINode(id: string, node: ApiPromptNode): UINode {
         position: [0, 0],
         size: [200, 100],
         _rawApi: node,
-        _sourceFormat: 'api-prompt',
+        _sourceFormat: 'api-prompt'
     };
 }
 
@@ -991,7 +1076,15 @@ function parseWorkflowJson(raw: Record<string, unknown>): UINode[] {
     const nodes: UINode[] = [];
     for (const [id, value] of Object.entries(promptDict)) {
         // Skip known top-level keys that aren't node entries
-        if (id === 'extra' || id === 'config' || id === 'groups' || id === 'links' || id === 'version' || id === 'prompt') continue;
+        if (
+            id === 'extra' ||
+            id === 'config' ||
+            id === 'groups' ||
+            id === 'links' ||
+            id === 'version' ||
+            id === 'prompt'
+        )
+            continue;
 
         if (value && typeof value === 'object' && 'class_type' in value) {
             nodes.push(apiPromptNodeToUINode(id, value as ApiPromptNode));
@@ -1074,7 +1167,7 @@ function renumberNodes(nodes: UINode[]): UINode[] {
 function renumberSubgraphNodes(
     internalNodes: UINode[],
     parentPrefix: string,
-    externalIdMap: Map<string, string>,
+    externalIdMap: Map<string, string>
 ): UINode[] {
     const internalIdMap = new Map<string, string>();
     internalNodes.forEach((n, i) => internalIdMap.set(n.id, `${parentPrefix}-${i + 1}`));
@@ -1096,9 +1189,10 @@ function renumberSubgraphNodes(
         });
         // Recursively renumber deeper subgraph nesting levels
         const myNewId = internalIdMap.get(n.id)!;
-        const subgraphNodes = n.subgraphNodes && n.subgraphNodes.length > 0
-            ? renumberSubgraphNodes(n.subgraphNodes, myNewId, internalIdMap)
-            : undefined;
+        const subgraphNodes =
+            n.subgraphNodes && n.subgraphNodes.length > 0
+                ? renumberSubgraphNodes(n.subgraphNodes, myNewId, internalIdMap)
+                : undefined;
         return { ...n, id: myNewId, connections, subgraphNodes };
     });
 }
@@ -1124,18 +1218,30 @@ function parseInputValue(raw: string, original: unknown): unknown {
 function dataTypeColor(type: DataType): string {
     const t = typeof type === 'string' ? type : Array.isArray(type) ? type[0] : String(type);
     switch (t) {
-        case 'MODEL': return '#818cf8';        // accent (indigo)
-        case 'CLIP': return '#a78bfa';         // purple
-        case 'VAE': return '#f472b6';          // pink
-        case 'CONDITIONING': return '#6ee7b7'; // success (green)
-        case 'LATENT': return '#fbbf24';       // warning (amber)
-        case 'IMAGE': return '#38bdf8';        // sky blue
-        case 'MASK': return '#fb923c';         // orange
-        case 'STRING': return '#c8cdd8';       // text muted
-        case 'INT': return '#93b4d4';          // accent2
-        case 'FLOAT': return '#93b4d4';
-        case 'BOOLEAN': return '#f87171';      // danger (red)
-        default: return '#8891a5';             // textDim
+        case 'MODEL':
+            return '#818cf8'; // accent (indigo)
+        case 'CLIP':
+            return '#a78bfa'; // purple
+        case 'VAE':
+            return '#f472b6'; // pink
+        case 'CONDITIONING':
+            return '#6ee7b7'; // success (green)
+        case 'LATENT':
+            return '#fbbf24'; // warning (amber)
+        case 'IMAGE':
+            return '#38bdf8'; // sky blue
+        case 'MASK':
+            return '#fb923c'; // orange
+        case 'STRING':
+            return '#c8cdd8'; // text muted
+        case 'INT':
+            return '#93b4d4'; // accent2
+        case 'FLOAT':
+            return '#93b4d4';
+        case 'BOOLEAN':
+            return '#f87171'; // danger (red)
+        default:
+            return '#8891a5'; // textDim
     }
 }
 
@@ -1194,25 +1300,17 @@ export type CloudTabProps = {
     baseUrl?: string;
 };
 
-export const CloudTab: React.FC<CloudTabProps> = React.memo(({
-    baseUrl = 'http://192.168.8.128:5000/v1/comfy',
-}) => {
-    const {
-        store,
-        createWorkflow,
-        deleteWorkflow,
-        cloneWorkflow,
-        selectWorkflow,
-        searchWorkflows,
-    } = useDashboardStore();
+export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http://192.168.8.128:5000/v1/comfy' }) => {
+    const { store, createWorkflow, deleteWorkflow, cloneWorkflow, selectWorkflow, searchWorkflows } =
+        useDashboardStore();
 
     const [nodes, setNodes] = React.useState<UINode[]>([]);
     const [rawJson, setRawJson] = React.useState<Record<string, unknown> | null>(null);
     const [fileName, setFileName] = React.useState('');
-    const [pod, setPod] = React.useState<PodState>({ status: 'idle' });
+    const [pods, setPods] = React.useState<PodEntry[]>([]);
+    const [selectedPodId, setSelectedPodId] = React.useState<string | null>(null);
     const [run, setRun] = React.useState<RunState>({ status: 'idle' });
     const [dragOver, setDragOver] = React.useState(false);
-    const [podName, setPodName] = React.useState('');
     const [spawnDialogOpen, setSpawnDialogOpen] = React.useState(false);
     const [sidebarOpen, setSidebarOpen] = React.useState(() => {
         if (typeof window !== 'undefined' && window.matchMedia) {
@@ -1239,23 +1337,29 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     }, [run]);
 
     // Debounced search
-    const handleSearchChange = React.useCallback((value: string) => {
-        setSearchText(value);
-        if (searchDebounceRef.current) {
-            clearTimeout(searchDebounceRef.current);
-        }
-        searchDebounceRef.current = setTimeout(() => {
-            searchWorkflows(value);
-        }, 300);
-    }, [searchWorkflows]);
+    const handleSearchChange = React.useCallback(
+        (value: string) => {
+            setSearchText(value);
+            if (searchDebounceRef.current) {
+                clearTimeout(searchDebounceRef.current);
+            }
+            searchDebounceRef.current = setTimeout(() => {
+                searchWorkflows(value);
+            }, 300);
+        },
+        [searchWorkflows]
+    );
 
     // ── Load a saved workflow from sidebar ───────────────────────────
 
-    const handleLoadWorkflow = React.useCallback((wf: WorkflowMeta) => {
-        selectWorkflow(wf.id);
-        // We need to fetch full workflow to get raw JSON
-        // selectWorkflow already loads the full workflow into store.selectedWorkflow
-    }, [selectWorkflow]);
+    const handleLoadWorkflow = React.useCallback(
+        (wf: WorkflowMeta) => {
+            selectWorkflow(wf.id);
+            // We need to fetch full workflow to get raw JSON
+            // selectWorkflow already loads the full workflow into store.selectedWorkflow
+        },
+        [selectWorkflow]
+    );
 
     // When selectedWorkflow changes, parse its raw JSON into nodes
     React.useEffect(() => {
@@ -1264,54 +1368,65 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
             setRawJson(full.raw);
             setNodes(renumberNodes(sortNodes(parseWorkflowJson(full.raw))));
             setFileName(`${full.name}.json`);
-            setPod({ status: 'idle' });
+            setPods([]);
+            setSelectedPodId(null);
             setRun({ status: 'idle' });
         }
     }, [store.selectedWorkflow]);
 
     // ── Auto-save workflow on drop ──────────────────────────────────
 
-    const autoSaveWorkflow = React.useCallback(async (raw: Record<string, unknown>, name: string) => {
-        try {
-            const created = await createWorkflow({
-                name,
-                raw,
-            });
-            selectWorkflow(created.id);
-        } catch (err: any) {
-            alert(`Failed to auto-save: ${err.message ?? String(err)}`);
-        }
-    }, [createWorkflow, selectWorkflow]);
+    const autoSaveWorkflow = React.useCallback(
+        async (raw: Record<string, unknown>, name: string) => {
+            try {
+                const created = await createWorkflow({
+                    name,
+                    raw
+                });
+                selectWorkflow(created.id);
+            } catch (err: any) {
+                alert(`Failed to auto-save: ${err.message ?? String(err)}`);
+            }
+        },
+        [createWorkflow, selectWorkflow]
+    );
 
     // ── File handling ────────────────────────────────────────────────
 
-    const handleFile = React.useCallback((file: File) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            try {
-                const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
-                setRawJson(parsed);
-                setNodes(renumberNodes(sortNodes(parseWorkflowJson(parsed))));
-                const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
-                setFileName(file.name);
-                setPod({ status: 'idle' });
-                setRun({ status: 'idle' });
-                // Auto-save the workflow with the filename as the name
-                autoSaveWorkflow(parsed, name);
-            } catch {
-                alert('Invalid JSON file');
-            }
-        };
-        reader.readAsText(file);
-    }, [autoSaveWorkflow]);
+    const handleFile = React.useCallback(
+        (file: File) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
+                    setRawJson(parsed);
+                    setNodes(renumberNodes(sortNodes(parseWorkflowJson(parsed))));
+                    const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
+                    setFileName(file.name);
+                    setPods([]);
+            setSelectedPodId(null);
+                    setRun({ status: 'idle' });
+                    // Auto-save the workflow with the filename as the name
+                    autoSaveWorkflow(parsed, name);
+                } catch {
+                    alert('Invalid JSON file');
+                }
+            };
+            reader.readAsText(file);
+        },
+        [autoSaveWorkflow]
+    );
 
-    const handleDrop = React.useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        setDragOver(false);
-        const file = e.dataTransfer.files[0];
-        if (file) handleFile(file);
-    }, [handleFile]);
+    const handleDrop = React.useCallback(
+        (e: React.DragEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setDragOver(false);
+            const file = e.dataTransfer.files[0];
+            if (file) handleFile(file);
+        },
+        [handleFile]
+    );
 
     const handleDragOver = React.useCallback((e: React.DragEvent) => {
         e.preventDefault();
@@ -1403,7 +1518,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
             setNodes([]);
             setRawJson(null);
             setFileName('');
-            setPod({ status: 'idle' });
+            setPods([]);
+            setSelectedPodId(null);
             setRun({ status: 'idle' });
         } catch (err: any) {
             alert(`Failed to delete: ${err.message ?? String(err)}`);
@@ -1412,29 +1528,97 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     // ── Pod spawning ─────────────────────────────────────────────────
 
-    const handleSpawn = React.useCallback(async (name?: string) => {
-        setPod({ status: 'spawning' });
-        try {
-            const result = await cloudCreate(baseUrl, { name: name || undefined });
-            setPod({ status: 'ready', container_id: result.container_id, pod_url: result.pod_url });
-        } catch (err: any) {
-            setPod({ status: 'error', message: err.message ?? String(err) });
-        }
+    const handleSpawn = React.useCallback(
+        async (name?: string) => {
+            const id = `pod-${Date.now()}`;
+            const displayName = name || `pod-${Date.now() % 10000}`;
+            setPods((prev) => [...prev, { id, name: displayName, pod_url: '', status: 'spawning' }]);
+            setSelectedPodId(id);
+            try {
+                const result = await cloud(baseUrl, { type: 'create', name: name || undefined });
+                if (!('pod_url' in result)) throw new Error('Unexpected response from create');
+                setPods((prev) =>
+                    prev.map((p) => (p.id === id ? { ...p, pod_url: result.pod_url, status: 'ready' } : p))
+                );
+            } catch (err: any) {
+                setPods((prev) =>
+                    prev.map((p) =>
+                        p.id === id ? { ...p, status: 'error', error: err.message ?? String(err) } : p
+                    )
+                );
+            }
+        },
+        [baseUrl]
+    );
+
+    // ── Remove pod ───────────────────────────────────────────────────
+
+    const handleRemovePod = React.useCallback(
+        (id: string) => {
+            setPods((prev) => prev.filter((p) => p.id !== id));
+            setSelectedPodId((prev) => {
+                if (prev === id) {
+                    // Select another ready pod, or null
+                    const remaining = pods.filter((p) => p.id !== id && p.status === 'ready');
+                    return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
+                }
+                return prev;
+            });
+        },
+        [pods]
+    );
+
+    // ── Select pod ───────────────────────────────────────────────────
+
+    const handleSelectPod = React.useCallback((id: string) => {
+        setSelectedPodId(id);
+    }, []);
+
+    // ── Periodic health check (keepalive + status) ──────────────────
+
+    const podsRef = React.useRef(pods);
+    podsRef.current = pods;
+
+    React.useEffect(() => {
+        const interval = setInterval(async () => {
+            const currentPods = podsRef.current;
+            for (const p of currentPods) {
+                if (p.status !== 'ready' || !p.pod_url) continue;
+                try {
+                    const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
+                    if ('health' in result) {
+                        setPods((prev) =>
+                            prev.map((ep) =>
+                                ep.id === p.id ? { ...ep, health: result as CloudPodStatusResult } : ep
+                            )
+                        );
+                    }
+                } catch (err: any) {
+                    setPods((prev) =>
+                        prev.map((ep) =>
+                            ep.id === p.id
+                                ? { ...ep, status: 'error', error: err.message ?? String(err) }
+                                : ep
+                        )
+                    );
+                }
+            }
+        }, 60_000);
+        return () => clearInterval(interval);
     }, [baseUrl]);
 
     // ── Submit prompt ────────────────────────────────────────────────
 
+    const selectedPod = pods.find((p) => p.id === selectedPodId && p.status === 'ready');
+
     const handleSubmit = React.useCallback(async () => {
-        if (pod.status !== 'ready' || nodes.length === 0) return;
+        if (!selectedPod || nodes.length === 0) return;
 
         setRun({ status: 'running', events: [] });
         const prompt = buildPrompt();
 
         try {
-            const response = await cloudPrompt(baseUrl, {
-                pod_url: pod.pod_url,
-                prompt,
-            });
+            const response = await cloudPrompt(selectedPod.pod_url, { prompt });
 
             const events: CloudStreamEvent[] = [];
             for await (const event of cloudReadNdjson(response)) {
@@ -1456,8 +1640,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         } catch (err: any) {
             setRun({ status: 'error', events: [], message: err.message ?? String(err) });
         }
-    }, [baseUrl, pod, nodes, buildPrompt]);
-
+    }, [selectedPod, nodes, buildPrompt]);
 
     // ── Derived ──────────────────────────────────────────────────────
 
@@ -1469,7 +1652,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     const sidebar = (
         <SidebarPanel>
             <SidebarHeader>
-                <span>Workflows <SidebarCount>({store.workflows.length})</SidebarCount></span>
+                <span>
+                    Workflows <SidebarCount>({store.workflows.length})</SidebarCount>
+                </span>
             </SidebarHeader>
             <SidebarSearch>
                 <SearchInput
@@ -1497,7 +1682,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                             onClick={() => handleLoadWorkflow(wf)}
                             data-testid={`workflow-item-${wf.id}`}
                             style={isActive ? {} : undefined}
-                            className={(isActive ? '' : '')}
+                            className={isActive ? '' : ''}
                         >
                             <WorkflowItemName>{wf.name}</WorkflowItemName>
                         </Item>
@@ -1521,9 +1706,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                     data-testid="cloud-drop-zone"
                 >
                     <DropTitle>Drop ComfyUI JSON</DropTitle>
-                    <DropHint>
-                        Drag & drop a .json file to get started.
-                    </DropHint>
+                    <DropHint>Drag & drop a .json file to get started.</DropHint>
                     {isEditingSaved && (
                         <DropHint style={{ marginTop: 8, color: theme.accent }}>
                             Currently editing: {store.selectedWorkflow?.name}
@@ -1545,38 +1728,56 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                     <NodeList data-testid="cloud-node-list">
                         {dragOver && (
                             <EditorAreaEmpty
-                                style={{ position: 'relative' as const, borderColor: theme.accent, backgroundColor: theme.accentSoft, minHeight: 80, margin: 0, padding: 16, flex: '0 0 auto' }}
+                                style={{
+                                    position: 'relative' as const,
+                                    borderColor: theme.accent,
+                                    backgroundColor: theme.accentSoft,
+                                    minHeight: 80,
+                                    margin: 0,
+                                    padding: 16,
+                                    flex: '0 0 auto'
+                                }}
                             >
-                                <DropTitle style={{ fontSize: theme.fontSize.body }}>Drop to replace workflow</DropTitle>
+                                <DropTitle style={{ fontSize: theme.fontSize.body }}>
+                                    Drop to replace workflow
+                                </DropTitle>
                             </EditorAreaEmpty>
                         )}
 
                         {/* Workflow name header with Clone/Delete */}
-                        <div style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 8,
-                            marginBottom: 10,
-                        }}>
+                        <div
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: 8,
+                                marginBottom: 10
+                            }}
+                        >
                             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
                                 <SectionLabel style={{ marginBottom: 0, whiteSpace: 'nowrap' }}>
-                                    {isEditingSaved && store.selectedWorkflow
-                                        ? store.selectedWorkflow.name
-                                        : 'Unsaved'}
+                                    {isEditingSaved && store.selectedWorkflow ? store.selectedWorkflow.name : 'Unsaved'}
                                 </SectionLabel>
                                 {isEditingSaved && store.selectedWorkflow?.description && (
-                                    <span style={{
-                                        fontSize: theme.fontSize.xs,
-                                        color: theme.textFaint,
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                        whiteSpace: 'nowrap' as const,
-                                    }}>
+                                    <span
+                                        style={{
+                                            fontSize: theme.fontSize.xs,
+                                            color: theme.textFaint,
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                            whiteSpace: 'nowrap' as const
+                                        }}
+                                    >
                                         {store.selectedWorkflow.description}
                                     </span>
                                 )}
-                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint, whiteSpace: 'nowrap' as const }}>
+                                <span
+                                    style={{
+                                        fontSize: theme.fontSize.xs,
+                                        color: theme.textFaint,
+                                        whiteSpace: 'nowrap' as const
+                                    }}
+                                >
                                     ({nodes.length} nodes)
                                 </span>
                             </div>
@@ -1615,202 +1816,259 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                             const registryEntry = comfyNodeRegistry[node.classType];
                             const isUnregistered = !isSubgraph && !registryEntry;
                             return (
-                            <NodeCard key={node.id} data-testid={`cloud-node-${node.id}`}
-                                style={isUnregistered
-                                    ? { border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
-                                    : isSubgraph ? { border: `1px solid ${theme.accent}40` } : undefined}
-                            >
-                                <NodeHeader style={{
-                                    backgroundColor: node.color
-                                        ? node.color
-                                        : isUnregistered ? 'rgba(248, 113, 113, 0.20)'
-                                        : isSubgraph ? 'rgba(129, 140, 248, 0.15)' : undefined,
-                                }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                                        {isSubgraph && (
-                                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, marginRight: 2 }} title="Subgraph">
-                                                ◈
-                                            </span>
-                                        )}
-                                        <NodeClassType style={
-                                            isSubgraph ? { color: theme.accent }
-                                            : isUnregistered ? { color: theme.danger }
-                                            : undefined
-                                        }>
-                                            {registryEntry?.displayName ?? node.classType}
-                                        </NodeClassType>
-                                        {isUnregistered && (
-                                            <span style={{
-                                                fontSize: theme.fontSize.xs,
-                                                color: theme.danger,
-                                                border: `1px solid ${theme.dangerBorder}`,
-                                                borderRadius: theme.radiusSm,
-                                                padding: '0 4px',
-                                                backgroundColor: theme.dangerSoft,
-                                            }}>
-                                                not registered
-                                            </span>
-                                        )}
-                                        {registryEntry?.category && (
-                                            <span style={{
-                                                fontSize: theme.fontSize.xs,
-                                                color: theme.textFaint,
-                                                fontFamily: theme.fontMono,
-                                            }}>
-                                                {registryEntry.category}
-                                            </span>
-                                        )}
-                                        {node.mode !== 0 && (
-                                            <span style={{
-                                                fontSize: theme.fontSize.xs,
-                                                color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
-                                                opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
-                                                fontStyle: 'italic',
-                                            }}>
-                                                [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
-                                            </span>
-                                        )}
-                                    </div>
-                                    <NodeId>#{node.id}</NodeId>
-                                </NodeHeader>
-                                <NodeInputs>
-                                    {/* Input connections */}
-                                    {node.connections.map((conn) => (
-                                        <InputRow key={`conn-${conn.name}`}>
-                                            <InputLabel style={{ color: dataTypeColor(conn.type) }}>
-                                                {conn.name}
-                                            </InputLabel>
-                                            <LinkBadge style={{
-                                                color: dataTypeColor(conn.type),
-                                                borderColor: `${dataTypeColor(conn.type)}40`,
-                                                backgroundColor: `${dataTypeColor(conn.type)}12`,
-                                            }}>
-                                                → {conn.sourceNodeId}[{conn.sourceSlot}]
-                                                {conn.type !== '*' && (
-                                                    <span style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}>
-                                                        {dataTypeLabel(conn.type)}
-                                                    </span>
-                                                )}
-                                            </LinkBadge>
-                                        </InputRow>
-                                    ))}
-
-                                    {/* Widget values */}
-                                    {node.widgets.map((widget) => (
-                                        <InputRow key={`w${widget.index}`}>
-                                            <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
-                                            <InputField
-                                                type="text"
-                                                value={displayValue(widget.value)}
-                                                onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
-                                                readOnly={isRunning}
-                                                data-testid={`cloud-widget-${node.id}-${widget.index}`}
-                                            />
-                                        </InputRow>
-                                    ))}
-
-                                    {/* Output slots */}
-                                    {node.outputs.length > 0 && (
-                                        <div style={{
-                                            display: 'flex',
-                                            flexWrap: 'wrap' as const,
-                                            gap: 4,
-                                            marginTop: 4,
-                                            paddingTop: 4,
-                                            borderTop: `1px solid ${theme.border}`,
-                                        }}>
-                                            <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint, marginRight: 2 }}>
-                                                outputs:
-                                            </span>
-                                            {node.outputs.map((out) => (
+                                <NodeCard
+                                    key={node.id}
+                                    data-testid={`cloud-node-${node.id}`}
+                                    style={
+                                        isUnregistered
+                                            ? {
+                                                  border: `1px solid ${theme.dangerBorder}`,
+                                                  backgroundColor: theme.dangerSoft
+                                              }
+                                            : isSubgraph
+                                              ? { border: `1px solid ${theme.accent}40` }
+                                              : undefined
+                                    }
+                                >
+                                    <NodeHeader
+                                        style={{
+                                            backgroundColor: node.color
+                                                ? node.color
+                                                : isUnregistered
+                                                  ? 'rgba(248, 113, 113, 0.20)'
+                                                  : isSubgraph
+                                                    ? 'rgba(129, 140, 248, 0.15)'
+                                                    : undefined
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                                            {isSubgraph && (
                                                 <span
-                                                    key={`out-${out.slotIndex}`}
                                                     style={{
                                                         fontSize: theme.fontSize.xs,
-                                                        color: dataTypeColor(out.type),
-                                                        fontFamily: theme.fontMono,
-                                                        padding: '0 4px',
+                                                        color: theme.accent,
+                                                        marginRight: 2
+                                                    }}
+                                                    title="Subgraph"
+                                                >
+                                                    ◈
+                                                </span>
+                                            )}
+                                            <NodeClassType
+                                                style={
+                                                    isSubgraph
+                                                        ? { color: theme.accent }
+                                                        : isUnregistered
+                                                          ? { color: theme.danger }
+                                                          : undefined
+                                                }
+                                            >
+                                                {registryEntry?.displayName ?? node.classType}
+                                            </NodeClassType>
+                                            {isUnregistered && (
+                                                <span
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: theme.danger,
+                                                        border: `1px solid ${theme.dangerBorder}`,
                                                         borderRadius: theme.radiusSm,
-                                                        backgroundColor: `${dataTypeColor(out.type)}12`,
-                                                        border: `1px solid ${dataTypeColor(out.type)}25`,
+                                                        padding: '0 4px',
+                                                        backgroundColor: theme.dangerSoft
                                                     }}
                                                 >
-                                                    {out.name}
-                                                    {out.connectionCount > 0 && (
-                                                        <span style={{ opacity: 0.6 }}> ({out.connectionCount})</span>
+                                                    not registered
+                                                </span>
+                                            )}
+                                            {registryEntry?.category && (
+                                                <span
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: theme.textFaint,
+                                                        fontFamily: theme.fontMono
+                                                    }}
+                                                >
+                                                    {registryEntry.category}
+                                                </span>
+                                            )}
+                                            {node.mode !== 0 && (
+                                                <span
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
+                                                        opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
+                                                        fontStyle: 'italic'
+                                                    }}
+                                                >
+                                                    [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
+                                                </span>
+                                            )}
+                                        </div>
+                                        <NodeId>#{node.id}</NodeId>
+                                    </NodeHeader>
+                                    <NodeInputs>
+                                        {/* Input connections */}
+                                        {node.connections.map((conn) => (
+                                            <InputRow key={`conn-${conn.name}`}>
+                                                <InputLabel style={{ color: dataTypeColor(conn.type) }}>
+                                                    {conn.name}
+                                                </InputLabel>
+                                                <LinkBadge
+                                                    style={{
+                                                        color: dataTypeColor(conn.type),
+                                                        borderColor: `${dataTypeColor(conn.type)}40`,
+                                                        backgroundColor: `${dataTypeColor(conn.type)}12`
+                                                    }}
+                                                >
+                                                    → {conn.sourceNodeId}[{conn.sourceSlot}]
+                                                    {conn.type !== '*' && (
+                                                        <span
+                                                            style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}
+                                                        >
+                                                            {dataTypeLabel(conn.type)}
+                                                        </span>
                                                     )}
-                                                    {out.isList && (
-                                                        <span style={{ opacity: 0.6 }}> []</span>
-                                                    )}
-                                                </span>
-                                            ))}
-                                        </div>
-                                    )}
+                                                </LinkBadge>
+                                            </InputRow>
+                                        ))}
 
-                                    {/* Node properties — show S&R name and version if present */}
-                                    {(node.properties['Node name for S&R'] || node.properties.ver) && (
-                                        <div style={{
-                                            display: 'flex',
-                                            flexWrap: 'wrap' as const,
-                                            gap: 6,
-                                            marginTop: 4,
-                                            paddingTop: 4,
-                                            borderTop: `1px solid ${theme.border}`,
-                                        }}>
-                                            {node.properties['Node name for S&R'] && (
-                                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
-                                                    S&amp;R: {node.properties['Node name for S&R']}
-                                                </span>
-                                            )}
-                                            {node.properties.ver && (
-                                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
-                                                    v{node.properties.ver}
-                                                </span>
-                                            )}
-                                            {node.properties.cnr_id && (
-                                                <span style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
-                                                    CNR: {node.properties.cnr_id}
-                                                </span>
-                                            )}
-                                        </div>
-                                    )}
+                                        {/* Widget values */}
+                                        {node.widgets.map((widget) => (
+                                            <InputRow key={`w${widget.index}`}>
+                                                <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
+                                                <InputField
+                                                    type="text"
+                                                    value={displayValue(widget.value)}
+                                                    onChange={(e) =>
+                                                        updateNodeWidget(node.id, widget.index, e.target.value)
+                                                    }
+                                                    readOnly={isRunning}
+                                                    data-testid={`cloud-widget-${node.id}-${widget.index}`}
+                                                />
+                                            </InputRow>
+                                        ))}
 
-                                    {/* Empty state */}
-                                    {node.connections.length === 0 && node.widgets.length === 0 && node.outputs.length === 0 && (
-                                        <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
-                                            No inputs
-                                        </div>
-                                    )}
-
-                                    {/* ── Nested subgraph internal nodes ────────── */}
-                                    {isSubgraph && node.subgraphNodes && node.subgraphNodes.length > 0 && (
-                                        <div style={{
-                                            marginTop: 6,
-                                            paddingTop: 6,
-                                            borderTop: `1px dashed ${theme.accent}30`,
-                                        }}>
-                                            <div style={{
-                                                fontSize: theme.fontSize.xs,
-                                                color: theme.accent,
-                                                fontWeight: 600,
-                                                marginBottom: 4,
-                                            }}>
-                                                ◈ {node.subgraphNodes.length} internal node{node.subgraphNodes.length !== 1 ? 's' : ''}
-                                            </div>
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                                {node.subgraphNodes.map((inner) => (
-                                                    <SubgraphNodeCard
-                                                        key={inner.id}
-                                                        node={inner}
-                                                        isRunning={isRunning}
-                                                        updateNodeWidget={updateNodeWidget}
-                                                    />
+                                        {/* Output slots */}
+                                        {node.outputs.length > 0 && (
+                                            <div
+                                                style={{
+                                                    display: 'flex',
+                                                    flexWrap: 'wrap' as const,
+                                                    gap: 4,
+                                                    marginTop: 4,
+                                                    paddingTop: 4,
+                                                    borderTop: `1px solid ${theme.border}`
+                                                }}
+                                            >
+                                                <span
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: theme.textFaint,
+                                                        marginRight: 2
+                                                    }}
+                                                >
+                                                    outputs:
+                                                </span>
+                                                {node.outputs.map((out) => (
+                                                    <span
+                                                        key={`out-${out.slotIndex}`}
+                                                        style={{
+                                                            fontSize: theme.fontSize.xs,
+                                                            color: dataTypeColor(out.type),
+                                                            fontFamily: theme.fontMono,
+                                                            padding: '0 4px',
+                                                            borderRadius: theme.radiusSm,
+                                                            backgroundColor: `${dataTypeColor(out.type)}12`,
+                                                            border: `1px solid ${dataTypeColor(out.type)}25`
+                                                        }}
+                                                    >
+                                                        {out.name}
+                                                        {out.connectionCount > 0 && (
+                                                            <span style={{ opacity: 0.6 }}>
+                                                                {' '}
+                                                                ({out.connectionCount})
+                                                            </span>
+                                                        )}
+                                                        {out.isList && <span style={{ opacity: 0.6 }}> []</span>}
+                                                    </span>
                                                 ))}
                                             </div>
-                                        </div>
-                                    )}
-                                </NodeInputs>
-                            </NodeCard>
+                                        )}
+
+                                        {/* Node properties — show S&R name and version if present */}
+                                        {(node.properties['Node name for S&R'] || node.properties.ver) && (
+                                            <div
+                                                style={{
+                                                    display: 'flex',
+                                                    flexWrap: 'wrap' as const,
+                                                    gap: 6,
+                                                    marginTop: 4,
+                                                    paddingTop: 4,
+                                                    borderTop: `1px solid ${theme.border}`
+                                                }}
+                                            >
+                                                {node.properties['Node name for S&R'] && (
+                                                    <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                                                        S&amp;R: {node.properties['Node name for S&R']}
+                                                    </span>
+                                                )}
+                                                {node.properties.ver && (
+                                                    <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
+                                                        v{node.properties.ver}
+                                                    </span>
+                                                )}
+                                                {node.properties.cnr_id && (
+                                                    <span
+                                                        style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}
+                                                    >
+                                                        CNR: {node.properties.cnr_id}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {/* Empty state */}
+                                        {node.connections.length === 0 &&
+                                            node.widgets.length === 0 &&
+                                            node.outputs.length === 0 && (
+                                                <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
+                                                    No inputs
+                                                </div>
+                                            )}
+
+                                        {/* ── Nested subgraph internal nodes ────────── */}
+                                        {isSubgraph && node.subgraphNodes && node.subgraphNodes.length > 0 && (
+                                            <div
+                                                style={{
+                                                    marginTop: 6,
+                                                    paddingTop: 6,
+                                                    borderTop: `1px dashed ${theme.accent}30`
+                                                }}
+                                            >
+                                                <div
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: theme.accent,
+                                                        fontWeight: 600,
+                                                        marginBottom: 4
+                                                    }}
+                                                >
+                                                    ◈ {node.subgraphNodes.length} internal node
+                                                    {node.subgraphNodes.length !== 1 ? 's' : ''}
+                                                </div>
+                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                    {node.subgraphNodes.map((inner) => (
+                                                        <SubgraphNodeCard
+                                                            key={inner.id}
+                                                            node={inner}
+                                                            isRunning={isRunning}
+                                                            updateNodeWidget={updateNodeWidget}
+                                                        />
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </NodeInputs>
+                                </NodeCard>
                             );
                         })}
                     </NodeList>
@@ -1821,12 +2079,25 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     // ── Footer: action bar ───────────────────────────────────────────
 
+    const hasSpawningPods = pods.some((p) => p.status === 'spawning');
+    const hasReadyPods = pods.some((p) => p.status === 'ready');
+    const hasAnyPods = pods.length > 0;
+
     const footer = (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
             {/* Run status */}
             {hasEvents && (
-                <Badge style={{ color: run.status === 'error' ? theme.danger : run.status === 'done' ? theme.success : theme.accent }}>
-                    {run.status === 'running' && <><SpinnerEl /> Running...</>}
+                <Badge
+                    style={{
+                        color:
+                            run.status === 'error' ? theme.danger : run.status === 'done' ? theme.success : theme.accent
+                    }}
+                >
+                    {run.status === 'running' && (
+                        <>
+                            <SpinnerEl /> Running...
+                        </>
+                    )}
                     {run.status === 'done' && '✓ Done'}
                     {run.status === 'error' && `✗ Error`}
                 </Badge>
@@ -1834,15 +2105,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
             <div style={{ flex: '1 1 auto' }} />
 
-            {pod.status === 'spawning' && (
-                <Badge><SpinnerEl /> Spawning...</Badge>
+            {hasSpawningPods && (
+                <Badge>
+                    <SpinnerEl /> Spawning...
+                </Badge>
             )}
-            {pod.status === 'ready' && (
-                <BtnPrimary
-                    className="sg-primary"
-                    onClick={handleSubmit}
-                    disabled={isRunning || nodes.length === 0}
-                >
+            {selectedPod && (
+                <BtnPrimary className="sg-primary" onClick={handleSubmit} disabled={isRunning || nodes.length === 0}>
                     {isRunning ? 'Running...' : 'Submit'}
                 </BtnPrimary>
             )}
@@ -1857,35 +2126,57 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 ☰
             </ToggleButton>
             <HeaderTitle>Comfy Dashboard</HeaderTitle>
-            {pod.status === 'spawning' && <Badge><SpinnerEl /> Spawning...</Badge>}
-            {pod.status === 'ready' && (
-                <Badge style={{ marginLeft: 8 }}>
-                    <BadgeDot style={{ backgroundColor: theme.success }} />
-                    Pod ready
-                </Badge>
-            )}
-            {pod.status === 'error' && (
-                <Badge style={{ marginLeft: 8, color: theme.danger }}>
-                    <BadgeDot style={{ backgroundColor: theme.danger }} />
-                    {pod.message}
-                </Badge>
-            )}
+
+            {/* Pod badges — left of the + button */}
+            {pods.map((p) => {
+                const dotColor =
+                    p.status === 'ready'
+                        ? theme.success
+                        : p.status === 'spawning'
+                          ? theme.warning
+                          : theme.danger;
+                const isActive = p.id === selectedPodId;
+                return (
+                    <PodBadge
+                        key={p.id}
+                        onClick={() => handleSelectPod(p.id)}
+                        style={
+                            isActive
+                                ? { borderColor: theme.accentRing, backgroundColor: theme.accentSoft }
+                                : undefined
+                        }
+                        title={p.pod_url || p.error || p.name}
+                    >
+                        {p.status === 'spawning' ? (
+                            <SpinnerEl />
+                        ) : (
+                            <PodDot style={{ backgroundColor: dotColor }} />
+                        )}
+                        {p.name}
+                        <PodCloseBtn
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemovePod(p.id);
+                            }}
+                            aria-label={`Remove ${p.name}`}
+                        >
+                            ×
+                        </PodCloseBtn>
+                    </PodBadge>
+                );
+            })}
+
+            {/* (+) spawn button */}
+            <ToggleButton onClick={() => setSpawnDialogOpen(true)} className="sg-hover" aria-label="Spawn pod">
+                +
+            </ToggleButton>
+
             {store.loadWarning && (
                 <Badge style={{ marginLeft: 8, color: theme.warning, borderColor: theme.warningSoft }}>
                     ⚠ {store.loadWarning}
                 </Badge>
             )}
             <div style={{ flex: '1 1 auto' }} />
-            {pod.status === 'idle' && (
-                <BtnPrimary className="sg-primary" onClick={() => setSpawnDialogOpen(true)}>
-                    Spawn Pod
-                </BtnPrimary>
-            )}
-            {pod.status === 'error' && (
-                <BtnPrimary className="sg-primary" onClick={() => setSpawnDialogOpen(true)}>
-                    Retry
-                </BtnPrimary>
-            )}
         </>
     );
 
@@ -1903,40 +2194,54 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
             />
 
             {/* Spawn Pod dialog */}
-            {spawnDialogOpen && (
-                <DialogOverlay onClick={() => setSpawnDialogOpen(false)}>
-                    <DialogBox onClick={(e) => e.stopPropagation()} data-testid="spawn-dialog">
-                        <DialogTitle>Spawn Pod</DialogTitle>
-                        <DialogField>
-                            <DialogLabel htmlFor="spawn-name">Pod name</DialogLabel>
-                            <DialogInput
-                                id="spawn-name"
-                                type="text"
-                                value={podName}
-                                onChange={(e) => setPodName(e.target.value)}
-                                placeholder="Enter a name for the pod"
-                                autoFocus
-                                data-testid="spawn-name-input"
-                            />
-                        </DialogField>
-                        <DialogActions>
-                            <Btn className="sg-hover" onClick={() => setSpawnDialogOpen(false)}>Cancel</Btn>
-                            <BtnPrimary
-                                className="sg-primary"
-                                onClick={() => {
-                                    if (!podName.trim()) return;
-                                    setSpawnDialogOpen(false);
-                                    handleSpawn(podName.trim());
-                                }}
-                                disabled={!podName.trim()}
-                                data-testid="spawn-confirm-btn"
-                            >
-                                Spawn
-                            </BtnPrimary>
-                        </DialogActions>
-                    </DialogBox>
-                </DialogOverlay>
-            )}
+            {spawnDialogOpen && <SpawnDialog
+                onClose={() => setSpawnDialogOpen(false)}
+                onSpawn={(name) => {
+                    setSpawnDialogOpen(false);
+                    handleSpawn(name);
+                }}
+            />}
         </>
+    );
+});
+
+// ── Spawn Dialog (separate component for local state) ──────────────
+
+const SpawnDialog: React.FC<{
+    onClose: () => void;
+    onSpawn: (name?: string) => void;
+}> = React.memo(({ onClose, onSpawn }) => {
+    const [podName, setPodName] = React.useState('');
+
+    return (
+        <DialogOverlay onClick={onClose}>
+            <DialogBox onClick={(e) => e.stopPropagation()} data-testid="spawn-dialog">
+                <DialogTitle>Spawn Pod</DialogTitle>
+                <DialogField>
+                    <DialogLabel htmlFor="spawn-name">Pod name (optional)</DialogLabel>
+                    <DialogInput
+                        id="spawn-name"
+                        type="text"
+                        value={podName}
+                        onChange={(e) => setPodName(e.target.value)}
+                        placeholder="Leave blank for auto-generated name"
+                        autoFocus
+                        data-testid="spawn-name-input"
+                    />
+                </DialogField>
+                <DialogActions>
+                    <Btn className="sg-hover" onClick={onClose}>
+                        Cancel
+                    </Btn>
+                    <BtnPrimary
+                        className="sg-primary"
+                        onClick={() => onSpawn(podName.trim() || undefined)}
+                        data-testid="spawn-confirm-btn"
+                    >
+                        Spawn
+                    </BtnPrimary>
+                </DialogActions>
+            </DialogBox>
+        </DialogOverlay>
     );
 });
