@@ -123,6 +123,15 @@ import { ImageResizergthree } from './ImageResizergthree';
 import { PowerPuttergthree } from './PowerPuttergthree';
 import { FastGroupsMuterthree } from './FastGroupsMuterthree';
 
+// ComfyUI-CloudClient
+import { ClientImageDownloadNode } from './ClientImageDownloadNode';
+import { ClientVideoDownloadNode } from './ClientVideoDownloadNode';
+import { RemoteImageLoader } from './RemoteImageLoader';
+import { ServerMemoryImageNode } from './ServerMemoryImageNode';
+import { TemporaryImagePreviewCloudClient } from './TemporaryImagePreviewCloudClient';
+import { UniversalDataToImage } from './UniversalDataToImage';
+import { UniversalDataToAudioVideo } from './UniversalDataToAudioVideo';
+
 /**
  * The primary node widget registry.
  *
@@ -235,6 +244,15 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     ImageResizergthree,
     PowerPuttergthree,
     FastGroupsMuterthree,
+
+    // ComfyUI-CloudClient
+    ClientImageDownloadNode,
+    ClientVideoDownloadNode,
+    RemoteImageLoader,
+    ServerMemoryImageNode,
+    TemporaryImagePreviewCloudClient,
+    UniversalDataToImage,
+    UniversalDataToAudioVideo,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
