@@ -3,8 +3,9 @@
 // Routes (see src/server/endpoints/comfy-dashboard.yml):
 //
 // Cloud:
-//   GET  /v1/comfy/cloud/create     → { container_id, pod_url }
-//   POST /v1/comfy/cloud/prompt     → NDJSON stream (raw Response)
+//   POST /v1/comfy/cloud          → { container_id, pod_url } (create)
+//                                or { health, models_dir, models } (status)
+//   POST /v1/comfy/cloud/prompt   → NDJSON stream (raw Response)
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -26,12 +27,18 @@ export async function cloudCreate(
     baseUrl: string,
     options?: { name?: string }
 ): Promise<CloudCreateResult> {
-    const url = new URL(`${baseUrl}/cloud/create`);
+    const url = `${baseUrl}/cloud`;
+
+    const body: Record<string, string> = {};
     if (options?.name) {
-        url.searchParams.set('name', options.name);
+        body.name = options.name;
     }
 
-    const response = await fetch(url.toString());
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
     if (!response.ok) {
         let message = `Failed to create cloud pod (HTTP ${response.status})`;
         try {

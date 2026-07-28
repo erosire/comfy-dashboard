@@ -2,25 +2,23 @@ openapi: 3.0.3
 info:
   title: ComfyUI Dashboard API
   description: >-
-    API for managing ComfyUI workflows, queue, and server status. Provides
-    CRUD for workflows, queue management for generations, and a health/status
-    endpoint for monitoring the ComfyUI server connection.
-  version: 0.1.0
+    API for managing ComfyUI workflows and cloud pod management. Provides
+    CRUD for workflows and a unified endpoint for spawning/checking Beam
+    cloud pods.
+  version: 0.2.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
   - url: https://comfy-spawner.beam.cloud
-    description: Beam ComfyUI spawner (Tier 1 — used by /v1/comfy/cloud/create)
+    description: Beam ComfyUI spawner (Tier 1 — used by POST /v1/comfy/cloud)
 tags:
   - name: Workflows
     description: CRUD for ComfyUI workflows
-  - name: Queue
-    description: Generation queue management
-  - name: Status
-    description: Server status and health
   - name: Cloud
-    description: Beam cloud pod management - spawn pods and submit prompts
+    description: Beam cloud pod management — spawn pods and check pod status
 paths:
+  # ── Workflows ──────────────────────────────────────────────────────
+
   /v1/comfy/workflows:
     get:
       operationId: listWorkflows
@@ -173,134 +171,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /v1/comfy/queue:
-    get:
-      operationId: getQueue
-      summary: Get the generation queue
-      description: Returns all items currently in the generation queue.
-      tags:
-        - Queue
-      responses:
-        '200':
-          description: Queue contents
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QueueResponse'
+  # ── Cloud ──────────────────────────────────────────────────────────
+
+  /v1/comfy/cloud:
     post:
-      operationId: queueWorkflow
-      summary: Queue a workflow for generation
+      operationId: cloudPod
+      summary: Create a cloud pod or check pod status
       description: >-
-        Adds a workflow to the generation queue. The workflow will be
-        executed asynchronously.
-      tags:
-        - Queue
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/QueueWorkflowRequest'
-      responses:
-        '200':
-          description: Workflow queued successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QueueWorkflowResponse'
-        '400':
-          description: Validation error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        Dual-purpose endpoint for Beam cloud pod management:
 
-  /v1/comfy/queue/{id}:
-    delete:
-      operationId: cancelQueueItem
-      summary: Cancel a queue item
-      description: Removes a pending or running item from the generation queue.
-      tags:
-        - Queue
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Queue item cancelled
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CancelQueueResponse'
-        '404':
-          description: Queue item not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        **Create a pod** — Send an empty body `{}` or `{"name": "my-pod"}`.
+        Spawns a fresh, isolated ComfyUI pod via the Beam spawner (Tier 1)
+        and returns the pod's container ID and public proxy URL. The pod
+        runs ComfyUI with a FastAPI proxy on its public port and scales to
+        zero ~120s after the last active connection.
 
-  /v1/comfy/status:
-    get:
-      operationId: getStatus
-      summary: Get server status
-      description: >-
-        Returns the current server status including connection state, queue
-        size, active jobs, uptime, and version information.
-      tags:
-        - Status
-      responses:
-        '200':
-          description: Server status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ServerStatusResponse'
-
-  /v1/comfy/cloud/create:
-    get:
-      operationId: cloudCreate
-      summary: Spawn a new ComfyUI pod on Beam
-      description: >-
-        Triggers the creation of a new, isolated ComfyUI pod via the Beam
-        spawner (Tier 1). Returns the pod's container ID and public proxy
-        URL. The pod runs ComfyUI with a FastAPI proxy on its public port
-        and scales to zero ~120s after the last active connection.
-      tags:
-        - Cloud
-      parameters:
-        - name: name
-          in: query
-          required: false
-          description: Optional name for the spawned pod.
-          schema:
-            type: string
-      responses:
-        '200':
-          description: Pod created successfully
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CloudCreateResponse'
-        '502':
-          description: Spawner unavailable or pod creation failed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-
-  /v1/comfy/cloud/prompt:
-    post:
-      operationId: cloudPrompt
-      summary: Send a workflow to a spawned pod and stream results
-      description: >-
-        Sends a ComfyUI workflow payload to a spawned pod's Tier 2 proxy
-        and streams back the execution results as newline-delimited JSON
-        (NDJSON). The client must read the response body as a stream,
-        parsing one JSON object per line until receiving a `proxy_done`
-        or terminal event.
+        **Check pod status** — Send `{"pod_url": "<pod_url>"}`. Probes the
+        Tier 2 proxy of an existing pod and returns its health, system stats,
+        and available models. Use this to verify a pod is ready before
+        submitting prompts.
       tags:
         - Cloud
       requestBody:
@@ -308,81 +197,86 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CloudPromptRequest'
+              $ref: '#/components/schemas/CloudPodRequest'
             examples:
-              txt2img:
-                summary: Submit a txt2img workflow
+              create_pod:
+                summary: Spawn a new pod
+                value: {}
+              create_named_pod:
+                summary: Spawn a pod with a custom name
+                value:
+                  name: my-comfy-pod
+              check_status:
+                summary: Check the status of an existing pod
                 value:
                   pod_url: "https://test-pod-abc123.beam.cloud:8188"
-                  prompt:
-                    "3":
-                      class_type: KSampler
-                      inputs:
-                        seed: 123456789012345
-                        steps: 20
-                        cfg: 8
-                        sampler_name: euler
-                        scheduler: normal
-                        denoise: 1
-                        model: ["4", 0]
-                        positive: ["6", 0]
-                        negative: ["7", 0]
-                        latent_image: ["5", 0]
-                    "4":
-                      class_type: CheckpointLoaderSimple
-                      inputs:
-                        ckpt_name: sd_xl_base_1.0.safetensors
-                    "5":
-                      class_type: EmptyLatentImage
-                      inputs:
-                        width: 1024
-                        height: 1024
-                        batch_size: 1
-                    "6":
-                      class_type: CLIPTextEncode
-                      inputs:
-                        text: "a serene mountain lake at dawn"
-                        clip: ["4", 1]
-                    "7":
-                      class_type: CLIPTextEncode
-                      inputs:
-                        text: "blurry, low quality"
-                        clip: ["4", 1]
-                    "8":
-                      class_type: VAEDecode
-                      inputs:
-                        samples: ["3", 0]
-                        vae: ["4", 2]
-                    "9":
-                      class_type: SaveImage
-                      inputs:
-                        filename_prefix: "ComfyUI"
-                        images: ["8", 0]
-                  client_id: "abc123def4567890fedcba0987654321"
       responses:
         '200':
           description: >-
-            Chunked NDJSON stream of execution events. Read line-by-line
-            until `proxy_done` or a terminal event.
+            Pod created or status returned successfully.
+            The response shape depends on the request:
+            - **Create**: `{ container_id, pod_url }`
+            - **Status**: `{ health, models_dir, models }`
           content:
-            application/x-ndjson:
+            application/json:
               schema:
-                $ref: '#/components/schemas/CloudPromptStreamEvent'
+                oneOf:
+                  - $ref: '#/components/schemas/CloudCreateResponse'
+                  - $ref: '#/components/schemas/CloudPodStatusResponse'
+              examples:
+                create_result:
+                  summary: Pod created successfully
+                  value:
+                    container_id: "5f8c1b2a-3d4e-4f5a-9b8c-7e6d5c4b3a2d"
+                    pod_url: "https://test-pod-abc123.beam.cloud:8188"
+                status_result:
+                  summary: Pod status returned
+                  value:
+                    health:
+                      healthy: true
+                      system_stats:
+                        system:
+                          os: linux
+                          ram_total: 25728937984
+                          ram_free: 20000000000
+                          comfyui_version: "0.3.27"
+                          python_version: "3.10.12"
+                          pytorch_version: "2.5.1+cu130"
+                        devices:
+                          - name: "NVIDIA GeForce RTX 4090"
+                            type: cuda
+                            index: 0
+                            vram_total: 25769803776
+                            vram_free: 25600000000
+                    models_dir: /ComfyUI/models
+                    models:
+                      checkpoints:
+                        - sd_xl_base_1.0.safetensors
+                      loras:
+                        - wan/lightning_4steps.safetensors
+                      vae:
+                        - sdxl_vae.safetensors
         '400':
-          description: Invalid request (missing pod_url or prompt)
+          description: Invalid request
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '502':
-          description: Pod unreachable or returned an error
+          description: Spawner unavailable, pod creation failed, or pod unreachable
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+# =============================================================================
+#  COMPONENTS
+# =============================================================================
 components:
   schemas:
+
+    # ── Workflows ──────────────────────────────────────────────────
+
     WorkflowMeta:
       type: object
       properties:
@@ -501,79 +395,32 @@ components:
           items:
             $ref: '#/components/schemas/WorkflowMeta'
 
-    QueueItem:
-      type: object
-      properties:
-        id:
-          type: string
-        workflowId:
-          type: string
-        workflowName:
-          type: string
-        status:
-          type: string
-          enum: [queued, running, completed, failed]
-        queuedAt:
-          type: string
-        startedAt:
-          type: string
-        completedAt:
-          type: string
-        error:
-          type: string
-
-    QueueResponse:
-      type: object
-      properties:
-        queue:
-          type: array
-          items:
-            $ref: '#/components/schemas/QueueItem'
-
-    QueueWorkflowRequest:
-      type: object
-      required:
-        - workflowId
-      properties:
-        workflowId:
-          type: string
-        params:
-          type: object
-          description: Optional generation parameters to override defaults
-
-    QueueWorkflowResponse:
-      type: object
-      properties:
-        id:
-          type: string
-        message:
-          type: string
-
-    CancelQueueResponse:
-      type: object
-      properties:
-        success:
-          type: boolean
-
-    ServerStatusResponse:
-      type: object
-      properties:
-        connected:
-          type: boolean
-        queueSize:
-          type: integer
-        activeJobs:
-          type: integer
-        uptime:
-          type: number
-        version:
-          type: string
+    # ── Cloud ──────────────────────────────────────────────────────
 
     ErrorResponse:
       type: object
       properties:
         error:
           type: string
+
+    CloudPodRequest:
+      type: object
+      description: >-
+        Request body for POST /v1/comfy/cloud.
+        - Empty `{}` or `{"name": "..."}` → spawns a new pod.
+        - `{"pod_url": "<url>"}` → checks status of an existing pod.
+      properties:
+        name:
+          type: string
+          description: Optional name for the spawned pod (create mode only).
+        pod_url:
+          type: string
+          format: uri
+          description: >-
+            Tier 2 proxy URL of an existing pod. When provided, the endpoint
+            returns the pod's health and models listing instead of creating
+            a new pod.
+          example: https://test-pod-abc123.beam.cloud:8188
 
     CloudCreateResponse:
       type: object
@@ -589,48 +436,115 @@ components:
           format: uri
           description: >-
             Public URL of the spawned pod's Tier 2 API proxy.
-            Use this URL for subsequent POST /v1/comfy/cloud/prompt calls.
+            Use this URL for submitting prompts directly to the pod.
           example: https://test-pod-abc123.beam.cloud:8188
       required: [container_id, pod_url]
 
-    CloudPromptRequest:
-      type: object
-      description: Request body for submitting a workflow to a spawned pod.
-      properties:
-        pod_url:
-          type: string
-          format: uri
-          description: The Tier 2 proxy URL of a spawned pod (from cloud/create).
-          example: https://test-pod-abc123.beam.cloud:8188
-        prompt:
-          type: object
-          additionalProperties: true
-          description: >-
-            The ComfyUI workflow graph, keyed by node id (string).
-            Each value is {"class_type": "...", "inputs": {...}}.
-          example:
-            "3":
-              class_type: KSampler
-              inputs:
-                seed: 123456789012345
-                steps: 20
-        client_id:
-          type: string
-          description: Optional client identifier for websocket event linking.
-          example: abc123def4567890fedcba0987654321
-      required: [pod_url, prompt]
-
-    CloudPromptStreamEvent:
+    CloudPodStatusResponse:
       type: object
       description: >-
-        One line in the NDJSON stream returned by POST /v1/comfy/cloud/prompt.
-        Every event is {"type": "<EventType>", "data": <event-specific>}.
+        Health and model listing for a running ComfyUI pod.
+        Returned when POST /v1/comfy/cloud is called with a pod_url.
+        Mirrors the Tier 2 proxy GET / response from the Beam ComfyUI service.
       properties:
-        type:
+        health:
+          $ref: '#/components/schemas/ProxyHealthResponse'
+        models_dir:
           type: string
-          description: Event type discriminator.
-        data:
+          example: /ComfyUI/models
+          description: Absolute path to the (symlinked) models directory.
+        models:
+          $ref: '#/components/schemas/ModelsListing'
+      required: [health, models_dir, models]
+
+    ProxyHealthResponse:
+      type: object
+      description: Result of probing the backgrounded ComfyUI's GET /system_stats.
+      properties:
+        healthy:
+          type: boolean
+          example: true
+        system_stats:
+          $ref: '#/components/schemas/ComfySystemStats'
+          description: Present only when healthy is true.
+        error:
+          type: string
+          description: Present only when healthy is false. Last error message.
+
+    ComfySystemStats:
+      type: object
+      description: Subset of ComfyUI's GET /system_stats body (forwarded verbatim).
+      properties:
+        system:
           type: object
-          additionalProperties: true
-          description: Event-specific payload.
-      required: [type, data]
+          properties:
+            os:
+              type: string
+              example: linux
+            ram_total:
+              type: integer
+              format: int64
+              example: 25728937984
+            ram_free:
+              type: integer
+              format: int64
+              example: 20000000000
+            comfyui_version:
+              type: string
+              example: "0.3.27"
+            python_version:
+              type: string
+              example: "3.10.12"
+            pytorch_version:
+              type: string
+              example: "2.5.1+cu130"
+        devices:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                example: "NVIDIA GeForce RTX 4090"
+              type:
+                type: string
+                example: cuda
+              index:
+                type: integer
+                example: 0
+              vram_total:
+                type: integer
+                format: int64
+                example: 25769803776
+              vram_free:
+                type: integer
+                format: int64
+                example: 25600000000
+              torch_vram_total:
+                type: integer
+                format: int64
+              torch_vram_free:
+                type: integer
+                format: int64
+
+    ModelsListing:
+      type: object
+      description: >-
+        Recursive listing of /ComfyUI/models (the symlinked HuggingFace
+        models volume). Each KEY is a top-level model subfolder name
+        (e.g. checkpoints, loras, vae, clip, controlnet).
+        Each VALUE is the sorted list of file names found anywhere under that
+        subfolder (relative to the subfolder root). May be empty if no models
+        have been uploaded.
+      additionalProperties:
+        type: array
+        items:
+          type: string
+      example:
+        checkpoints:
+          - sd_xl_base_1.0.safetensors
+          - sd_xl_refiner_1.0.safetensors
+        loras:
+          - wan/lightning_4steps.safetensors
+        vae:
+          - sdxl_vae.safetensors

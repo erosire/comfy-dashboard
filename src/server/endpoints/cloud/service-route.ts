@@ -1,9 +1,9 @@
 import { asServiceHandler } from '@underload/service';
-import { cloudCreate } from './cloud-create';
+import { createCloudPod } from './cloud';
 
 export default {
-    route: '/v1/comfy/cloud/create',
+    route: '/v1/comfy/cloud',
     handler: asServiceHandler({
-        GET: cloudCreate,
+        POST: createCloudPod
     })
 };
