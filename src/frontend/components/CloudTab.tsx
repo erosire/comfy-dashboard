@@ -1381,6 +1381,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [renameOpen, setRenameOpen] = React.useState(false);
     const [renameValue, setRenameValue] = React.useState('');
     const [agentRunning, setAgentRunning] = React.useState(false);
+    const [executingNodeId, setExecutingNodeId] = React.useState<string | null>(null);
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1694,6 +1695,42 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     for await (const event of cloudReadNdjson(response)) {
                         console.log(`[Agent] Event (${gen.id}):`, event.type, event.data);
 
+                        // Track currently executing node for visual highlighting
+                        if (event.type === 'executing') {
+                            const nodeId = (event.data as any)?.node;
+                            setExecutingNodeId(nodeId ?? null);
+                        }
+
+                        // Capture imagepreview.update — extract base64 image data,
+                        // create a blob URL, and log it for manual inspection.
+                        if (event.type === 'imagepreview.update') {
+                            const imageData = (event.data as any)?.image as string | undefined;
+                            const imageNodeId = (event.data as any)?.node_id as string | undefined;
+                            if (imageData && imageData.startsWith('data:')) {
+                                // Parse the data URL: "data:image/png;base64,..."
+                                const commaIdx = imageData.indexOf(',');
+                                if (commaIdx !== -1) {
+                                    const meta = imageData.substring(0, commaIdx); // e.g. "data:image/png;base64"
+                                    const b64 = imageData.substring(commaIdx + 1);
+                                    const mimeMatch = meta.match(/^data:(.*?);/);
+                                    const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+                                    const byteChars = atob(b64);
+                                    const byteArray = new Uint8Array(byteChars.length);
+                                    for (let k = 0; k < byteChars.length; k++) {
+                                        byteArray[k] = byteChars.charCodeAt(k);
+                                    }
+                                    const blob = new Blob([byteArray], { type: mime });
+                                    const blobUrl = URL.createObjectURL(blob);
+                                    console.log(
+                                        `[Agent] Image from node ${imageNodeId}:`,
+                                        `Blob URL: ${blobUrl}`,
+                                        `MIME: ${mime}`,
+                                        `Size: ${blob.size} bytes`
+                                    );
+                                }
+                            }
+                        }
+
                         // Terminal events — stop reading this stream
                         if (
                             event.type === 'proxy_done' ||
@@ -1704,6 +1741,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             break;
                         }
                     }
+                    // Clear executing node highlight when generation completes
+                    setExecutingNodeId(null);
                 } catch (err: any) {
                     console.error(`[Agent] Failed to submit generation ${gen.id}:`, err.message ?? String(err));
                 }
@@ -1986,33 +2025,54 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             const isSubgraph = !!node.subgraphDef;
                             const registryEntry = comfyNodeRegistry[node.classType];
                             const isUnregistered = !isSubgraph && !registryEntry;
+                            const isExecuting = node.id === executingNodeId;
                             return (
                                 <NodeCard
                                     key={node.id}
                                     data-testid={`cloud-node-${node.id}`}
                                     style={
-                                        isUnregistered
+                                        isExecuting
                                             ? {
-                                                  border: `1px solid ${theme.dangerBorder}`,
-                                                  backgroundColor: theme.dangerSoft
+                                                  border: `2px solid ${theme.accent}`,
+                                                  backgroundColor: theme.accentSoft,
+                                                  boxShadow: `0 0 12px rgba(129, 140, 248, 0.35)`
                                               }
-                                            : isSubgraph
-                                              ? { border: `1px solid ${theme.accent}40` }
-                                              : undefined
+                                            : isUnregistered
+                                              ? {
+                                                    border: `1px solid ${theme.dangerBorder}`,
+                                                    backgroundColor: theme.dangerSoft
+                                                }
+                                              : isSubgraph
+                                                ? { border: `1px solid ${theme.accent}40` }
+                                                : undefined
                                     }
                                 >
                                     <NodeHeader
                                         style={{
-                                            backgroundColor: node.color
-                                                ? node.color
-                                                : isUnregistered
-                                                  ? 'rgba(248, 113, 113, 0.20)'
-                                                  : isSubgraph
-                                                    ? 'rgba(129, 140, 248, 0.15)'
-                                                    : undefined
+                                            backgroundColor: isExecuting
+                                                ? 'rgba(129, 140, 248, 0.25)'
+                                                : node.color
+                                                  ? node.color
+                                                  : isUnregistered
+                                                    ? 'rgba(248, 113, 113, 0.20)'
+                                                    : isSubgraph
+                                                      ? 'rgba(129, 140, 248, 0.15)'
+                                                      : undefined
                                         }}
                                     >
                                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                                            {isExecuting && (
+                                                <span
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: theme.accent,
+                                                        marginRight: 2
+                                                    }}
+                                                    title="Currently executing"
+                                                >
+                                                    ▶
+                                                </span>
+                                            )}
                                             {isSubgraph && (
                                                 <span
                                                     style={{
