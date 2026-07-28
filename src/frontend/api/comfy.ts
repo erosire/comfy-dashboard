@@ -232,7 +232,7 @@ export async function generateWorkflow(
     baseUrl: string,
     workflowId: string
 ): Promise<{ generated: string }> {
-    const url = `${baseUrl}/${encodeURIComponent(workflowId)}/generate`;
+    const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate`;
     const response = await fetch(url, { method: 'POST' });
     if (!response.ok) {
         let message = `Failed to generate workflow (HTTP ${response.status})`;

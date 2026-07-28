@@ -3,9 +3,9 @@ info:
   title: ComfyUI Dashboard API
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
-    CRUD for workflows and a unified endpoint for spawning/checking Beam
-    cloud pods.
-  version: 0.2.0
+    CRUD for workflows, generation snapshots, and a unified endpoint for
+    spawning/checking Beam cloud pods.
+  version: 0.3.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -164,6 +164,36 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DeleteWorkflowResponse'
+        '404':
+          description: Workflow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/comfy/workflows/{id}/generate:
+    post:
+      operationId: generateWorkflow
+      summary: Generate a workflow snapshot
+      description: >-
+        Creates a generation snapshot of the workflow's current workflow.json.
+        Stores it in a "generation" subfolder inside the workflow's directory
+        as a timestamped JSON file (YYYYMMDD-HHMMSS.json).
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Generation file created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateWorkflowResponse'
         '404':
           description: Workflow not found
           content:
@@ -480,6 +510,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WorkflowMeta'
+
+    GenerateWorkflowResponse:
+      type: object
+      description: >-
+        Response from generating a workflow snapshot. The generated file is
+        stored in the workflow's "generation" subfolder.
+      properties:
+        generated:
+          type: string
+          description: The filename of the generated JSON (e.g. "20260728-153045.json")
+          example: "20260728-153045.json"
+      required: [generated]
 
     # ── Cloud ──────────────────────────────────────────────────────
 
