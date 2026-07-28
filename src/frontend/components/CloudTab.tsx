@@ -1618,7 +1618,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         const prompt = buildPrompt();
 
         try {
-            const response = await cloudPrompt(selectedPod.pod_url, { prompt });
+            const response = await cloudPrompt(baseUrl, { pod_url: selectedPod.pod_url, prompt });
 
             const events: CloudStreamEvent[] = [];
             for await (const event of cloudReadNdjson(response)) {
@@ -1640,7 +1640,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         } catch (err: any) {
             setRun({ status: 'error', events: [], message: err.message ?? String(err) });
         }
-    }, [selectedPod, nodes, buildPrompt]);
+    }, [baseUrl, selectedPod, nodes, buildPrompt]);
 
     // ── Derived ──────────────────────────────────────────────────────
 

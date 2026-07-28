@@ -1,22 +1,17 @@
-// API client for the ComfyUI cloud (Beam pod) endpoints.
+// API client for the ComfyUI cloud dashboard endpoints.
 //
-// Aligns with the Beam two-tier API (see deployment/beam/comfy/beam_comfy_service.yaml):
+// All calls go through the local server proxy at baseUrl (default
+// http://192.168.8.128:5000). See src/server/endpoints/comfy-dashboard.yml.
 //
-//   TIER 1 — SPAWNER  (e.g. https://comfy-spawner.beam.cloud)
-//     GET /              → 302 redirect to a freshly-spawned pod
-//     GET /spawn.json    → { container_id, url } (JSON alternative)
-//
-//   TIER 2 — COMFY PROXY  (per-pod URL, e.g. https://....beam.cloud:8188)
-//     GET /              → { health, models_dir, models }
-//     POST /             → enqueue prompt, stream NDJSON results
-//
-// The `cloud()` function mirrors the dual-purpose `GET /`:
-//   - { type: 'create' }  → Tier 1: spawns a pod, catches the 302
-//   - { type: 'status' }  → Tier 2: probes the pod's health
+// Routes:
+//   POST /v1/comfy/cloud          → { container_id, pod_url }  (create)
+//                                or { health, models_dir, models } (status)
+//   POST /v1/comfy/cloud/prompt   → NDJSON stream (raw Response)
 
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type CloudCreateResult = {
+    container_id: string;
     pod_url: string;
 };
 
@@ -30,7 +25,7 @@ export type CloudPodStatusResult = {
     models: Record<string, string[]>;
 };
 
-/** A single line in the NDJSON stream from POST <pod_url>/. */
+/** A single line in the NDJSON stream from POST /v1/comfy/cloud/prompt. */
 export type CloudStreamEvent = {
     type: string;
     data: Record<string, unknown>;
@@ -55,71 +50,51 @@ function isStatusRequest(req: CloudRequest): req is { type: 'status'; pod_url: s
 // ── Main API ──────────────────────────────────────────────────────────
 
 /**
- * Unified cloud endpoint — mirrors the Beam two-tier `GET /`.
+ * Unified cloud endpoint — acts as a switch over request types.
  *
- * - `{ type: 'create', name? }`
- *     Tier 1 — `GET <spawnerUrl>/` with optional `?name=...`.
- *     The spawner responds HTTP 302 redirecting to the live pod URL.
- *     This function catches the redirect (does NOT follow it) and
- *     returns the `Location` header as `pod_url`.
+ * All requests go through the server proxy at `baseUrl`.
  *
- * - `{ type: 'status', pod_url }`
- *     Tier 2 — `GET <pod_url>/` probes the pod's health and returns
- *     `{ health, models_dir, models }`.
+ * - `{ type: 'create', name? }` → `POST <baseUrl>/cloud` with `{}` or `{name}`.
+ *   The server spawns a pod via Beam and returns `{ container_id, pod_url }`.
+ *
+ * - `{ type: 'status', pod_url }` → `POST <baseUrl>/cloud` with `{pod_url}`.
+ *   The server probes the pod's Tier 2 proxy and returns
+ *   `{ health, models_dir, models }`.
  */
 export async function cloud(
-    spawnerUrl: string,
+    baseUrl: string,
     request: CloudRequest
 ): Promise<CloudCreateResult | CloudPodStatusResult> {
     if (isCreateRequest(request)) {
-        return cloudCreate(spawnerUrl, request);
+        return cloudCreate(baseUrl, request);
     }
     if (isStatusRequest(request)) {
-        return cloudStatus(request);
+        return cloudStatus(baseUrl, request);
     }
     // Exhaustiveness guard
     const _never: never = request;
     throw new Error(`Unknown cloud request type: ${JSON.stringify(_never)}`);
 }
 
-// ── Tier 1 — Spawner ──────────────────────────────────────────────────
+// ── Internal implementations ──────────────────────────────────────────
 
-/**
- * Spawn a fresh ComfyUI pod.
- *
- * Calls `GET <spawnerUrl>/` (the Beam Tier 1 spawner). The spawner
- * responds HTTP 302 with `Location: <pod_url>` once the pod is live.
- * We use `redirect: 'manual'` to capture the Location without following
- * the redirect — following it would block until the pod finishes booting.
- */
 async function cloudCreate(
-    spawnerUrl: string,
+    baseUrl: string,
     request: { type: 'create'; name?: string }
 ): Promise<CloudCreateResult> {
-    const url = new URL('/', spawnerUrl);
+    const body: Record<string, string> = {};
     if (request.name) {
-        url.searchParams.set('name', request.name);
+        body.name = request.name;
     }
 
-    const response = await fetch(url.toString(), {
-        method: 'GET',
-        redirect: 'manual', // catch 302 — don't follow
+    const response = await fetch(`${baseUrl}/cloud`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
     });
 
-    // ── 302: redirect to the live pod URL ──────────────────────────
-    if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('Location');
-        if (!location) {
-            throw new Error(
-                `Spawner returned ${response.status} but no Location header`
-            );
-        }
-        return { pod_url: location };
-    }
-
-    // ── Non-302 error ──────────────────────────────────────────────
     if (!response.ok) {
-        let message = `Failed to spawn pod (HTTP ${response.status})`;
+        let message = `Failed to create cloud pod (HTTP ${response.status})`;
         try {
             const data = await response.json();
             if (data?.error) message = data.error;
@@ -127,29 +102,17 @@ async function cloudCreate(
         throw new Error(message);
     }
 
-    // ── Fallback: 200 JSON (e.g. GET /spawn.json path) ────────────
-    const data = (await response.json()) as { container_id?: string; url?: string; pod_url?: string };
-    const pod_url = data.url ?? data.pod_url;
-    if (!pod_url) {
-        throw new Error('Spawner returned 200 but no pod URL');
-    }
-    return { pod_url };
+    return (await response.json()) as CloudCreateResult;
 }
 
-// ── Tier 2 — Comfy Proxy ──────────────────────────────────────────────
-
-/**
- * Check the health of a running ComfyUI pod.
- *
- * Calls `GET <pod_url>/` (the Beam Tier 2 proxy) and returns the pod's
- * health status, system stats, and available models.
- */
 async function cloudStatus(
+    baseUrl: string,
     request: { type: 'status'; pod_url: string }
 ): Promise<CloudPodStatusResult> {
-    const response = await fetch(request.pod_url, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
+    const response = await fetch(`${baseUrl}/cloud`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pod_url: request.pod_url }),
     });
 
     if (!response.ok) {
@@ -164,13 +127,14 @@ async function cloudStatus(
     return (await response.json()) as CloudPodStatusResult;
 }
 
+// ── Prompt streaming ──────────────────────────────────────────────────
+
 /**
  * Submit a workflow to a spawned pod and stream results back.
  *
- * Calls `POST <pod_url>/` (the Beam Tier 2 proxy) with the ComfyUI
- * prompt graph. Returns the raw Response object — the caller must read
- * it as a stream of newline-delimited JSON (NDJSON). Each line is a
- * CloudStreamEvent.
+ * Calls `POST <baseUrl>/cloud/prompt` with `{ pod_url, prompt, client_id? }`.
+ * Returns the raw Response object — the caller must read it as a stream
+ * of newline-delimited JSON (NDJSON). Each line is a CloudStreamEvent.
  *
  * The stream ends when the caller receives:
  *   - `{"type":"proxy_done","data":{}}` — success
@@ -178,21 +142,17 @@ async function cloudStatus(
  *   - `{"type":"proxy_error",...}` — proxy-level failure
  */
 export async function cloudPrompt(
-    pod_url: string,
+    baseUrl: string,
     body: {
+        pod_url: string;
         prompt: Record<string, unknown>;
         client_id?: string;
     }
 ): Promise<Response> {
-    const payload: Record<string, unknown> = { prompt: body.prompt };
-    if (body.client_id) {
-        payload.client_id = body.client_id;
-    }
-
-    const response = await fetch(pod_url, {
+    const response = await fetch(`${baseUrl}/cloud/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
     });
 
     if (!response.ok && !response.headers.get('content-type')?.includes('ndjson')) {
@@ -212,7 +172,7 @@ export async function cloudPrompt(
  * Convenience: read an NDJSON stream from a Response and yield parsed events.
  *
  * Usage:
- *   const response = await cloudPrompt(pod_url, { prompt });
+ *   const response = await cloudPrompt(baseUrl, { pod_url, prompt });
  *   for await (const event of cloudReadNdjson(response)) {
  *       console.log(event.type, event.data);
  *       if (event.type === 'proxy_done') break;
