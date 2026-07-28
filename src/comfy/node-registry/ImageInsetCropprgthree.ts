@@ -1,0 +1,61 @@
+import type { NodeWidgetLayout } from './types';
+
+export const ImageInsetCropprgthree: NodeWidgetLayout = {
+    nodeType: 'Image Inset Crop (rgthree)',
+    displayName: 'Image Inset Crop (rgthree)',
+    category: 'rgthree',
+    github: {
+        repo: 'https://github.com/rgthree/rgthree-comfy',
+        path: 'py/image_inset_crop.py',
+        extension: 'rgthree-comfy',
+    },
+    widgets: [
+        {
+            name: 'measurement',
+            label: 'Measurement',
+            widgetType: 'COMBO',
+            options: ['Pixels', 'Percentage'],
+            default: 'Pixels',
+        },
+        {
+            name: 'left',
+            label: 'Left',
+            widgetType: 'INT',
+            default: 0,
+            min: 0,
+            max: 16384,
+            step: 1,
+            display: 'number',
+        },
+        {
+            name: 'right',
+            label: 'Right',
+            widgetType: 'INT',
+            default: 0,
+            min: 0,
+            max: 16384,
+            step: 1,
+            display: 'number',
+        },
+        {
+            name: 'top',
+            label: 'Top',
+            widgetType: 'INT',
+            default: 0,
+            min: 0,
+            max: 16384,
+            step: 1,
+            display: 'number',
+        },
+        {
+            name: 'bottom',
+            label: 'Bottom',
+            widgetType: 'INT',
+            default: 0,
+            min: 0,
+            max: 16384,
+            step: 1,
+            display: 'number',
+        },
+    ],
+};

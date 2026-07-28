@@ -1,0 +1,81 @@
+import type { NodeWidgetLayout } from './types';
+import { UPSCALE_METHODS, CROP_MODES } from './types';
+
+export const ImageResizeKJv2: NodeWidgetLayout = {
+    nodeType: 'ImageResizeKJv2',
+    displayName: 'Resize Image v2',
+    category: 'KJNodes/image',
+    github: {
+        repo: 'https://github.com/kijai/ComfyUI-KJNodes',
+        path: 'nodes/image_nodes.py',
+        extension: 'ComfyUI-KJNodes',
+    },
+    widgets: [
+        {
+            name: 'width',
+            label: 'Width',
+            widgetType: 'INT',
+            default: 512,
+            min: 0,
+            max: 16384,
+            step: 1,
+            display: 'number',
+        },
+        {
+            name: 'height',
+            label: 'Height',
+            widgetType: 'INT',
+            default: 512,
+            min: 0,
+            max: 16384,
+            step: 1,
+            display: 'number',
+        },
+        {
+            name: 'upscale_method',
+            label: 'Upscale Method',
+            widgetType: 'COMBO',
+            options: ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos', 'nvidia_rtx_vsr'],
+            default: 'nearest-exact',
+        },
+        {
+            name: 'keep_proportion',
+            label: 'Keep Proportion',
+            widgetType: 'COMBO',
+            options: ['stretch', 'resize', 'pad', 'pad_edge', 'pad_edge_pixel', 'crop', 'pillarbox_blur', 'total_pixels'],
+            default: 'stretch',
+        },
+        {
+            name: 'pad_color',
+            label: 'Pad Color',
+            widgetType: 'STRING',
+            default: '0, 0, 0',
+            tooltip: 'Color to use for padding.',
+        },
+        {
+            name: 'crop_position',
+            label: 'Crop Position',
+            widgetType: 'COMBO',
+            options: ['center', 'top', 'bottom', 'left', 'right'],
+            default: 'center',
+        },
+        {
+            name: 'divisible_by',
+            label: 'Divisible By',
+            widgetType: 'INT',
+            default: 2,
+            min: 0,
+            max: 512,
+            step: 1,
+            display: 'number',
+        },
+        {
+            name: 'device',
+            label: 'Device',
+            widgetType: 'COMBO',
+            options: ['cpu', 'gpu'],
+            default: 'cpu',
+            optional: true,
+        },
+    ],
+};
