@@ -759,13 +759,22 @@ function parseNodesRecursive(
                     }
                 });
 
-                // Build boundary links for nested subgraphs within this subgraph
-                const nestedBoundaryLinks: BoundaryLink[] = internalLinks.map((link) => ({
-                    targetNodeId: String(link.target_id),
-                    targetSlot: Number(link.target_slot),
-                    sourceNodeId: String(link.origin_id),
-                    sourceSlot: Number(link.origin_slot)
-                }));
+                // Build boundary links for nested subgraphs within this subgraph.
+                // IMPORTANT: Use the rewritten internalLinkMap (not the original
+                // internalLinks) so that nested subgraphs see the correct external
+                // sources. Without this, a link rewritten from -10 → "74" at the
+                // parent level would still appear as -10 in the nested boundary,
+                // causing the nested rewrite to be a no-op and the sentinel to
+                // leak into the API prompt.
+                const nestedBoundaryLinks: BoundaryLink[] = internalLinks.map((link) => {
+                    const rewritten = internalLinkMap.get(link.id);
+                    return {
+                        targetNodeId: String(link.target_id),
+                        targetSlot: Number(link.target_slot),
+                        sourceNodeId: rewritten ? rewritten.sourceNodeId : String(link.origin_id),
+                        sourceSlot: rewritten ? rewritten.sourceSlot : Number(link.origin_slot),
+                    };
+                });
 
                 // Parse internal nodes RECURSIVELY (handles unlimited nesting)
                 const internalNodes = ((sgDef as any).nodes ?? []) as WorkflowNode[];
@@ -1130,6 +1139,12 @@ function renumberNodes(nodes: UINode[]): UINode[] {
  * Internal nodes get IDs like "3-1", "3-2", etc. (where 3 is the parent subgraph ID).
  * All cross-references between internal nodes are updated accordingly.
  * References to external nodes (via externalIdMap) are also updated.
+ *
+ * `externalIdMap` must include ALL IDs visible from this nesting level that are
+ * NOT internal to this subgraph: parent-sibling nodes (from every enclosing
+ * subgraph) AND top-level nodes. This is essential so that boundary links
+ * rewritten from the -10 sentinel to a top-level node (e.g. "74") can still be
+ * renumbered to the top-level prompt ID (e.g. "4") at any depth.
  */
 function renumberSubgraphNodes(
     internalNodes: UINode[],
@@ -1154,11 +1169,18 @@ function renumberSubgraphNodes(
             // Unknown source — keep as-is
             return conn;
         });
-        // Recursively renumber deeper subgraph nesting levels
+        // Recursively renumber deeper subgraph nesting levels.
+        // Pass a merged map so nested subgraphs can resolve both their parent's
+        // internal siblings (internalIdMap) AND any out-of-subgraph references
+        // the parent already knew about (externalIdMap) — including top-level IDs.
         const myNewId = internalIdMap.get(n.id)!;
+        const combinedExternalMap = new Map<string, string>([
+            ...externalIdMap.entries(),
+            ...internalIdMap.entries(),
+        ]);
         const subgraphNodes =
             n.subgraphNodes && n.subgraphNodes.length > 0
-                ? renumberSubgraphNodes(n.subgraphNodes, myNewId, internalIdMap)
+                ? renumberSubgraphNodes(n.subgraphNodes, myNewId, combinedExternalMap)
                 : undefined;
         return { ...n, id: myNewId, connections, subgraphNodes };
     });
@@ -1312,11 +1334,17 @@ function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unkno
             inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
         }
 
-        // Widget values — use registry name if available, fall back to widget_N
+        // Widget values — use registry name if available.
+        // Skip widgets whose index has no matching registry entry (e.g.
+        // TemporaryImagePreview has widgets_values: [""] but its registry
+        // defines widgets: [] — the value is an internal/hidden widget that
+        // has no corresponding API input).
         const registryEntry = comfyNodeRegistry[node.classType];
         for (const widget of node.widgets) {
-            const name = registryEntry?.widgets[widget.index]?.name ?? `widget_${widget.index}`;
-            inputs[name] = widget.value;
+            const regWidget = registryEntry?.widgets[widget.index];
+            if (regWidget) {
+                inputs[regWidget.name] = widget.value;
+            }
         }
 
         prompt[node.id] = { class_type: node.classType, inputs };
@@ -1333,17 +1361,95 @@ function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unkno
  * Internal nodes may themselves be subgraphs (nested), so we recurse.
  *
  * Nodes without subgraphDef pass through as-is.
+ *
+ * When a subgraph wrapper is removed, we must:
+ *   1. Remap connections that reference the wrapper's outputs to the internal
+ *      node that actually produces each output (via the -20 outputNode sentinel).
+ *   2. Remove connections referencing sentinel nodes (-10, -20) since those are
+ *      virtual nodes that don't exist in the flat prompt.
  */
 function flattenSubgraphNodes(nodes: UINode[]): UINode[] {
+    // ── First pass: remove wrappers and build output remap tables ─────────
+    //
+    // For each removed wrapper, we map each of its output slots to the
+    // internal renumbered node ID and output slot that produces the data.
+    //
+    // In subgraph definitions, links TO the -20 sentinel (outputNode) tell us
+    // which internal node produces each subgraph output. The subgraph
+    // definition's outputs[].linkIds reference these links.
+    const outputRemaps = new Map<string, Map<number, { nodeId: string; slot: number }>>();
     const result: UINode[] = [];
+
     for (const node of nodes) {
         if (node.subgraphDef && node.subgraphNodes && node.subgraphNodes.length > 0) {
-            // Subgraph wrapper — skip it, but recursively include its internal nodes
+            // Build output port → internal producer mapping
+            const outputMap = new Map<number, { nodeId: string; slot: number }>();
+            const subgraphLinks = node.subgraphLinks ?? [];
+            const sgDef = node.subgraphDef;
+
+            // Build a mapping from original internal node IDs → renumbered IDs.
+            // After renumberSubgraphNodes, each internal node's _raw.id holds
+            // the original ID and its .id holds the renumbered ID (e.g. "2-1").
+            const origToRenumbered = new Map<string, string>();
+            for (const internalNode of node.subgraphNodes) {
+                const origId = internalNode._raw?.id;
+                if (origId != null) {
+                    origToRenumbered.set(String(origId), internalNode.id);
+                }
+            }
+
+            for (const sgOutput of sgDef.outputs ?? []) {
+                for (const linkId of sgOutput.linkIds ?? []) {
+                    // Find the internal link that goes TO the -20 outputNode
+                    const link = subgraphLinks.find(
+                        (l) => l.id === linkId && String(l.target_id) === '-20'
+                    );
+                    if (link) {
+                        const origSourceId = String(link.origin_id);
+                        const renumberedSourceId = origToRenumbered.get(origSourceId);
+                        if (renumberedSourceId) {
+                            outputMap.set(Number(link.target_slot), {
+                                nodeId: renumberedSourceId,
+                                slot: Number(link.origin_slot),
+                            });
+                        }
+                    }
+                }
+            }
+
+            if (outputMap.size > 0) {
+                outputRemaps.set(node.id, outputMap);
+            }
+
+            // Recursively flatten internal nodes (handles nested subgraphs)
             result.push(...flattenSubgraphNodes(node.subgraphNodes));
         } else {
             result.push(node);
         }
     }
+
+    // ── Second pass: rewire connections referencing removed wrappers ──────
+    //
+    // Any connection whose sourceNodeId points to a removed subgraph wrapper
+    // needs to be redirected to the internal node that produces that output.
+    // Connections referencing sentinel nodes (-10, -20) are removed since
+    // those virtual nodes don't exist in the flat prompt.
+    for (const node of result) {
+        node.connections = node.connections
+            // Remove sentinel references (-10 = inputNode, -20 = outputNode)
+            .filter((conn) => conn.sourceNodeId !== '-10' && conn.sourceNodeId !== '-20')
+            .map((conn) => {
+                const remap = outputRemaps.get(conn.sourceNodeId);
+                if (remap) {
+                    const target = remap.get(conn.sourceSlot);
+                    if (target) {
+                        return { ...conn, sourceNodeId: target.nodeId, sourceSlot: target.slot };
+                    }
+                }
+                return conn;
+            });
+    }
+
     return result;
 }
 
