@@ -42,11 +42,12 @@ type PodEntry = {
     failCount: number;
     run: RunState;
     /**
-     * Generation currently being processed for this pod (server-side).
-     * Set on submission; the generations polling effect watches it and
-     * settles run.status to done/error once the server finishes.
+     * Generations currently processed server-side for this pod. A pod is
+     * never blocked — every Pod#N click queues another job. The
+     * generations polling effect prunes this list and settles run.status
+     * (done/error) once nothing is left in flight.
      */
-    activeGenerationId?: string;
+    activeGenerationIds: string[];
     health?: CloudPodStatusResult;
     error?: string;
 };
@@ -1734,26 +1735,39 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     // ── Sync pod buttons from polled generations ────────────────────
     // Pod processing lives on the server; polling the generation list is
-    // what settles each "Pod#N" button's running → done/error state.
+    // what settles each "Pod#N" button's state. A pod can have several
+    // jobs in flight — it stays "running" until the LAST one settles,
+    // then shows done (all succeeded) or error (any failed).
 
     React.useEffect(() => {
         setPods((prev) => {
             let changed = false;
             const next = prev.map((p): PodEntry => {
-                if (!p.activeGenerationId || p.run.status !== 'running') return p;
-                const gen = store.generations.find((g) => g.id === p.activeGenerationId);
-                if (!gen || gen.status === 'pending' || gen.status === 'processing') return p;
-                changed = true;
-                if (gen.status === 'completed') {
-                    const run: RunState = { status: 'done', events: [] };
-                    return { ...p, activeGenerationId: undefined, run };
+                if (p.activeGenerationIds.length === 0) return p;
+
+                const stillActive: string[] = [];
+                const settled: typeof store.generations = [];
+                for (const genId of p.activeGenerationIds) {
+                    const gen = store.generations.find((g) => g.id === genId);
+                    if (!gen || gen.status === 'pending' || gen.status === 'processing') {
+                        stillActive.push(genId);
+                    } else {
+                        settled.push(gen);
+                    }
                 }
-                const run: RunState = {
-                    status: 'error',
-                    events: [],
-                    message: gen.error ?? 'Generation failed'
-                };
-                return { ...p, activeGenerationId: undefined, run };
+                if (settled.length === 0) return p;
+                changed = true;
+
+                // Some jobs still running — prune the settled ones, keep spinning
+                if (stillActive.length > 0) {
+                    return { ...p, activeGenerationIds: stillActive };
+                }
+                // Last job settled — pod goes done, or error if any failed
+                const failed = settled.find((g) => g.status === 'failed');
+                const run: RunState = failed
+                    ? { status: 'error', events: [], message: failed.error ?? 'Generation failed' }
+                    : { status: 'done', events: [] };
+                return { ...p, activeGenerationIds: stillActive, run };
             });
             return changed ? next : prev;
         });
@@ -2003,11 +2017,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         async (podUrl: string, podId?: string) => {
             if (nodes.length === 0 || !editingWorkflowId) return;
 
-            const updatePod = (patch: Partial<PodEntry>) => {
-                if (!podId) return;
-                setPods((prev) => prev.map((p) => (p.id === podId ? { ...p, ...patch } : p)));
-            };
-
             // Step 1 — snapshot the workflow into a generation json (same
             // place as the workflow generation API).
             const generation = await generateWorkflow(editingWorkflowId);
@@ -2015,7 +2024,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
             try {
                 // Step 2 — submit and be done. The server processes the
-                // pod stream in the background from here.
+                // pod stream in the background from here (scoped to this
+                // job via a per-submission client_id).
                 const apiPrompt = workflowToApiPrompt(generation.prompt);
                 await cloudPrompt(baseUrl, {
                     pod_url: podUrl,
@@ -2027,10 +2037,35 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         generation_id: generation.id
                     }
                 });
-                // Accepted — mark the pod busy until polling settles it.
-                updatePod({ run: { status: 'running', events: [] }, activeGenerationId: generation.id });
+                // Accepted — add to the pod's in-flight set; polling
+                // settles each entry. Pods accept concurrent jobs, so an
+                // existing run does not block this one.
+                if (podId) {
+                    setPods((prev) =>
+                        prev.map((p) =>
+                            p.id === podId
+                                ? {
+                                      ...p,
+                                      run: { status: 'running', events: [] },
+                                      activeGenerationIds: [...p.activeGenerationIds, generation.id]
+                                  }
+                                : p
+                        )
+                    );
+                }
             } catch (err: any) {
-                updatePod({ run: { status: 'error', events: [], message: err.message ?? String(err) } });
+                const message = err.message ?? String(err);
+                // Submission itself failed — only surface an error on the
+                // button when nothing else is still running on this pod.
+                if (podId) {
+                    setPods((prev) =>
+                        prev.map((p) =>
+                            p.id === podId && p.activeGenerationIds.length === 0
+                                ? { ...p, run: { status: 'error', events: [], message } }
+                                : p
+                        )
+                    );
+                }
                 throw err;
             }
         },
@@ -2055,15 +2090,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         // button shows up while the pod_url is still being resolved.
         podCounterRef.current += 1;
         const podNumber = podCounterRef.current;
-        const podEntry: PodEntry = {
-            id: `gen-pod-${Date.now()}-${podNumber}`,
-            podNumber,
-            name: `Pod#${podNumber}`,
-            pod_url: '',
-            status: 'spawning',
-            failCount: 0,
-            run: { status: 'idle' }
-        };
+            const podEntry: PodEntry = {
+                id: `gen-pod-${Date.now()}-${podNumber}`,
+                podNumber,
+                name: `Pod#${podNumber}`,
+                pod_url: '',
+                status: 'spawning',
+                failCount: 0,
+                activeGenerationIds: [],
+                run: { status: 'idle' }
+            };
         setPods((prev) => [...prev, podEntry]);
 
         // Step 2 — create the cloud pod
@@ -2101,15 +2137,17 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     }, [nodes.length, editingWorkflowId, baseUrl, runGenerationOnPod]);
 
     // ── Pod#N: same as Generate but reuses an existing pod_url ──────
-    // Independent per pod: only blocked while THIS pod has a run in
-    // flight — other pods (and Generate) stay fully interactive.
+    // NEVER blocked while running: each click queues ANOTHER job on the
+    // pod. The server scopes each submission with its own client_id and
+    // filters the shared pod stream by prompt_id, so every generation
+    // json only receives its own job's events.
 
     const handlePodGenerate = React.useCallback(
         async (pod: PodEntry) => {
             if (nodes.length === 0 || !editingWorkflowId) return;
-            if (!pod.pod_url || pod.status !== 'ready' || pod.run.status === 'running') return;
+            if (!pod.pod_url || pod.status !== 'ready') return;
             try {
-                console.log(`[Pod#${pod.podNumber}] Reusing pod ${pod.pod_url}`);
+                console.log(`[Pod#${pod.podNumber}] Queueing job on ${pod.pod_url}`);
                 await runGenerationOnPod(pod.pod_url, pod.id);
             } catch (err: any) {
                 alert(`Failed to generate: ${err.message ?? String(err)}`);
@@ -3013,16 +3051,19 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
             <div style={{ flex: '1 1 auto' }} />
 
-            {/* Pod#N: re-run generation on an existing pod (skips pod creation).
-                Appears the moment Generate is clicked (spawning spinner while the
-                pod_url resolves) and carries its own status: spinner while
-                spawning / while ITS run is in flight, colored border for the
-                last result, heartbeat removal when the pod_url dies. */}
+            {/* Pod#N: queue another generation on an existing pod (skips pod
+                creation). Appears the moment Generate is clicked (spawning
+                spinner while the pod_url resolves). Never disabled while
+                running — pods accept concurrent jobs; the in-flight count is
+                shown next to the label. Carry their own status: spinner
+                while spawning / while jobs are in flight, colored border for
+                the last settled result, heartbeat removal when the pod_url
+                dies. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';
-                const isRunning = p.run.status === 'running';
+                const inFlight = p.activeGenerationIds.length;
                 const isDisabled =
-                    isSpawning || isRunning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
+                    isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
                 return (
                     <Btn
                         key={p.id}
@@ -3035,16 +3076,17 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 : p.status !== 'ready'
                                   ? `Pod#${p.podNumber} — ${p.error || 'unavailable'} ` +
                                     `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
-                                  : isRunning
-                                    ? `Pod#${p.podNumber} — generation running on ${p.pod_url}`
-                                    : `Run a new generation on ${p.pod_url}`
+                                  : inFlight > 0
+                                    ? `Pod#${p.podNumber} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                      `in flight on ${p.pod_url} — click to queue another`
+                                    : `Queue a new generation on ${p.pod_url}`
                         }
                         style={{
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: 6,
                             borderColor:
-                                isSpawning || isRunning
+                                isSpawning || inFlight > 0
                                     ? theme.accent
                                     : p.run.status === 'error'
                                       ? theme.dangerBorder
@@ -3054,8 +3096,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         }}
                         data-testid={`pod-generate-${p.podNumber}`}
                     >
-                        {(isSpawning || isRunning) && <SpinnerEl />}
+                        {(isSpawning || inFlight > 0) && <SpinnerEl />}
                         Pod#{p.podNumber}
+                        {inFlight > 0 && (
+                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600 }}>
+                                ×{inFlight}
+                            </span>
+                        )}
                     </Btn>
                 );
             })}

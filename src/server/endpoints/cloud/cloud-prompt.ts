@@ -21,12 +21,22 @@
 //   - extra_data: passed through to ComfyUI's POST /prompt extra_data
 //   - front / number: forwarded to ComfyUI POST /prompt
 
+import { randomUUID } from 'node:crypto';
 import { asHandlerMethod } from '@underload/service';
 import {
     patchGenerationFile,
     type GenerationResultItem,
     type StreamEvent
 } from '../workflows/generation-store';
+
+/**
+ * Generate a client_id for a prompt submission (32-char hex, as required
+ * by the beam proxy / ComfyUI). One per submission: with several jobs
+ * sharing a pod, this scopes which stream events belong to which job.
+ */
+function newClientId(): string {
+    return randomUUID().replace(/-/g, '');
+}
 
 export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variables) => {
     const body = _parameters.body as {
@@ -86,6 +96,16 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             return { status: 500, response: { error: 'Server misconfigured: missing project root' } };
         }
 
+        // One client_id per submission. Multiple generations can be queued
+        // on the same pod, and the pod broadcasts every execution event to
+        // all subscribers — this id ties the job to its prompt_id so the
+        // stream consumer keeps only this job's events.
+        const clientId =
+            typeof body.client_id === 'string' && /^[0-9a-f]{32}$/i.test(body.client_id)
+                ? body.client_id
+                : newClientId();
+        promptPayload.client_id = clientId;
+
         // Fire-and-forget — intentionally not awaited. The function never
         // rejects; all failures land in the generation file.
         void processPodPromptInBackground(
@@ -102,7 +122,8 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             response: {
                 accepted: true,
                 workflow_id: body.workflow_id,
-                generation_id: body.generation_id
+                generation_id: body.generation_id,
+                client_id: clientId
             }
         };
     }
@@ -176,6 +197,7 @@ async function processPodPromptInBackground(
     const events: StreamEvent[] = [];
     const results: GenerationResultItem[] = [];
     let failureMessage: string | null = null;
+    const clientId = promptPayload.client_id as string | undefined;
 
     try {
         // Mark the generation as picked up so pollers see live progress
@@ -240,7 +262,7 @@ async function processPodPromptInBackground(
             completedDate
         });
         console.log(
-            `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) completed ` +
+            `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${clientId}) completed ` +
             `in ${elapsed} — ${events.length} stream event(s), ${results.length} result(s)`
         );
     }
@@ -263,8 +285,30 @@ async function consumeNdjsonStream(
     let buffer = '';
     let failureMessage: string | null = null;
 
+    // ── Job scoping (client_id → prompt_id) ─────────────────────────
+    // Several generations may share the pod at once; ComfyUI broadcasts
+    // every execution event to all websocket subscribers, so this stream
+    // can receive events belonging to OTHER jobs. Our submission's
+    // prompt_id is learned from the proxy_enqueue acknowledgement; from
+    // then on, any event carrying a DIFFERENT prompt_id is dropped.
+    // Events without a prompt_id (status broadcasts, proxy_done, preview
+    // frames) cannot be attributed that way and are kept — proxy_done is
+    // emitted per subscription, so the stream still ends when OUR job
+    // (the one tied to our client_id) finishes.
+    let ourPromptId: string | null = null;
+
     /** Returns true when the event is terminal (stop reading). */
     const handleEvent = (event: StreamEvent): boolean => {
+        if (event.type === 'proxy_enqueue') {
+            const pid = (event.data as Record<string, unknown>)?.prompt_id;
+            if (typeof pid === 'string') ourPromptId = pid;
+        } else {
+            const pid = (event.data as Record<string, unknown>)?.prompt_id;
+            if (ourPromptId && typeof pid === 'string' && pid !== ourPromptId) {
+                return false; // another job's event on this shared pod — ignore
+            }
+        }
+
         events.push(event);
 
         // Capture image previews as results
