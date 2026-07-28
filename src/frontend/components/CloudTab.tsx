@@ -249,6 +249,56 @@ const SidebarCount = styled('span')({
     fontWeight: 400
 });
 
+// ── Styled: generation list ─────────────────────────────────────────
+
+const QueueItemEl = styled('div')({
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '8px 10px',
+    borderRadius: theme.radiusMd,
+    border: `1px solid ${theme.border}`,
+    marginBottom: 4,
+    backgroundColor: theme.surface2
+});
+
+const QueueItemHeader = styled('div')({
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4
+});
+
+const QueueItemName = styled('div')({
+    fontSize: theme.fontSize.sm,
+    fontWeight: 600,
+    color: theme.text,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    flex: '1 1 auto',
+    minWidth: 0
+});
+
+const QueueItemMeta = styled('div')({
+    fontSize: theme.fontSize.xs,
+    color: theme.textFaint,
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6
+});
+
+const QueueStatusBadge = styled('span')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    fontSize: theme.fontSize.xs,
+    padding: '1px 6px',
+    borderRadius: theme.radiusSm,
+    fontWeight: 600,
+    flex: '0 0 auto'
+});
+
 // ── Styled: right content (editor) ────────────────────────────────────
 
 const EditorArea = styled('div')({
@@ -1146,6 +1196,23 @@ function dataTypeLabel(type: DataType): string {
     return String(type);
 }
 
+/** Format an ISO timestamp as a relative time string (e.g. "2m ago"). */
+function formatRelativeTime(isoString: string | null): string {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    if (diffMs < 0) return 'just now';
+    const seconds = Math.floor(diffMs / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+}
+
 function eventSummary(event: CloudStreamEvent): string {
     switch (event.type) {
         case 'proxy_enqueue':
@@ -1203,6 +1270,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         cloneWorkflow,
         selectWorkflow,
         searchWorkflows,
+        refreshGenerations,
         generateWorkflow
     } = useDashboardStore();
 
@@ -1236,6 +1304,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             sidebarScrollRef.current.scrollTop = sidebarScrollRef.current.scrollHeight;
         }
     }, [pods]);
+
+    // Poll generations for the selected workflow
+    React.useEffect(() => {
+        if (!editingWorkflowId) return;
+        refreshGenerations(editingWorkflowId);
+        const interval = setInterval(() => {
+            refreshGenerations(editingWorkflowId);
+        }, 5000);
+        return () => clearInterval(interval);
+    }, [editingWorkflowId, refreshGenerations]);
 
     // Debounced search
     const handleSearchChange = React.useCallback(
@@ -1447,11 +1525,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const handleGenerate = React.useCallback(async () => {
         if (nodes.length === 0 || !editingWorkflowId) return;
         try {
-            await generateWorkflow(baseUrl, editingWorkflowId);
+            await generateWorkflow(editingWorkflowId);
         } catch (err: any) {
             alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
-    }, [baseUrl, editingWorkflowId, nodes.length]);
+    }, [editingWorkflowId, nodes.length, generateWorkflow]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection.
@@ -1547,6 +1625,63 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     </EmptyHint>
                 )}
             </SidebarScroll>
+
+            {/* ── Generations section ──────────────────────── */}
+            {isEditingSaved && (
+                <>
+                    <div style={{ borderTop: `1px solid ${theme.border}`, margin: '0 6px' }} />
+                    <SidebarHeader>
+                        <span>
+                            Generations <SidebarCount>({store.generations.length})</SidebarCount>
+                        </span>
+                    </SidebarHeader>
+                    <div style={{ padding: '0 6px 12px', overflowY: 'auto', flex: '1 1 auto' }}>
+                        {store.generations.length === 0 && (
+                            <EmptyHint>No generations yet.</EmptyHint>
+                        )}
+                        {store.generations.map((gen) => (
+                            <QueueItemEl key={gen.id} data-testid={`gen-item-${gen.id}`}>
+                                <QueueItemHeader>
+                                    <QueueItemName title={gen.id}>
+                                        {gen.id}
+                                    </QueueItemName>
+                                </QueueItemHeader>
+                                <QueueItemMeta>
+                                    <QueueStatusBadge style={{
+                                        color: gen.status === 'completed'
+                                            ? theme.success
+                                            : gen.status === 'failed'
+                                                ? theme.danger
+                                                : theme.textDim,
+                                        backgroundColor: gen.status === 'completed'
+                                            ? theme.successSoft
+                                            : gen.status === 'failed'
+                                                ? theme.dangerSoft
+                                                : theme.surface2
+                                    }}>
+                                        {gen.status}
+                                    </QueueStatusBadge>
+                                    <span title={gen.createdDate}>
+                                        {formatRelativeTime(gen.createdDate)}
+                                    </span>
+                                </QueueItemMeta>
+                                {gen.error && (
+                                    <div style={{
+                                        fontSize: theme.fontSize.xs,
+                                        color: theme.danger,
+                                        marginTop: 4,
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap' as const
+                                    }} title={gen.error}>
+                                        {gen.error}
+                                    </div>
+                                )}
+                            </QueueItemEl>
+                        ))}
+                    </div>
+                </>
+            )}
         </SidebarPanel>
     );
 

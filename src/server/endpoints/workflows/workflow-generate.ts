@@ -1,19 +1,42 @@
-// Workflow generate endpoint — POST /v1/comfy/workflows/:id/generate
+// Workflow generate endpoint
 //
-// Creates a generation snapshot of the workflow's current workflow.json.
-// Stores it in a "generation" subfolder inside the workflow's directory:
-//
-//   YYYYMMDD-HHMMSS/
+// POST — Creates a generation snapshot with metadata:
+//   temporary/database/comfy-workflows/YYYYMMDD-HHMMSS/
 //     ├── workflow.json
 //     ├── meta.json
 //     └── generation/
-//           └── YYYYMMDD-HHMMSS.json   ← this file
+//           └── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, ... }
+//
+// GET — Lists all generation files for the workflow.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
-export const workflowGenerate = asHandlerMethod(async (_, parameters, variables) => {
+type GenerationEntry = {
+    id: string;
+    status: 'pending' | 'completed' | 'failed';
+    createdDate: string;
+    completedDate: string | null;
+    error: string | null;
+    prompt: Record<string, unknown>;
+};
+
+function timestampFile(date: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+        date.getFullYear().toString() +
+        pad(date.getMonth() + 1) +
+        pad(date.getDate()) +
+        '-' +
+        pad(date.getHours()) +
+        pad(date.getMinutes()) +
+        pad(date.getSeconds())
+    );
+}
+
+/** GET — List all generations for a workflow. */
+export const workflowGenerateList = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
     const workflowId = parameters.path.id;
 
@@ -21,7 +44,53 @@ export const workflowGenerate = asHandlerMethod(async (_, parameters, variables)
         return { status: 400, response: { error: 'id is required' } };
     }
 
-    const workflowDir = path.join(projectRoot, 'temporary/database/comfy-workflows', workflowId);
+    const generationDir = path.join(
+        projectRoot, 'temporary/database/comfy-workflows', workflowId, 'generation'
+    );
+
+    if (!fs.existsSync(generationDir)) {
+        return { status: 200, response: { generations: [] } };
+    }
+
+    const entries = fs.readdirSync(generationDir, { withFileTypes: true });
+    const generations: GenerationEntry[] = [];
+
+    for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+        try {
+            const raw = fs.readFileSync(path.join(generationDir, entry.name), 'utf-8');
+            const data = JSON.parse(raw);
+            generations.push({
+                id: data.id ?? entry.name.replace('.json', ''),
+                status: data.status ?? 'pending',
+                createdDate: data.createdDate ?? '',
+                completedDate: data.completedDate ?? null,
+                error: data.error ?? null,
+                prompt: data.prompt ?? {}
+            });
+        } catch {
+            // Skip corrupted files
+        }
+    }
+
+    // Sort by createdDate descending (newest first)
+    generations.sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
+
+    return { status: 200, response: { generations } };
+});
+
+/** POST — Create a new generation snapshot. */
+export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, variables) => {
+    const projectRoot = variables.root;
+    const workflowId = parameters.path.id;
+
+    if (!workflowId) {
+        return { status: 400, response: { error: 'id is required' } };
+    }
+
+    const workflowDir = path.join(
+        projectRoot, 'temporary/database/comfy-workflows', workflowId
+    );
     const workflowJsonPath = path.join(workflowDir, 'workflow.json');
 
     if (!fs.existsSync(workflowJsonPath)) {
@@ -36,39 +105,43 @@ export const workflowGenerate = asHandlerMethod(async (_, parameters, variables)
         return { status: 500, response: { error: 'Failed to read workflow.json' } };
     }
 
-    // Generate timestamped filename
+    // Generate timestamped ID
     const now = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const timestamp =
-        now.getFullYear().toString() +
-        pad(now.getMonth() + 1) +
-        pad(now.getDate()) +
-        '-' +
-        pad(now.getHours()) +
-        pad(now.getMinutes()) +
-        pad(now.getSeconds());
+    const nowIso = now.toISOString();
+    const genId = timestampFile(now);
 
     // Ensure the generation subfolder exists
     const generationDir = path.join(workflowDir, 'generation');
     fs.mkdirSync(generationDir, { recursive: true });
 
     // Handle filename collision with a counter suffix
-    let filename = `${timestamp}.json`;
+    let filename = `${genId}.json`;
     let filePath = path.join(generationDir, filename);
     let counter = 1;
     while (fs.existsSync(filePath)) {
-        filename = `${timestamp}-${String(counter).padStart(2, '0')}.json`;
+        filename = `${genId}-${String(counter).padStart(2, '0')}.json`;
         filePath = path.join(generationDir, filename);
         counter++;
     }
 
-    // Write the generation file
-    fs.writeFileSync(filePath, JSON.stringify(workflowData, null, 2), 'utf-8');
+    const actualId = filename.replace('.json', '');
+
+    // Build the generation entry with metadata
+    const generation: GenerationEntry = {
+        id: actualId,
+        status: 'pending',
+        createdDate: nowIso,
+        completedDate: null,
+        error: null,
+        prompt: workflowData
+    };
+
+    fs.writeFileSync(filePath, JSON.stringify(generation, null, 2), 'utf-8');
 
     return {
         status: 200,
         response: {
-            generated: filename
+            generation
         }
     };
 });

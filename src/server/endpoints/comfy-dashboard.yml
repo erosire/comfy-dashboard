@@ -172,13 +172,40 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
   /v1/comfy/workflows/{id}/generate:
+    get:
+      operationId: listGenerations
+      summary: List generations for a workflow
+      description: >-
+        Returns all generation snapshots for the given workflow, sorted by
+        createdDate descending (newest first).
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of generation entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationListResponse'
+        '404':
+          description: Workflow not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     post:
       operationId: generateWorkflow
       summary: Generate a workflow snapshot
       description: >-
         Creates a generation snapshot of the workflow's current workflow.json.
         Stores it in a "generation" subfolder inside the workflow's directory
-        as a timestamped JSON file (YYYYMMDD-HHMMSS.json).
+        as a timestamped JSON file with metadata (status, createdDate, etc.).
       tags:
         - Workflows
       parameters:
@@ -513,15 +540,52 @@ components:
 
     GenerateWorkflowResponse:
       type: object
-      description: >-
-        Response from generating a workflow snapshot. The generated file is
-        stored in the workflow's "generation" subfolder.
+      description: Response from creating a generation snapshot.
       properties:
-        generated:
+        generation:
+          $ref: '#/components/schemas/GenerationEntry'
+      required: [generation]
+
+    GenerationListResponse:
+      type: object
+      description: List of generation snapshots for a workflow.
+      properties:
+        generations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenerationEntry'
+
+    GenerationEntry:
+      type: object
+      description: >-
+        A generation snapshot. Contains the workflow prompt and metadata
+        tracking its status.
+      properties:
+        id:
           type: string
-          description: The filename of the generated JSON (e.g. "20260728-153045.json")
-          example: "20260728-153045.json"
-      required: [generated]
+          description: Generation identifier (timestamp-based filename without .json)
+          example: "20260728-153045"
+        status:
+          type: string
+          enum: [pending, completed, failed]
+          description: Current status of the generation
+        createdDate:
+          type: string
+          format: date-time
+          description: ISO timestamp when the generation was created
+        completedDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO timestamp when the generation completed (null if pending)
+        error:
+          type: string
+          nullable: true
+          description: Error message if the generation failed
+        prompt:
+          type: object
+          description: The ComfyUI workflow JSON snapshot at generation time
+      required: [id, status, createdDate, prompt]
 
     # ── Cloud ──────────────────────────────────────────────────────
 

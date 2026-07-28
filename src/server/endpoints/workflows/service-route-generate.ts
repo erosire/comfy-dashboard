@@ -1,9 +1,10 @@
 import { asServiceHandler } from '@underload/service';
-import { workflowGenerate } from './workflow-generate';
+import { workflowGenerateList, workflowGenerateCreate } from './workflow-generate';
 
 export default {
     route: '/v1/comfy/workflows/:id/generate',
     handler: asServiceHandler({
-        POST: workflowGenerate,
+        GET: workflowGenerateList,
+        POST: workflowGenerateCreate,
     })
 };

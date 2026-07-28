@@ -11,10 +11,11 @@ import {
     createWorkflow as createWorkflowApi,
     updateWorkflow as updateWorkflowApi,
     generateWorkflow as generateWorkflowApi,
+    fetchGenerations as fetchGenerationsApi,
     fetchQueue,
     fetchStatus
 } from '../api';
-import type { WorkflowMeta, Workflow, QueueItem, ServerStatus } from '../api';
+import type { WorkflowMeta, Workflow, QueueItem, ServerStatus, GenerationEntry } from '../api';
 
 // ── localStorage helpers ──────────────────────────────────────────────
 const STORAGE_KEY_WORKFLOWS = 'comfyDashboard:workflows';
@@ -83,6 +84,7 @@ export type DashboardStore = {
     searchQuery: string;
     queue: QueueItem[];
     status: ServerStatus | null;
+    generations: GenerationEntry[];
     config: {
         baseUrl: string;
         pollIntervalMs: number;
@@ -102,7 +104,8 @@ type DashboardStoreContextValue = {
     refreshWorkflows: () => Promise<void>;
     refreshQueue: () => Promise<void>;
     refreshStatus: () => Promise<void>;
-    generateWorkflow: (baseUrl: string, workflowId: string) => Promise<{ generated: string }>;
+    refreshGenerations: (workflowId: string) => Promise<void>;
+    generateWorkflow: (workflowId: string) => Promise<GenerationEntry>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
@@ -124,6 +127,7 @@ export const DashboardStoreProvider: React.FC<{
         searchQuery: initialStore?.searchQuery ?? '',
         queue: initialStore?.queue ?? [],
         status: initialStore?.status ?? null,
+        generations: initialStore?.generations ?? [],
         config: { ...DEFAULT_CONFIG, ...configOverrides }
     }));
 
@@ -276,11 +280,28 @@ export const DashboardStoreProvider: React.FC<{
     );
 
     const generateWorkflow = useCallback(
-        async (baseUrl: string, workflowId: string) => {
-            return generateWorkflowApi(baseUrl, workflowId);
+        async (workflowId: string) => {
+            const { generation } = await generateWorkflowApi(`${store.config.baseUrl}`, workflowId);
+            // Refresh generations after creating one
+            try {
+                const { generations } = await fetchGenerationsApi(`${store.config.baseUrl}`, workflowId);
+                setStore((prev) => ({ ...prev, generations }));
+            } catch {
+                // Non-fatal
+            }
+            return generation;
         },
-        []
+        [store.config.baseUrl, setStore]
     );
+
+    const refreshGenerations = useCallback(async (workflowId: string) => {
+        try {
+            const { generations } = await fetchGenerationsApi(`${store.config.baseUrl}`, workflowId);
+            setStore((prev) => ({ ...prev, generations }));
+        } catch {
+            // Non-fatal
+        }
+    }, [store.config.baseUrl, setStore]);
 
     return (
         <DashboardStoreContext.Provider value={{
@@ -295,6 +316,7 @@ export const DashboardStoreProvider: React.FC<{
             refreshWorkflows,
             refreshQueue,
             refreshStatus,
+            refreshGenerations,
             generateWorkflow
         }}>
             {children}

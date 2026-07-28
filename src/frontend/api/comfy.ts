@@ -62,6 +62,15 @@ export type ServerStatus = {
     version?: string;
 };
 
+export type GenerationEntry = {
+    id: string;
+    status: 'pending' | 'completed' | 'failed';
+    createdDate: string;
+    completedDate: string | null;
+    error: string | null;
+    prompt: Record<string, unknown>;
+};
+
 // ── API Functions ──────────────────────────────────────────────────────
 
 // Fetch the list of all workflows, optionally filtered by search query.
@@ -231,7 +240,7 @@ export async function fetchStatus(baseUrl: string): Promise<ServerStatus> {
 export async function generateWorkflow(
     baseUrl: string,
     workflowId: string
-): Promise<{ generated: string }> {
+): Promise<{ generation: GenerationEntry }> {
     const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate`;
     const response = await fetch(url, { method: 'POST' });
     if (!response.ok) {
@@ -242,7 +251,26 @@ export async function generateWorkflow(
         } catch { /* ignore */ }
         throw new Error(message);
     }
-    return (await response.json()) as { generated: string };
+    return (await response.json()) as { generation: GenerationEntry };
+}
+
+// Fetch all generations for a workflow.
+export async function fetchGenerations(
+    baseUrl: string,
+    workflowId: string
+): Promise<{ generations: GenerationEntry[] }> {
+    const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        let message = `Failed to fetch generations (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    const data = (await response.json()) as { generations: GenerationEntry[] };
+    return { generations: Array.isArray(data.generations) ? data.generations : [] };
 }
 
 // Poll a URL at intervals until a stop condition is met.
