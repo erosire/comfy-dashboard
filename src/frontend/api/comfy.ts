@@ -62,13 +62,23 @@ export type ServerStatus = {
     version?: string;
 };
 
+export type GenerationResultItem = {
+    type: 'image' | 'video';
+    url: string;
+    mimeType: string;
+    size: number;
+    nodeId: string;
+};
+
 export type GenerationEntry = {
     id: string;
-    status: 'pending' | 'completed' | 'failed';
+    status: 'pending' | 'processing' | 'completed' | 'failed';
     createdDate: string;
     completedDate: string | null;
+    generatedTime: string | null;
     error: string | null;
     prompt: Record<string, unknown>;
+    result: GenerationResultItem[];
 };
 
 // ── API Functions ──────────────────────────────────────────────────────
@@ -271,6 +281,30 @@ export async function fetchGenerations(
     }
     const data = (await response.json()) as { generations: GenerationEntry[] };
     return { generations: Array.isArray(data.generations) ? data.generations : [] };
+}
+
+// Update a generation entry (PUT) — e.g. with results after agent completion.
+export async function updateGeneration(
+    baseUrl: string,
+    workflowId: string,
+    generateId: string,
+    body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>
+): Promise<{ generation: GenerationEntry }> {
+    const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}`;
+    const response = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+        let message = `Failed to update generation (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    return (await response.json()) as { generation: GenerationEntry };
 }
 
 // Poll a URL at intervals until a stop condition is met.

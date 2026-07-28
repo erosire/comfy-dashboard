@@ -12,10 +12,11 @@ import {
     updateWorkflow as updateWorkflowApi,
     generateWorkflow as generateWorkflowApi,
     fetchGenerations as fetchGenerationsApi,
+    updateGeneration as updateGenerationApi,
     fetchQueue,
     fetchStatus
 } from '../api';
-import type { WorkflowMeta, Workflow, QueueItem, ServerStatus, GenerationEntry } from '../api';
+import type { WorkflowMeta, Workflow, QueueItem, ServerStatus, GenerationEntry, GenerationResultItem } from '../api';
 
 // ── localStorage helpers ──────────────────────────────────────────────
 const STORAGE_KEY_WORKFLOWS = 'comfyDashboard:workflows';
@@ -106,6 +107,7 @@ type DashboardStoreContextValue = {
     refreshStatus: () => Promise<void>;
     refreshGenerations: (workflowId: string) => Promise<void>;
     generateWorkflow: (workflowId: string) => Promise<GenerationEntry>;
+    updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>) => Promise<void>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
@@ -303,6 +305,21 @@ export const DashboardStoreProvider: React.FC<{
         }
     }, [store.config.baseUrl, setStore]);
 
+    const updateGeneration = useCallback(async (
+        workflowId: string,
+        generateId: string,
+        body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>
+    ) => {
+        await updateGenerationApi(`${store.config.baseUrl}`, workflowId, generateId, body);
+        // Refresh generations after update
+        try {
+            const { generations } = await fetchGenerationsApi(`${store.config.baseUrl}`, workflowId);
+            setStore((prev) => ({ ...prev, generations }));
+        } catch {
+            // Non-fatal
+        }
+    }, [store.config.baseUrl, setStore]);
+
     return (
         <DashboardStoreContext.Provider value={{
             store,
@@ -317,7 +334,8 @@ export const DashboardStoreProvider: React.FC<{
             refreshQueue,
             refreshStatus,
             refreshGenerations,
-            generateWorkflow
+            generateWorkflow,
+            updateGeneration
         }}>
             {children}
         </DashboardStoreContext.Provider>

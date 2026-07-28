@@ -11,7 +11,7 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
-import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta } from '../api';
+import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta, GenerationResultItem } from '../api';
 import { cloud, cloudPrompt, cloudReadNdjson } from '../api';
 import { useDashboardStore } from '../context';
 import type {
@@ -1363,7 +1363,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         selectWorkflow,
         searchWorkflows,
         refreshGenerations,
-        generateWorkflow
+        generateWorkflow,
+        updateGeneration
     } = useDashboardStore();
 
     const [nodes, setNodes] = React.useState<UINode[]>([]);
@@ -1382,6 +1383,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [renameValue, setRenameValue] = React.useState('');
     const [agentRunning, setAgentRunning] = React.useState(false);
     const [executingNodeId, setExecutingNodeId] = React.useState<string | null>(null);
+    const [agentCount, setAgentCount] = React.useState(0);
+    const [viewerOpen, setViewerOpen] = React.useState(false);
+    const [viewerItems, setViewerItems] = React.useState<GenerationResultItem[]>([]);
+    const [viewerIndex, setViewerIndex] = React.useState(0);
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1647,42 +1652,61 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     // ── Spawn agent: create a cloud pod and run all pending generations ──
     //
     // 1. Calls POST /v1/comfy/cloud with {} to spawn a new pod.
-    // 2. Once the pod is ready, iterates store.generations and submits
-    //    each generation.prompt via POST /v1/comfy/cloud/prompt.
-    // 3. Streams the NDJSON response back and logs every event to console.
+    // 2. Filters generations with status "pending" only.
+    // 3. Marks picked-up generations as "processing" so other agents skip them.
+    // 4. Streams the NDJSON response back, collecting image results.
+    // 5. PUTs the results back to the server when done.
 
     const handleSpawnAgent = React.useCallback(async () => {
         if (agentRunning) return;
 
-        const generations = store.generations;
-        if (generations.length === 0) {
-            console.log('[Agent] No generations to process. Click "Generate" first to create a snapshot.');
+        // Only pick up "pending" generations — not "processing" or completed ones
+        const pendingGenerations = store.generations.filter((g) => g.status === 'pending');
+        if (pendingGenerations.length === 0) {
+            console.log('[Agent] No pending generations to process. Click "Generate" first to create a snapshot.');
             return;
         }
 
         setAgentRunning(true);
-        console.log(`[Agent] Spawning cloud pod...`);
+        setAgentCount((c) => c + 1);
+        const totalStart = performance.now();
+        console.log(`[Agent] Spawning cloud pod... (${pendingGenerations.length} pending generations)`);
+
+        // Immediately mark all pending generations as "processing"
+        if (editingWorkflowId) {
+            for (const gen of pendingGenerations) {
+                try {
+                    await updateGeneration(editingWorkflowId, gen.id, { status: 'processing' });
+                } catch (err: any) {
+                    console.warn(`[Agent] Failed to mark generation ${gen.id} as processing:`, err.message);
+                }
+            }
+            // Refresh the list after marking
+            await refreshGenerations(editingWorkflowId);
+        }
 
         try {
             // Step 1 — spawn the pod
+            const spawnStart = performance.now();
             const result = await cloud(baseUrl, { type: 'create' });
+            const spawnMs = performance.now() - spawnStart;
             if (!('pod_url' in result)) {
                 console.error('[Agent] Spawn response did not contain pod_url', result);
                 setAgentRunning(false);
                 return;
             }
             const podUrl = (result as { pod_url: string }).pod_url;
-            console.log(`[Agent] Pod spawned: ${podUrl}`);
+            console.log(`[Agent] Pod spawned in ${(spawnMs / 1000).toFixed(1)}s: ${podUrl}`);
 
             // Step 2 — iterate generations and submit each prompt
-            for (let i = 0; i < generations.length; i++) {
-                const gen = generations[i];
-                console.log(`[Agent] (${i + 1}/${generations.length}) Submitting generation ${gen.id} (status: ${gen.status})...`);
+            for (let i = 0; i < pendingGenerations.length; i++) {
+                const gen = pendingGenerations[i];
+                const genStart = performance.now();
+                const collectedResults: GenerationResultItem[] = [];
+                console.log(`[Agent] (${i + 1}/${pendingGenerations.length}) Submitting generation ${gen.id}...`);
                 console.log(`[Agent] Prompt payload:`, JSON.stringify(gen.prompt, null, 2));
 
                 try {
-                    // Convert workflow JSON to the flat API prompt format
-                    // that ComfyUI's POST /prompt expects
                     const apiPrompt = workflowToApiPrompt(gen.prompt);
                     console.log(`[Agent] Converted API prompt:`, JSON.stringify(apiPrompt, null, 2));
 
@@ -1692,8 +1716,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     });
 
                     // Step 3 — stream NDJSON and log each event
+                    let executionStartMs: number | null = null;
                     for await (const event of cloudReadNdjson(response)) {
-                        console.log(`[Agent] Event (${gen.id}):`, event.type, event.data);
+                        const now = performance.now();
+                        const elapsed = ((now - genStart) / 1000).toFixed(1);
+                        console.log(`[Agent] Event (${gen.id}):`, event.type, event.data, ` [+${elapsed}s]`);
 
                         // Track currently executing node for visual highlighting
                         if (event.type === 'executing') {
@@ -1701,16 +1728,19 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             setExecutingNodeId(nodeId ?? null);
                         }
 
-                        // Capture imagepreview.update — extract base64 image data,
-                        // create a blob URL, and log it for manual inspection.
+                        // Capture execution_start timestamp
+                        if (event.type === 'execution_start') {
+                            executionStartMs = now;
+                        }
+
+                        // Capture imagepreview.update — extract base64 and collect as result
                         if (event.type === 'imagepreview.update') {
                             const imageData = (event.data as any)?.image as string | undefined;
                             const imageNodeId = (event.data as any)?.node_id as string | undefined;
                             if (imageData && imageData.startsWith('data:')) {
-                                // Parse the data URL: "data:image/png;base64,..."
                                 const commaIdx = imageData.indexOf(',');
                                 if (commaIdx !== -1) {
-                                    const meta = imageData.substring(0, commaIdx); // e.g. "data:image/png;base64"
+                                    const meta = imageData.substring(0, commaIdx);
                                     const b64 = imageData.substring(commaIdx + 1);
                                     const mimeMatch = meta.match(/^data:(.*?);/);
                                     const mime = mimeMatch ? mimeMatch[1] : 'image/png';
@@ -1727,6 +1757,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                         `MIME: ${mime}`,
                                         `Size: ${blob.size} bytes`
                                     );
+                                    collectedResults.push({
+                                        type: 'image',
+                                        url: blobUrl,
+                                        mimeType: mime,
+                                        size: blob.size,
+                                        nodeId: imageNodeId ?? ''
+                                    });
                                 }
                             }
                         }
@@ -1737,24 +1774,63 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             event.type === 'execution_error' ||
                             event.type === 'proxy_error'
                         ) {
-                            console.log(`[Agent] Generation ${gen.id} finished with event: ${event.type}`);
+                            const genMs = performance.now() - genStart;
+                            const execMs = executionStartMs != null ? performance.now() - executionStartMs : null;
+                            const execStr = execMs != null ? `, execution: ${(execMs / 1000).toFixed(1)}s` : '';
+                            console.log(
+                                `[Agent] Generation ${gen.id} finished (${event.type}) — ` +
+                                `total: ${(genMs / 1000).toFixed(1)}s${execStr}`
+                            );
                             break;
                         }
                     }
                     // Clear executing node highlight when generation completes
                     setExecutingNodeId(null);
+
+                    // Step 4 — PUT results back to the server
+                    if (editingWorkflowId) {
+                        const genFinishTime = new Date().toISOString();
+                        const genTotalMs = performance.now() - genStart;
+                        try {
+                            await updateGeneration(editingWorkflowId, gen.id, {
+                                status: 'completed',
+                                result: collectedResults,
+                                generatedTime: `${(genTotalMs / 1000).toFixed(1)}s`,
+                                completedDate: genFinishTime
+                            });
+                            console.log(`[Agent] PUT generation ${gen.id}: completed with ${collectedResults.length} result(s)`);
+                        } catch (err: any) {
+                            console.error(`[Agent] Failed to PUT generation ${gen.id}:`, err.message);
+                        }
+                    }
                 } catch (err: any) {
-                    console.error(`[Agent] Failed to submit generation ${gen.id}:`, err.message ?? String(err));
+                    const genMs = performance.now() - genStart;
+                    console.error(`[Agent] Failed to submit generation ${gen.id} after ${(genMs / 1000).toFixed(1)}s:`, err.message ?? String(err));
+                    // Mark as failed
+                    if (editingWorkflowId) {
+                        try {
+                            await updateGeneration(editingWorkflowId, gen.id, {
+                                status: 'failed',
+                                error: err.message ?? String(err)
+                            });
+                        } catch { /* ignore */ }
+                    }
                 }
             }
 
-            console.log('[Agent] All generations processed.');
+            const totalMs = performance.now() - totalStart;
+            console.log(`[Agent] All generations processed — total wall time: ${(totalMs / 1000).toFixed(1)}s`);
         } catch (err: any) {
-            console.error('[Agent] Spawn failed:', err.message ?? String(err));
+            const totalMs = performance.now() - totalStart;
+            console.error(`[Agent] Spawn failed after ${(totalMs / 1000).toFixed(1)}s:`, err.message ?? String(err));
         } finally {
             setAgentRunning(false);
+            // Refresh generations to reflect updated statuses
+            if (editingWorkflowId) {
+                refreshGenerations(editingWorkflowId);
+            }
         }
-    }, [agentRunning, baseUrl, store.generations]);
+    }, [agentRunning, baseUrl, store.generations, editingWorkflowId, updateGeneration, refreshGenerations]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection.
@@ -1864,46 +1940,92 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         {store.generations.length === 0 && (
                             <EmptyHint>No generations yet.</EmptyHint>
                         )}
-                        {store.generations.map((gen) => (
-                            <QueueItemEl key={gen.id} data-testid={`gen-item-${gen.id}`}>
-                                <QueueItemHeader>
-                                    <QueueItemName title={gen.id}>
-                                        {gen.id}
-                                    </QueueItemName>
-                                </QueueItemHeader>
-                                <QueueItemMeta>
-                                    <QueueStatusBadge style={{
-                                        color: gen.status === 'completed'
-                                            ? theme.success
-                                            : gen.status === 'failed'
-                                                ? theme.danger
-                                                : theme.textDim,
-                                        backgroundColor: gen.status === 'completed'
-                                            ? theme.successSoft
-                                            : gen.status === 'failed'
-                                                ? theme.dangerSoft
-                                                : theme.surface2
-                                    }}>
-                                        {gen.status}
-                                    </QueueStatusBadge>
-                                    <span title={gen.createdDate}>
-                                        {formatRelativeTime(gen.createdDate)}
-                                    </span>
-                                </QueueItemMeta>
-                                {gen.error && (
-                                    <div style={{
-                                        fontSize: theme.fontSize.xs,
-                                        color: theme.danger,
-                                        marginTop: 4,
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                        whiteSpace: 'nowrap' as const
-                                    }} title={gen.error}>
-                                        {gen.error}
-                                    </div>
-                                )}
-                            </QueueItemEl>
-                        ))}
+                        {store.generations.map((gen) => {
+                            const hasResults = gen.result && gen.result.length > 0;
+                            const genStatusColor =
+                                gen.status === 'completed'
+                                    ? theme.success
+                                    : gen.status === 'failed'
+                                        ? theme.danger
+                                        : gen.status === 'processing'
+                                            ? theme.accent
+                                            : theme.textDim;
+                            const genStatusBg =
+                                gen.status === 'completed'
+                                    ? theme.successSoft
+                                    : gen.status === 'failed'
+                                        ? theme.dangerSoft
+                                        : gen.status === 'processing'
+                                            ? theme.accentSoft
+                                            : theme.surface2;
+                            return (
+                                <QueueItemEl
+                                    key={gen.id}
+                                    data-testid={`gen-item-${gen.id}`}
+                                    style={
+                                        hasResults
+                                            ? { cursor: 'pointer', transition: `border-color ${theme.transition}` }
+                                            : undefined
+                                    }
+                                    onClick={
+                                        hasResults
+                                            ? () => {
+                                                  setViewerItems(gen.result);
+                                                  setViewerIndex(0);
+                                                  setViewerOpen(true);
+                                              }
+                                            : undefined
+                                    }
+                                >
+                                    <QueueItemHeader>
+                                        <QueueItemName title={gen.id}>
+                                            {gen.id}
+                                        </QueueItemName>
+                                        {hasResults && (
+                                            <span
+                                                style={{
+                                                    fontSize: theme.fontSize.xs,
+                                                    color: theme.accent,
+                                                    flexShrink: 0,
+                                                    marginLeft: 4
+                                                }}
+                                            >
+                                                {gen.result.length} item{gen.result.length !== 1 ? 's' : ''}
+                                            </span>
+                                        )}
+                                    </QueueItemHeader>
+                                    <QueueItemMeta>
+                                        <QueueStatusBadge style={{
+                                            color: genStatusColor,
+                                            backgroundColor: genStatusBg
+                                        }}>
+                                            {gen.status === 'processing' && <SpinnerEl />}
+                                            {gen.status}
+                                        </QueueStatusBadge>
+                                        {gen.generatedTime && (
+                                            <span style={{ color: theme.accent, fontWeight: 500 }}>
+                                                {gen.generatedTime}
+                                            </span>
+                                        )}
+                                        <span title={gen.createdDate}>
+                                            {formatRelativeTime(gen.createdDate)}
+                                        </span>
+                                    </QueueItemMeta>
+                                    {gen.error && (
+                                        <div style={{
+                                            fontSize: theme.fontSize.xs,
+                                            color: theme.danger,
+                                            marginTop: 4,
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                            whiteSpace: 'nowrap' as const
+                                        }} title={gen.error}>
+                                            {gen.error}
+                                        </div>
+                                    )}
+                                </QueueItemEl>
+                            );
+                        })}
                     </div>
                 </>
             )}
@@ -2427,6 +2549,22 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
             <div style={{ flex: '1 1 auto' }} />
 
+            {agentCount > 0 && (
+                <Badge
+                    style={{
+                        marginRight: 6,
+                        color: agentRunning ? theme.accent : theme.success,
+                        backgroundColor: agentRunning ? theme.accentSoft : theme.successSoft,
+                        border: `1px solid ${agentRunning ? theme.accent : theme.success}`,
+                        fontWeight: 600,
+                        cursor: 'default'
+                    }}
+                    title={`${agentCount} agent${agentCount !== 1 ? 's' : ''} spawned`}
+                >
+                    {agentCount}
+                </Badge>
+            )}
+
             <SpawnAgentBtn
                 className="sg-primary"
                 onClick={handleSpawnAgent}
@@ -2501,6 +2639,166 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             <Btn onClick={() => setRenameOpen(false)}>Cancel</Btn>
                             <BtnPrimary onClick={submitRename}>Save</BtnPrimary>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Image/Video Viewer Modal ──────────────────────────── */}
+            {viewerOpen && viewerItems.length > 0 && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 2000,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: 'rgba(0,0,0,0.85)'
+                    }}
+                    onClick={() => setViewerOpen(false)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Escape') setViewerOpen(false);
+                        if (e.key === 'ArrowLeft') setViewerIndex((i) => (i > 0 ? i - 1 : viewerItems.length - 1));
+                        if (e.key === 'ArrowRight') setViewerIndex((i) => (i < viewerItems.length - 1 ? i + 1 : 0));
+                    }}
+                    tabIndex={0}
+                    ref={(el) => {
+                        if (el) el.focus();
+                    }}
+                >
+                    {/* Left arrow */}
+                    {viewerItems.length > 1 && (
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setViewerIndex((i) => (i > 0 ? i - 1 : viewerItems.length - 1));
+                            }}
+                            style={{
+                                position: 'absolute',
+                                left: 20,
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                width: 44,
+                                height: 44,
+                                borderRadius: '50%',
+                                border: '1px solid rgba(255,255,255,0.3)',
+                                backgroundColor: 'rgba(255,255,255,0.1)',
+                                color: '#fff',
+                                fontSize: 20,
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                transition: 'background-color 0.15s'
+                            }}
+                            title="Previous"
+                        >
+                            ‹
+                        </button>
+                    )}
+
+                    {/* Content */}
+                    <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                            maxWidth: '85vw',
+                            maxHeight: '85vh',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            gap: 12
+                        }}
+                    >
+                        {viewerItems[viewerIndex]?.type === 'image' ? (
+                            <img
+                                src={viewerItems[viewerIndex].url}
+                                alt={`Result ${viewerIndex + 1}`}
+                                style={{
+                                    maxWidth: '85vw',
+                                    maxHeight: '80vh',
+                                    objectFit: 'contain',
+                                    borderRadius: theme.radiusMd,
+                                    boxShadow: '0 4px 24px rgba(0,0,0,0.5)'
+                                }}
+                            />
+                        ) : viewerItems[viewerIndex]?.type === 'video' ? (
+                            <video
+                                src={viewerItems[viewerIndex].url}
+                                controls
+                                autoPlay
+                                style={{
+                                    maxWidth: '85vw',
+                                    maxHeight: '80vh',
+                                    borderRadius: theme.radiusMd,
+                                    boxShadow: '0 4px 24px rgba(0,0,0,0.5)'
+                                }}
+                            />
+                        ) : null}
+
+                        {/* Info bar */}
+                        <div
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 12,
+                                color: 'rgba(255,255,255,0.8)',
+                                fontSize: theme.fontSize.sm
+                            }}
+                        >
+                            <span>
+                                {viewerIndex + 1} / {viewerItems.length}
+                            </span>
+                            <span style={{ opacity: 0.5 }}>|</span>
+                            <span>{viewerItems[viewerIndex]?.mimeType}</span>
+                            <span style={{ opacity: 0.5 }}>|</span>
+                            <span>{viewerItems[viewerIndex]?.size ? `${(viewerItems[viewerIndex].size / 1024).toFixed(1)} KB` : ''}</span>
+                            <span style={{ opacity: 0.5 }}>|</span>
+                            <span>node {viewerItems[viewerIndex]?.nodeId}</span>
+                        </div>
+                    </div>
+
+                    {/* Right arrow */}
+                    {viewerItems.length > 1 && (
+                        <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setViewerIndex((i) => (i < viewerItems.length - 1 ? i + 1 : 0));
+                            }}
+                            style={{
+                                position: 'absolute',
+                                right: 20,
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                width: 44,
+                                height: 44,
+                                borderRadius: '50%',
+                                border: '1px solid rgba(255,255,255,0.3)',
+                                backgroundColor: 'rgba(255,255,255,0.1)',
+                                color: '#fff',
+                                fontSize: 20,
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                transition: 'background-color 0.15s'
+                            }}
+                            title="Next"
+                        >
+                            ›
+                        </button>
+                    )}
+
+                    {/* Close hint */}
+                    <div
+                        style={{
+                            position: 'absolute',
+                            top: 20,
+                            right: 20,
+                            color: 'rgba(255,255,255,0.5)',
+                            fontSize: theme.fontSize.xs
+                        }}
+                    >
+                        ESC to close · ← → to navigate
                     </div>
                 </div>
             )}

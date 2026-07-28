@@ -228,6 +228,46 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /v1/comfy/workflows/{id}/generate/{generate_id}:
+    put:
+      operationId: updateGeneration
+      summary: Update a generation entry
+      description: >-
+        Partially updates a generation snapshot. Used by the agent to report
+        results (images, videos), mark completion status, and record timing.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: generate_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateGenerationRequest'
+      responses:
+        '200':
+          description: Generation updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateWorkflowResponse'
+        '404':
+          description: Generation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   # ── Cloud ──────────────────────────────────────────────────────────
 
   /v1/comfy/cloud:
@@ -555,6 +595,31 @@ components:
           items:
             $ref: '#/components/schemas/GenerationEntry'
 
+    UpdateGenerationRequest:
+      type: object
+      description: >-
+        Partial update for a generation entry. Only include fields that
+        should change; omitted fields retain their current values.
+      properties:
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        result:
+          type: array
+          items:
+            $ref: '#/components/schemas/GenerationResultItem'
+        generatedTime:
+          type: string
+          nullable: true
+          description: Human-readable generation duration (e.g. "12.5s")
+        completedDate:
+          type: string
+          format: date-time
+          nullable: true
+        error:
+          type: string
+          nullable: true
+
     GenerationEntry:
       type: object
       description: >-
@@ -567,7 +632,7 @@ components:
           example: "20260728-153045"
         status:
           type: string
-          enum: [pending, completed, failed]
+          enum: [pending, processing, completed, failed]
           description: Current status of the generation
         createdDate:
           type: string
@@ -578,6 +643,10 @@ components:
           format: date-time
           nullable: true
           description: ISO timestamp when the generation completed (null if pending)
+        generatedTime:
+          type: string
+          nullable: true
+          description: Human-readable generation duration (e.g. "12.5s")
         error:
           type: string
           nullable: true
@@ -585,7 +654,33 @@ components:
         prompt:
           type: object
           description: The ComfyUI workflow JSON snapshot at generation time
-      required: [id, status, createdDate, prompt]
+        result:
+          type: array
+          description: Array of generated outputs (images, videos, etc.)
+          items:
+            $ref: '#/components/schemas/GenerationResultItem'
+      required: [id, status, createdDate, prompt, result]
+
+    GenerationResultItem:
+      type: object
+      description: A single result from a generation (image or video).
+      properties:
+        type:
+          type: string
+          enum: [image, video]
+        url:
+          type: string
+          description: Blob URL or remote URL of the result
+        mimeType:
+          type: string
+          example: "image/png"
+        size:
+          type: integer
+          description: Size in bytes
+        nodeId:
+          type: string
+          description: The workflow node that produced this result
+      required: [type, url, mimeType, size, nodeId]
 
     # ── Cloud ──────────────────────────────────────────────────────
 

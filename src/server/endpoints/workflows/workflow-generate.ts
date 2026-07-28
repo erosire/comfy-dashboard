@@ -13,13 +13,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
+type GenerationResultItem = {
+    type: 'image' | 'video';
+    url: string;
+    mimeType: string;
+    size: number;
+    nodeId: string;
+};
+
 type GenerationEntry = {
     id: string;
-    status: 'pending' | 'completed' | 'failed';
+    status: 'pending' | 'processing' | 'completed' | 'failed';
     createdDate: string;
     completedDate: string | null;
+    generatedTime: string | null;
     error: string | null;
     prompt: Record<string, unknown>;
+    result: GenerationResultItem[];
 };
 
 function timestampFile(date: Date): string {
@@ -65,8 +75,10 @@ export const workflowGenerateList = asHandlerMethod(async (_, parameters, variab
                 status: data.status ?? 'pending',
                 createdDate: data.createdDate ?? '',
                 completedDate: data.completedDate ?? null,
+                generatedTime: data.generatedTime ?? null,
                 error: data.error ?? null,
-                prompt: data.prompt ?? {}
+                prompt: data.prompt ?? {},
+                result: Array.isArray(data.result) ? data.result : []
             });
         } catch {
             // Skip corrupted files
@@ -132,8 +144,10 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         status: 'pending',
         createdDate: nowIso,
         completedDate: null,
+        generatedTime: null,
         error: null,
-        prompt: workflowData
+        prompt: workflowData,
+        result: []
     };
 
     fs.writeFileSync(filePath, JSON.stringify(generation, null, 2), 'utf-8');
@@ -142,6 +156,56 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         status: 200,
         response: {
             generation
+        }
+    };
+});
+
+/** PUT — Update a generation entry (e.g. with results after completion). */
+export const workflowGenerateUpdate = asHandlerMethod(async (_, parameters, variables) => {
+    const projectRoot = variables.root;
+    const workflowId = parameters.path.id;
+    const generateId = parameters.path.generate_id;
+
+    if (!workflowId) {
+        return { status: 400, response: { error: 'id is required' } };
+    }
+    if (!generateId) {
+        return { status: 400, response: { error: 'generate_id is required' } };
+    }
+
+    const generationDir = path.join(
+        projectRoot, 'temporary/database/comfy-workflows', workflowId, 'generation'
+    );
+    const filePath = path.join(generationDir, `${generateId}.json`);
+
+    if (!fs.existsSync(filePath)) {
+        return { status: 404, response: { error: `Generation '${generateId}' not found` } };
+    }
+
+    // Read existing generation
+    let existing: GenerationEntry;
+    try {
+        existing = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch {
+        return { status: 500, response: { error: 'Failed to read generation file' } };
+    }
+
+    // Parse the request body from parameters.body
+    const body = (parameters.body ?? {}) as Record<string, unknown>;
+
+    // Merge updates — only overwrite provided fields
+    if (body.status !== undefined) existing.status = body.status as GenerationEntry['status'];
+    if (body.completedDate !== undefined) existing.completedDate = body.completedDate as string | null;
+    if (body.generatedTime !== undefined) existing.generatedTime = body.generatedTime as string | null;
+    if (body.error !== undefined) existing.error = body.error as string | null;
+    if (body.result !== undefined) existing.result = body.result as GenerationResultItem[];
+
+    fs.writeFileSync(filePath, JSON.stringify(existing, null, 2), 'utf-8');
+
+    return {
+        status: 200,
+        response: {
+            generation: existing
         }
     };
 });
