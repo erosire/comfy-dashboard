@@ -100,10 +100,28 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
                     response: { error: 'Spawner returned redirect with no Location header' }
                 };
             }
+
+            // The pod may not be ready yet — probe its Tier 2 proxy
+            // to get the health + models listing.
+            let statusData: any;
+            try {
+                const statusUpstream = await fetch(location, {
+                    method: 'GET',
+                    headers: { Accept: 'application/json' }
+                });
+                statusData = await statusUpstream.json();
+            } catch (err: any) {
+                console.error(`[cloud] Initial status probe failed for ${location}:`, err.message);
+                statusData = { error: `Status probe failed: ${err.message}` };
+            }
+
+            console.log('[cloud] spawn status response:', JSON.stringify(statusData, null, 2));
+
             return {
                 status: 200,
                 response: {
-                    pod_url: location
+                    pod_url: location,
+                    ...statusData
                 }
             };
         }

@@ -1574,36 +1574,46 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         setSelectedPodId(id);
     }, []);
 
-    // ── Periodic health check (keepalive + status) ──────────────────
+    // ── Keepalive heartbeat ─────────────────────────────────────────
+    // Pods scale to zero ~120s after the last active connection.
+    // HIT GET <pod_url>/ periodically to reset that idle timer.
+    // Skips the tick if the previous one is still in flight (cold start).
 
     const podsRef = React.useRef(pods);
     podsRef.current = pods;
 
     React.useEffect(() => {
+        let running = false;
         const interval = setInterval(async () => {
-            const currentPods = podsRef.current;
-            for (const p of currentPods) {
-                if (p.status !== 'ready' || !p.pod_url) continue;
-                try {
-                    const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
-                    if ('health' in result) {
+            if (running) return; // previous tick still in flight — skip
+            running = true;
+            try {
+                const currentPods = podsRef.current;
+                for (const p of currentPods) {
+                    if (p.status !== 'ready' || !p.pod_url) continue;
+                    try {
+                        const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
+                        if ('health' in result) {
+                            setPods((prev) =>
+                                prev.map((ep) =>
+                                    ep.id === p.id ? { ...ep, health: result as CloudPodStatusResult } : ep
+                                )
+                            );
+                        }
+                    } catch (err: any) {
                         setPods((prev) =>
                             prev.map((ep) =>
-                                ep.id === p.id ? { ...ep, health: result as CloudPodStatusResult } : ep
+                                ep.id === p.id
+                                    ? { ...ep, status: 'error', error: err.message ?? String(err) }
+                                    : ep
                             )
                         );
                     }
-                } catch (err: any) {
-                    setPods((prev) =>
-                        prev.map((ep) =>
-                            ep.id === p.id
-                                ? { ...ep, status: 'error', error: err.message ?? String(err) }
-                                : ep
-                        )
-                    );
                 }
+            } finally {
+                running = false;
             }
-        }, 60_000);
+        }, 30_000);
         return () => clearInterval(interval);
     }, [baseUrl]);
 

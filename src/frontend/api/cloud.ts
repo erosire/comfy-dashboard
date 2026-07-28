@@ -18,6 +18,13 @@
 
 export type CloudCreateResult = {
     pod_url: string;
+    health?: {
+        healthy: boolean;
+        system_stats?: Record<string, unknown>;
+        error?: string;
+    };
+    models_dir?: string;
+    models?: Record<string, string[]>;
 };
 
 export type CloudPodStatusResult = {
