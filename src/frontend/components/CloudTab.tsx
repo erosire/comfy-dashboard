@@ -84,17 +84,7 @@ const BtnDanger = styled('button')({
     transition: `background-color ${theme.transition}, color ${theme.transition}`,
 });
 
-const BtnSuccess = styled('button')({
-    padding: '5px 14px',
-    fontSize: theme.fontSize.sm,
-    fontWeight: 600,
-    borderRadius: theme.radiusMd,
-    cursor: 'pointer',
-    border: `1px solid rgba(110, 231, 183, 0.35)`,
-    backgroundColor: theme.successSoft,
-    color: theme.success,
-    transition: `background-color ${theme.transition}, color ${theme.transition}`,
-});
+
 
 const Badge = styled('span')({
     display: 'inline-flex',
@@ -428,20 +418,6 @@ const DialogInput = styled('input')({
     border: `1px solid ${theme.border}`,
     borderRadius: theme.radiusSm,
     outline: 'none',
-    transition: `border-color ${theme.transition}`,
-});
-
-const DialogTextArea = styled('textarea')({
-    padding: '6px 10px',
-    fontSize: theme.fontSize.sm,
-    fontFamily: theme.fontSans,
-    color: theme.text,
-    backgroundColor: theme.surface3,
-    border: `1px solid ${theme.border}`,
-    borderRadius: theme.radiusSm,
-    outline: 'none',
-    resize: 'vertical' as const,
-    minHeight: 60,
     transition: `border-color ${theme.transition}`,
 });
 
@@ -1223,7 +1199,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
     const {
         store,
         createWorkflow,
-        updateWorkflow,
         deleteWorkflow,
         cloneWorkflow,
         selectWorkflow,
@@ -1245,10 +1220,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         return true;
     });
     const [searchText, setSearchText] = React.useState(store.searchQuery);
-    const [saveDialogOpen, setSaveDialogOpen] = React.useState(false);
-    const [saveName, setSaveName] = React.useState('');
-    const [saveDesc, setSaveDesc] = React.useState('');
-    const [saving, setSaving] = React.useState(false);
+
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1296,6 +1268,20 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         }
     }, [store.selectedWorkflow]);
 
+    // ── Auto-save workflow on drop ──────────────────────────────────
+
+    const autoSaveWorkflow = React.useCallback(async (raw: Record<string, unknown>, name: string) => {
+        try {
+            const created = await createWorkflow({
+                name,
+                raw,
+            });
+            selectWorkflow(created.id);
+        } catch (err: any) {
+            alert(`Failed to auto-save: ${err.message ?? String(err)}`);
+        }
+    }, [createWorkflow, selectWorkflow]);
+
     // ── File handling ────────────────────────────────────────────────
 
     const handleFile = React.useCallback((file: File) => {
@@ -1305,19 +1291,18 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
                 setRawJson(parsed);
                 setNodes(renumberNodes(sortNodes(parseWorkflowJson(parsed))));
+                const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
                 setFileName(file.name);
                 setPod({ status: 'idle' });
                 setRun({ status: 'idle' });
-                // Deselect any saved workflow since this is new unsaved content
-                if (editingWorkflowId) {
-                    selectWorkflow(null);
-                }
+                // Auto-save the workflow with the filename as the name
+                autoSaveWorkflow(parsed, name);
             } catch {
                 alert('Invalid JSON file');
             }
         };
         reader.readAsText(file);
-    }, [editingWorkflowId, selectWorkflow]);
+    }, [autoSaveWorkflow]);
 
     const handleDrop = React.useCallback((e: React.DragEvent) => {
         e.preventDefault();
@@ -1380,85 +1365,18 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         return prompt;
     }, [nodes]);
 
-    // Rebuild rawJson from nodes for saving
-    const rebuildRawJson = React.useCallback((): Record<string, unknown> => {
-        if (rawJson) {
-            const prompt: Record<string, unknown> = {};
-            for (const node of nodes) {
-                const inputs: Record<string, unknown> = {};
-                for (const conn of node.connections) {
-                    inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
-                }
-                for (const widget of node.widgets) {
-                    inputs[`widget_${widget.index}`] = widget.value;
-                }
-                prompt[node.id] = { class_type: node.classType, inputs };
-            }
-            if ('prompt' in rawJson) {
-                return { ...rawJson, prompt };
-            }
-            return prompt;
-        }
-        // Fallback
-        const prompt: Record<string, unknown> = {};
-        for (const node of nodes) {
-            const inputs: Record<string, unknown> = {};
-            for (const conn of node.connections) {
-                inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
-            }
-            for (const widget of node.widgets) {
-                inputs[`widget_${widget.index}`] = widget.value;
-            }
-            prompt[node.id] = { class_type: node.classType, inputs };
-        }
-        return prompt;
-    }, [rawJson, nodes]);
+    // ── Auto-save workflow on drop ──────────────────────────────────
 
-    // ── Save / Update workflow ───────────────────────────────────────
+    // ── Copy JSON to clipboard ───────────────────────────────────────
 
-    const handleSaveDialogOpen = React.useCallback(() => {
-        if (isEditingSaved && store.selectedWorkflow) {
-            // Pre-fill with existing workflow data
-            setSaveName(store.selectedWorkflow.name);
-            setSaveDesc(store.selectedWorkflow.description ?? '');
-        } else {
-            // New workflow — suggest name from filename
-            const suggestedName = fileName.replace(/\.json$/i, '') || 'Untitled Workflow';
-            setSaveName(suggestedName);
-            setSaveDesc('');
-        }
-        setSaveDialogOpen(true);
-    }, [isEditingSaved, store.selectedWorkflow, fileName]);
-
-    const handleSaveConfirm = React.useCallback(async () => {
-        if (!saveName.trim() || nodes.length === 0) return;
-        setSaving(true);
+    const handleCopyJson = React.useCallback(async () => {
+        if (!rawJson) return;
         try {
-            const raw = rebuildRawJson();
-            if (isEditingSaved && editingWorkflowId) {
-                // Update existing
-                await updateWorkflow(editingWorkflowId, {
-                    name: saveName.trim(),
-                    description: saveDesc.trim() || undefined,
-                    raw,
-                });
-            } else {
-                // Create new
-                const created = await createWorkflow({
-                    name: saveName.trim(),
-                    description: saveDesc.trim() || undefined,
-                    raw,
-                });
-                // Select the newly created workflow
-                selectWorkflow(created.id);
-            }
-            setSaveDialogOpen(false);
-        } catch (err: any) {
-            alert(`Failed to save: ${err.message ?? String(err)}`);
-        } finally {
-            setSaving(false);
+            await navigator.clipboard.writeText(JSON.stringify(rawJson, null, 2));
+        } catch {
+            alert('Failed to copy to clipboard');
         }
-    }, [saveName, saveDesc, nodes, rebuildRawJson, isEditingSaved, editingWorkflowId, updateWorkflow, createWorkflow, selectWorkflow]);
+    }, [rawJson]);
 
     // ── Clone workflow ───────────────────────────────────────────────
 
@@ -1539,20 +1457,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
         }
     }, [baseUrl, pod, nodes, buildPrompt]);
 
-    const handleClear = React.useCallback(() => {
-        setNodes([]);
-        setRawJson(null);
-        setFileName('');
-        setPod({ status: 'idle' });
-        setRun({ status: 'idle' });
-        selectWorkflow(null);
-    }, [selectWorkflow]);
 
     // ── Derived ──────────────────────────────────────────────────────
 
     const isRunning = run.status === 'running';
     const hasEvents = 'events' in run && run.events.length > 0;
-    const hasUnsavedChanges = nodes.length > 0 && !isEditingSaved;
 
     // ── Sidebar: workflow list panel ────────────────────────────────
 
@@ -1589,7 +1498,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                             style={isActive ? {} : undefined}
                             className={(isActive ? '' : '')}
                         >
-                            <WorkflowItemName>{wf.name} <WorkflowItemCount>({wf.nodeCount} nodes)</WorkflowItemCount></WorkflowItemName>
+                            <WorkflowItemName>{wf.name}</WorkflowItemName>
                         </Item>
                     );
                 })}
@@ -1670,22 +1579,33 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                                     ({nodes.length} nodes)
                                 </span>
                             </div>
-                            {isEditingSaved && (
+                            {nodes.length > 0 && (
                                 <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                                     <Btn
                                         className="sg-hover"
-                                        onClick={handleClone}
+                                        onClick={handleCopyJson}
                                         style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
                                     >
-                                        Clone
+                                        Copy
                                     </Btn>
-                                    <BtnDanger
-                                        className="sg-danger"
-                                        onClick={handleDelete}
-                                        style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
-                                    >
-                                        Delete
-                                    </BtnDanger>
+                                    {isEditingSaved && (
+                                        <>
+                                            <Btn
+                                                className="sg-hover"
+                                                onClick={handleClone}
+                                                style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
+                                            >
+                                                Clone
+                                            </Btn>
+                                            <BtnDanger
+                                                className="sg-danger"
+                                                onClick={handleDelete}
+                                                style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
+                                            >
+                                                Delete
+                                            </BtnDanger>
+                                        </>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1902,26 +1822,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
 
     const footer = (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
-            {nodes.length > 0 && (
-                <>
-                    {isEditingSaved ? (
-                        <BtnSuccess className="sg-hover" onClick={handleSaveDialogOpen}>
-                            Update
-                        </BtnSuccess>
-                    ) : (
-                        <BtnSuccess className="sg-hover" onClick={handleSaveDialogOpen}>
-                            Save
-                        </BtnSuccess>
-                    )}
-                </>
-            )}
-            {nodes.length > 0 && (
-                <BtnDanger className="sg-danger" onClick={handleClear}>Clear</BtnDanger>
-            )}
-            {fileName && (
-                <Badge>{fileName} ({nodes.length} nodes)</Badge>
-            )}
-
             {/* Run status */}
             {hasEvents && (
                 <Badge style={{ color: run.status === 'error' ? theme.danger : run.status === 'done' ? theme.success : theme.accent }}>
@@ -1956,11 +1856,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 ☰
             </ToggleButton>
             <HeaderTitle>Comfy Dashboard</HeaderTitle>
-            {hasUnsavedChanges && (
-                <Badge style={{ marginLeft: 4, color: theme.warning, borderColor: theme.warningSoft }}>
-                    ● Unsaved
-                </Badge>
-            )}
             {pod.status === 'spawning' && <Badge><SpinnerEl /> Spawning...</Badge>}
             {pod.status === 'ready' && (
                 <Badge style={{ marginLeft: 8 }}>
@@ -2005,50 +1900,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({
                 content={content}
                 footer={footer}
             />
-
-            {/* Save dialog */}
-            {saveDialogOpen && (
-                <DialogOverlay onClick={() => setSaveDialogOpen(false)}>
-                    <DialogBox onClick={(e) => e.stopPropagation()} data-testid="save-dialog">
-                        <DialogTitle>
-                            {isEditingSaved ? 'Update Workflow' : 'Save Workflow'}
-                        </DialogTitle>
-                        <DialogField>
-                            <DialogLabel htmlFor="save-name">Name</DialogLabel>
-                            <DialogInput
-                                id="save-name"
-                                type="text"
-                                value={saveName}
-                                onChange={(e) => setSaveName(e.target.value)}
-                                placeholder="Workflow name"
-                                autoFocus
-                                data-testid="save-name-input"
-                            />
-                        </DialogField>
-                        <DialogField>
-                            <DialogLabel htmlFor="save-desc">Description (optional)</DialogLabel>
-                            <DialogTextArea
-                                id="save-desc"
-                                value={saveDesc}
-                                onChange={(e) => setSaveDesc(e.target.value)}
-                                placeholder="Short description..."
-                                data-testid="save-desc-input"
-                            />
-                        </DialogField>
-                        <DialogActions>
-                            <Btn className="sg-hover" onClick={() => setSaveDialogOpen(false)}>Cancel</Btn>
-                            <BtnPrimary
-                                className="sg-primary"
-                                onClick={handleSaveConfirm}
-                                disabled={saving || !saveName.trim()}
-                                data-testid="save-confirm-btn"
-                            >
-                                {saving ? 'Saving...' : isEditingSaved ? 'Update' : 'Save'}
-                            </BtnPrimary>
-                        </DialogActions>
-                    </DialogBox>
-                </DialogOverlay>
-            )}
 
             {/* Spawn Pod dialog */}
             {spawnDialogOpen && (
