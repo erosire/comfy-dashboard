@@ -470,9 +470,9 @@ const InputLabel = styled('span')({
 //
 // Replaces the previous single-line <input> so prompt-style widgets can span
 // multiple lines. The field grows to fit its content (pressing Enter inserts
-// a newline) and re-fits when the value or the field's width changes. A
-// generous maxHeight keeps extremely long prompts from stretching the node
-// card without bound; beyond it the field scrolls internally.
+// a newline) and re-fits when the value or the field's width changes. It is
+// capped at 8 visible rows (8 × 1.4em line-height + 6px vertical padding,
+// border-box); beyond that the field scrolls internally.
 const WidgetTextarea = styled('textarea')({
     flex: '1 1 auto',
     padding: '3px 6px',
@@ -489,7 +489,8 @@ const WidgetTextarea = styled('textarea')({
     overflowY: 'auto' as const,
     lineHeight: 1.4,
     height: 'auto',
-    maxHeight: '60vh'
+    // 8 rows × 1.4em line-height + 6px vertical padding (border-box).
+    maxHeight: 'calc(8 * 1.4em + 6px)'
 });
 
 const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAreaElement>> = (props) => {
