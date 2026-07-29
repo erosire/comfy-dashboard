@@ -5,7 +5,10 @@
 //     ├── workflow.json
 //     ├── meta.json
 //     └── generation/
-//           └── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, stream, ... }
+//           ├── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, stream, ... }
+//           └── YYYYMMDD-HHMMSS.log    ← timestamped processing log, written by
+//                                        POST /v1/comfy/cloud/prompt while it
+//                                        consumes the pod's NDJSON stream
 //
 //   The snapshotted prompt is the request's optional { prompt } body when
 //   provided (the UI sends the API prompt built from its live edited node

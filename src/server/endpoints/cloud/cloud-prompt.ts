@@ -24,6 +24,7 @@
 import { randomUUID } from 'node:crypto';
 import { asHandlerMethod } from '@underload/service';
 import {
+    appendGenerationLog,
     patchGenerationFile,
     type GenerationResultItem,
     type StreamEvent
@@ -199,10 +200,18 @@ async function processPodPromptInBackground(
     let failureMessage: string | null = null;
     const clientId = promptPayload.client_id as string | undefined;
 
+    // Append a timestamped line to <generationId>.log (next to the .json)
+    // at every status change and streamed event. Best-effort — never throws.
+    const log = (message: string) =>
+        appendGenerationLog(root, workflowId, generationId, message);
+
+    log(`Generation started — submitting to ${podUrl.toString()} (client_id: ${clientId ?? 'n/a'})`);
+
     try {
         // Mark the generation as picked up so pollers see live progress
         const patched = patchGenerationFile(root, workflowId, generationId, { status: 'processing' });
         if (!patched) {
+            log(`Generation '${generationId}' not found — aborting background processing`);
             console.warn(`[cloud/prompt] Generation '${generationId}' not found — aborting background processing`);
             return;
         }
@@ -222,6 +231,7 @@ async function processPodPromptInBackground(
             // @ts-expect-error -- Node.js fetch extension for disabling body timeout on streams
             bodyTimeout: 0,
         });
+        log(`Pod responded HTTP ${upstream.status}`);
 
         if (!upstream.ok) {
             const errorBody = await upstream
@@ -229,11 +239,13 @@ async function processPodPromptInBackground(
                 .catch(() => ({ error: `Pod returned HTTP ${upstream.status}` }));
             failureMessage =
                 (errorBody as { error?: string })?.error ?? `Pod returned HTTP ${upstream.status}`;
+            log(`Pod error response: ${failureMessage}`);
         } else {
-            failureMessage = await consumeNdjsonStream(upstream, events, results);
+            failureMessage = await consumeNdjsonStream(upstream, events, results, log);
         }
     } catch (err: any) {
         failureMessage = err.message ?? String(err);
+        log(`Exception while processing: ${failureMessage}`);
     }
 
     // Persist the final state — stream + results into the generation json
@@ -248,6 +260,7 @@ async function processPodPromptInBackground(
             generatedTime: elapsed,
             completedDate
         });
+        log(`Generation FAILED in ${elapsed}: ${failureMessage} (${events.length} event(s), ${results.length} result(s))`);
         console.error(
             `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed ` +
             `in ${elapsed}: ${failureMessage}`
@@ -261,6 +274,7 @@ async function processPodPromptInBackground(
             generatedTime: elapsed,
             completedDate
         });
+        log(`Generation COMPLETED in ${elapsed} — ${events.length} event(s), ${results.length} result(s)`);
         console.log(
             `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${clientId}) completed ` +
             `in ${elapsed} — ${events.length} stream event(s), ${results.length} result(s)`
@@ -272,14 +286,21 @@ async function processPodPromptInBackground(
  * Read the pod's NDJSON response to completion, collecting every event
  * into `events` and image previews into `results`.
  * Returns a failure message on execution_error/proxy_error, else null.
+ *
+ * Each event is also appended to the generation's .log (via `log`) so the
+ * run leaves a chronological, human-readable trail next to its .json.
  */
 async function consumeNdjsonStream(
     upstream: Response,
     events: StreamEvent[],
-    results: GenerationResultItem[]
+    results: GenerationResultItem[],
+    log: (message: string) => void
 ): Promise<string | null> {
     const reader = (upstream.body as ReadableStream<Uint8Array> | null)?.getReader();
-    if (!reader) return 'Pod returned an empty body';
+    if (!reader) {
+        log('Pod returned an empty body — no stream to consume');
+        return 'Pod returned an empty body';
+    }
 
     const decoder = new TextDecoder();
     let buffer = '';
@@ -301,7 +322,10 @@ async function consumeNdjsonStream(
     const handleEvent = (event: StreamEvent): boolean => {
         if (event.type === 'proxy_enqueue') {
             const pid = (event.data as Record<string, unknown>)?.prompt_id;
-            if (typeof pid === 'string') ourPromptId = pid;
+            if (typeof pid === 'string') {
+                ourPromptId = pid;
+                log(`Enqueued — prompt_id: ${pid}`);
+            }
         } else {
             const pid = (event.data as Record<string, unknown>)?.prompt_id;
             if (ourPromptId && typeof pid === 'string' && pid !== ourPromptId) {
@@ -310,10 +334,14 @@ async function consumeNdjsonStream(
         }
 
         events.push(event);
+        log(`Event: ${event.type} ${summarizeEventData(event.data)}`);
 
         // Capture image previews as results
         const preview = extractPreviewResult(event);
-        if (preview) results.push(preview);
+        if (preview) {
+            results.push(preview);
+            log(`Captured preview image from node ${preview.nodeId} (${preview.mimeType}, ${preview.size} bytes)`);
+        }
 
         if (event.type === 'execution_error' || event.type === 'proxy_error') {
             const data = event.data as Record<string, unknown>;
@@ -321,9 +349,14 @@ async function consumeNdjsonStream(
                 (data?.exception_message as string) ??
                 (data?.error as string) ??
                 `Generation failed (${event.type})`;
+            log(`Terminal error (${event.type}): ${failureMessage}`);
             return true;
         }
-        return event.type === 'proxy_done';
+        if (event.type === 'proxy_done') {
+            log('proxy_done — stream ending');
+            return true;
+        }
+        return false;
     };
 
     try {
@@ -343,6 +376,7 @@ async function consumeNdjsonStream(
                 try {
                     event = JSON.parse(trimmed) as StreamEvent;
                 } catch {
+                    log('Skipping malformed NDJSON line');
                     console.warn('[cloud/prompt] Skipping malformed NDJSON line');
                     continue;
                 }
@@ -366,6 +400,37 @@ async function consumeNdjsonStream(
     }
 
     return failureMessage;
+}
+
+/**
+ * Produce a compact one-line summary of a stream event's data for the .log.
+ *
+ * Large payloads are reduced to a length placeholder so the log stays
+ * readable and small — notably the base64 `image` data URL carried by
+ * `imagepreview.update` events, which can be megabytes per line.
+ */
+function summarizeEventData(data: Record<string, unknown>): string {
+    const parts: string[] = [];
+    for (const [key, val] of Object.entries(data)) {
+        if (key === 'image' && typeof val === 'string') {
+            // base64 data URL — never dump the payload, just its size
+            parts.push(`${key}=<${val.length} chars>`);
+        } else if (typeof val === 'string') {
+            parts.push(`${key}=${val.length > 80 ? val.slice(0, 80) + '…' : val}`);
+        } else if (typeof val === 'number' || typeof val === 'boolean') {
+            parts.push(`${key}=${String(val)}`);
+        } else if (val == null) {
+            parts.push(`${key}=null`);
+        } else {
+            try {
+                const j = JSON.stringify(val) ?? '';
+                parts.push(`${key}=${j.length > 80 ? j.slice(0, 80) + '…' : j}`);
+            } catch {
+                parts.push(`${key}=?`);
+            }
+        }
+    }
+    return parts.join(' ');
 }
 
 /**

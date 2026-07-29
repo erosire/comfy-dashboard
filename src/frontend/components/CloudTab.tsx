@@ -1852,15 +1852,19 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         [selectWorkflow]
     );
 
-    // When selectedWorkflow changes, parse its raw JSON into nodes
+    // When selectedWorkflow changes, parse its raw JSON into nodes.
+    //
+    // Pods are intentionally NOT reset here: a pod is an independent Beam
+    // cloud instance — switching workflows must not destroy it. The pod
+    // buttons (and their monotonic pod-number counter) persist across
+    // workflow loads, so a pod spawned while editing one workflow can be
+    // reused to queue a generation on any other workflow.
     React.useEffect(() => {
         const full = store.selectedWorkflow;
         if (full && full.raw) {
             setRawJson(full.raw);
             setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(full.raw))));
             setFileName(`${full.name}.json`);
-            setPods([]);
-            podCounterRef.current = 0;
         }
     }, [store.selectedWorkflow]);
 
@@ -1893,9 +1897,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(parsed))));
                     const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
                     setFileName(file.name);
-                    setPods([]);
-                    podCounterRef.current = 0;
-                    // Auto-save the workflow with the filename as the name
+                    // Auto-save the workflow with the filename as the name.
+                    // Pods are independent of workflows — do not reset them.
                     autoSaveWorkflow(parsed, name);
                 } catch {
                     alert('Invalid JSON file');
@@ -2005,12 +2008,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         if (!confirm('Delete this workflow permanently?')) return;
         try {
             await deleteWorkflow(editingWorkflowId);
-            // Clear editor
+            // Clear editor. Pods are independent Beam cloud instances —
+            // deleting a workflow must not destroy them; they remain usable
+            // with whichever workflow is loaded next.
             setNodes([]);
             setRawJson(null);
             setFileName('');
-            setPods([]);
-            podCounterRef.current = 0;
         } catch (err: any) {
             alert(`Failed to delete: ${err.message ?? String(err)}`);
         }

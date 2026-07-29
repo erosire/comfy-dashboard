@@ -50,6 +50,50 @@ export function generationFilePath(root: string, workflowId: string, generateId:
     );
 }
 
+/**
+ * Path of the human-readable log file kept next to a generation json.
+ *
+ *   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>.log
+ *
+ * The cloud prompt endpoint appends a timestamped line per status change
+ * and per streamed event while it processes a generation server-side, so
+ * the run can be reviewed after (or during) completion without replaying
+ * the raw NDJSON stream.
+ */
+export function generationLogPath(root: string, workflowId: string, generateId: string): string {
+    return path.join(
+        root,
+        'temporary/database/comfy-workflows',
+        workflowId,
+        'generation',
+        `${generateId}.log`
+    );
+}
+
+/**
+ * Append a timestamped line to the generation's .log file (next to its .json).
+ *
+ * Logging is best-effort: any write failure is swallowed so a broken log
+ * never fails an in-flight generation. The generation directory is created
+ * on demand (the .json writer usually creates it first, but we ensure it
+ * exists to stay self-contained).
+ */
+export function appendGenerationLog(
+    root: string,
+    workflowId: string,
+    generateId: string,
+    message: string
+): void {
+    try {
+        const logPath = generationLogPath(root, workflowId, generateId);
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        const line = `[${new Date().toISOString()}] ${message}\n`;
+        fs.appendFileSync(logPath, line, 'utf-8');
+    } catch {
+        // Best-effort — never fail a generation over a log write.
+    }
+}
+
 /** Read + normalize a generation file. Returns null if missing or corrupted. */
 export function readGenerationFile(
     root: string,
