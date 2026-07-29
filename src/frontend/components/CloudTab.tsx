@@ -1029,10 +1029,32 @@ function workflowNodeToUINode(
             widgets.push({ value: val, index: i });
         });
     } else if (node.widgets_values && typeof node.widgets_values === 'object') {
-        // Record<string, unknown> form — newer format
+        // Record<string, unknown> form — newer format. The key IS the
+        // widget name, so record it for unregistered-node fallback.
         Object.entries(node.widgets_values as Record<string, unknown>).forEach(([key, val], i) => {
-            widgets.push({ value: val, index: i });
+            widgets.push({ value: val, index: i, inferredName: key });
         });
+    }
+
+    // For unregistered nodes, infer widget names from converted-to-input
+    // slots. Each entry in `inputs` with a `widget` field is a widget that
+    // was promoted to an input slot; its `widget.name` (or the slot's own
+    // `name`) is the API prompt input key. We assume the Nth converted
+    // widget maps to the Nth `widgets_values` entry — this holds when
+    // widgets are converted in INPUT_TYPES order (the common case, and
+    // always true for subgraph-promoted widgets).
+    if (!comfyNodeRegistry[node.type ?? '']) {
+        const convertedNames: string[] = [];
+        for (const inp of node.inputs ?? []) {
+            const widgetField = inp.widget as { name?: string } | undefined;
+            const name = widgetField?.name ?? inp.name;
+            if (widgetField && typeof name === 'string') {
+                convertedNames.push(name);
+            }
+        }
+        for (let i = 0; i < convertedNames.length && i < widgets.length; i++) {
+            widgets[i] = { ...widgets[i], inferredName: convertedNames[i] };
+        }
     }
 
     return {
@@ -1077,7 +1099,9 @@ function apiPromptNodeToUINode(id: string, node: ApiPromptNode): UINode {
                 sourceSlot: val[1]
             });
         } else {
-            widgets.push({ value: val, index: widgetIdx++ });
+            // The key IS the widget name in API prompt format — record it
+            // so unregistered nodes can round-trip correctly.
+            widgets.push({ value: val, index: widgetIdx++, inferredName: key });
         }
     }
 
@@ -1474,28 +1498,42 @@ function eventSummary(event: CloudStreamEvent): string {
 /**
  * Assemble a flat API prompt from a list of already-flattened UI nodes.
  *
- * Linked connections become [sourceNodeId, sourceSlot] tuples; widget
- * values are keyed by their registry name when available and skipped
- * otherwise (e.g. TemporaryImagePreview has widgets_values: [""] but its
- * registry defines widgets: [] — the value is an internal/hidden widget
- * that has no corresponding API input).
+ * Widget values are emitted first (keyed by their registry name, or by the
+ * inferred name for unregistered nodes), then linked connections override
+ * them — so a widget that has been converted to a connected input slot
+ * sends the link reference, not the stale widget value. A converted
+ * widget whose connection was removed (e.g. an unconnected subgraph
+ * input port whose -10 sentinel was filtered out) falls back to its
+ * widget value, which is the correct ComfyUI behaviour.
  */
 function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
     const prompt: Record<string, unknown> = {};
     for (const node of flat) {
         const inputs: Record<string, unknown> = {};
 
-        // Linked connections → [sourceNodeId, sourceSlot]
-        for (const conn of node.connections) {
-            inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
-        }
-
         const registryEntry = comfyNodeRegistry[node.classType];
+
+        // ── Widget values (emitted first; connections override below) ──
         for (const widget of node.widgets) {
             const regWidget = registryEntry?.widgets[widget.index];
             if (regWidget) {
                 inputs[regWidget.name] = widget.value;
+            } else if (widget.inferredName) {
+                // Unregistered node — use the name inferred from the
+                // workflow's converted-to-input slots or Record-style
+                // widgets_values keys.
+                inputs[widget.inferredName] = widget.value;
             }
+            // Registered nodes with undefined registry widgets (e.g.
+            // TemporaryImagePreview's hidden internal widget) are
+            // intentionally skipped — they have no API input.
+        }
+
+        // ── Linked connections → [sourceNodeId, sourceSlot] ──
+        // Processed AFTER widgets so a connected converted-widget input
+        // overrides the (stale) widget value.
+        for (const conn of node.connections) {
+            inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
         }
 
         prompt[node.id] = { class_type: node.classType, inputs };
@@ -1513,7 +1551,7 @@ function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
  *
  * If the input is already in API prompt format, it is returned as-is.
  */
-function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unknown> {
+export function workflowToApiPrompt(raw: Record<string, unknown>): Record<string, unknown> {
     // Already in API prompt format (flat dict of {class_type, inputs})?
     if (!Array.isArray(raw.nodes)) {
         return raw;

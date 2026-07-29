@@ -63,6 +63,18 @@ export type UIWidget = {
     value: unknown;
     /** Index of this widget in the widgets_values array. */
     index: number;
+    /**
+     * Inferred widget name — the API prompt input key for this widget.
+     *
+     * Populated for unregistered nodes from the workflow JSON's `inputs`
+     * array (each converted-to-input slot carries `widget.name`) or from
+     * the Record-style `widgets_values` keys. Registered nodes use the
+     * registry instead and leave this `undefined`.
+     *
+     * Also populated when parsing API prompt format (the `inputs` dict
+     * key IS the widget name).
+     */
+    inferredName?: string;
 };
 
 /**

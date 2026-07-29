@@ -93,6 +93,18 @@ import { ConditioningZeroOut } from './ConditioningZeroOut';
 import { ReferenceLatent } from './ReferenceLatent';
 import { GetImageSize } from './GetImageSize';
 
+// Built-in ComfyUI primitives & text nodes
+import { PrimitiveBoolean } from './PrimitiveBoolean';
+import { PrimitiveStringMultiline } from './PrimitiveStringMultiline';
+import { StringConcatenate } from './StringConcatenate';
+import { LoraLoaderModelOnly } from './LoraLoaderModelOnly';
+import { ComfySwitchNode } from './ComfySwitchNode';
+import { PreviewAny } from './PreviewAny';
+import { TextGenerate } from './TextGenerate';
+
+// Custom node packs
+import { TextBox1 } from './TextBox1';
+
 // KJNodes
 import { ImageResizeKJv2 } from './ImageResizeKJv2';
 
@@ -214,6 +226,18 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     ConditioningZeroOut,
     ReferenceLatent,
     GetImageSize,
+
+    // Built-in ComfyUI primitives & text nodes
+    PrimitiveBoolean,
+    PrimitiveStringMultiline,
+    StringConcatenate,
+    LoraLoaderModelOnly,
+    ComfySwitchNode,
+    PreviewAny,
+    TextGenerate,
+
+    // Custom node packs
+    TextBox1,
 
     // KJNodes (kijai)
     ImageResizeKJv2,
