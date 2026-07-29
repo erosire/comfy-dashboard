@@ -2574,7 +2574,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             Generations <SidebarCount>({store.generations.length})</SidebarCount>
                         </span>
                     </SidebarHeader>
-                    <div style={{ padding: '0 6px 12px', overflowY: 'auto', flex: '1 1 auto' }}>
+                    {/* Cap the generations list at 50% of the sidebar height so
+                        it can never crowd out the Workflows list above it. The
+                        Workflows list (SidebarScroll, flex: 1 1 auto) keeps
+                        flex-grow: 1 and so always claims the remaining space.
+                        flex-grow: 0 here means Generations only takes what its
+                        content needs (up to the 50% cap) and scrolls internally
+                        beyond that, instead of growing to fill free space. */}
+                    <div style={{ padding: '0 6px 12px', overflowY: 'auto', flex: '0 1 auto', maxHeight: '50%' }}>
                         {store.generations.length === 0 && (
                             <EmptyHint>No generations yet.</EmptyHint>
                         )}
@@ -3298,7 +3305,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     <div
                         onClick={(e) => e.stopPropagation()}
                         style={{
-                            backgroundColor: theme.surface2,
+                            // Use the solid base surface (theme.bg) so the
+                            // dialog is fully opaque. The theme's surface*
+                            // tokens are translucent white overlays meant to
+                            // stack over this solid bg; using them here would
+                            // let the dashboard show through the modal backdrop.
+                            backgroundColor: theme.bg,
                             border: `1px solid ${theme.border}`,
                             borderRadius: theme.radiusLg,
                             padding: 20,
