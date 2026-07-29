@@ -530,3 +530,66 @@ describe('workflowToApiPrompt — fallback for truly unregistered nodes', () => 
         expect(unknownNode!.inputs.value).toBe(true);
     });
 });
+
+describe('workflowToApiPrompt — DynamicCombo sub-widget names are prefixed', () => {
+    it('emits sampling_mode sub-widgets with sampling_mode.* prefix', () => {
+        // TextGenerate uses a DynamicCombo ("sampling_mode"). Its sub-widgets
+        // (temperature, top_k, etc.) are flattened into widgets_values but
+        // must be emitted in the API prompt with the prefix
+        // "sampling_mode." — the ComfyUI frontend creates each sub-widget
+        // with the name `${comboName}.${subKey}` (dynamicWidgets.ts).
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'TextGenerate',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [
+                        { name: 'clip', type: 'CLIP', link: null },
+                        { name: 'prompt', type: 'STRING', widget: { name: 'prompt' }, link: null },
+                        { name: 'max_length', type: 'INT', widget: { name: 'max_length' }, link: null },
+                    ],
+                    outputs: [{ name: 'STRING', type: 'STRING', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [
+                        '',     // prompt
+                        512,    // max_length
+                        'on',   // sampling_mode
+                        0.7,    // temperature
+                        64,     // top_k
+                        0.95,   // top_p
+                        0.05,   // min_p
+                        1.05,   // repetition_penalty
+                        0,      // seed
+                        0,      // presence_penalty
+                        false,  // thinking
+                        true,   // use_default_template
+                    ],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'STRING')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const textGen = Object.values(prompt).find((n) => n.class_type === 'TextGenerate');
+        expect(textGen).toBeDefined();
+        // Sub-widget values must be emitted with the "sampling_mode." prefix
+        expect(textGen!.inputs['sampling_mode']).toBe('on');
+        expect(textGen!.inputs['sampling_mode.temperature']).toBe(0.7);
+        expect(textGen!.inputs['sampling_mode.top_k']).toBe(64);
+        expect(textGen!.inputs['sampling_mode.top_p']).toBe(0.95);
+        expect(textGen!.inputs['sampling_mode.min_p']).toBe(0.05);
+        expect(textGen!.inputs['sampling_mode.repetition_penalty']).toBe(1.05);
+        expect(textGen!.inputs['sampling_mode.seed']).toBe(0);
+        expect(textGen!.inputs['sampling_mode.presence_penalty']).toBe(0);
+        // Non-DynamicCombo widgets use their plain names
+        expect(textGen!.inputs['thinking']).toBe(false);
+        expect(textGen!.inputs['use_default_template']).toBe(true);
+    });
+});

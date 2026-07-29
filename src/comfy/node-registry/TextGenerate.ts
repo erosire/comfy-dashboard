@@ -3,9 +3,12 @@ import type { NodeWidgetLayout } from './types';
 // TextGenerate uses a DynamicCombo ("sampling_mode") whose sub-widgets
 // (temperature, top_k, top_p, min_p, repetition_penalty, seed,
 // presence_penalty) are flattened into `widgets_values` in the workflow
-// format. In the API prompt they are emitted as individual inputs —
-// the ComfyUI backend reassembles the DynamicCombo dict from them via
-// the schema's `dynamic_paths`.
+// format. In the API prompt they are emitted with PREFIXED names
+// (`sampling_mode.temperature`, `sampling_mode.top_k`, etc.) — the
+// ComfyUI frontend creates each sub-widget with the name
+// `${comboName}.${subKey}` (see dynamicWidgets.ts:dynamicComboWidget).
+// The backend's schema validation expands the DynamicCombo and looks for
+// these prefixed names via `dynamic_paths`.
 //
 // Widget order matches INPUT_TYPES() (comfy_extras/nodes_textgen.py):
 //   prompt, max_length, sampling_mode,
@@ -46,7 +49,7 @@ export const TextGenerate: NodeWidgetLayout = {
             default: 'on',
         },
         {
-            name: 'temperature',
+            name: 'sampling_mode.temperature',
             label: 'Temperature',
             widgetType: 'FLOAT',
             default: 0.7,
@@ -56,7 +59,7 @@ export const TextGenerate: NodeWidgetLayout = {
             display: 'number',
         },
         {
-            name: 'top_k',
+            name: 'sampling_mode.top_k',
             label: 'Top K',
             widgetType: 'INT',
             default: 64,
@@ -65,7 +68,7 @@ export const TextGenerate: NodeWidgetLayout = {
             display: 'number',
         },
         {
-            name: 'top_p',
+            name: 'sampling_mode.top_p',
             label: 'Top P',
             widgetType: 'FLOAT',
             default: 0.95,
@@ -75,7 +78,7 @@ export const TextGenerate: NodeWidgetLayout = {
             display: 'number',
         },
         {
-            name: 'min_p',
+            name: 'sampling_mode.min_p',
             label: 'Min P',
             widgetType: 'FLOAT',
             default: 0.05,
@@ -85,7 +88,7 @@ export const TextGenerate: NodeWidgetLayout = {
             display: 'number',
         },
         {
-            name: 'repetition_penalty',
+            name: 'sampling_mode.repetition_penalty',
             label: 'Repetition Penalty',
             widgetType: 'FLOAT',
             default: 1.05,
@@ -95,7 +98,7 @@ export const TextGenerate: NodeWidgetLayout = {
             display: 'number',
         },
         {
-            name: 'seed',
+            name: 'sampling_mode.seed',
             label: 'Seed',
             widgetType: 'INT',
             default: 0,
@@ -104,7 +107,7 @@ export const TextGenerate: NodeWidgetLayout = {
             display: 'number',
         },
         {
-            name: 'presence_penalty',
+            name: 'sampling_mode.presence_penalty',
             label: 'Presence Penalty',
             widgetType: 'FLOAT',
             default: 0.0,
