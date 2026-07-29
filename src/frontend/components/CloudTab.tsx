@@ -1793,6 +1793,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         selectWorkflow,
         searchWorkflows,
         refreshGenerations,
+        fetchGeneration,
         generateWorkflow,
         updateGeneration
     } = useDashboardStore();
@@ -1817,6 +1818,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [viewerOpen, setViewerOpen] = React.useState(false);
     const [viewerItems, setViewerItems] = React.useState<ViewerEntry[]>([]);
     const [viewerIndex, setViewerIndex] = React.useState(0);
+    // True while the full generation entry is being fetched for preview. The
+    // sidebar list is lightweight (no result payloads), so the viewer loads
+    // on demand via fetchGeneration when a generation is clicked.
+    const [viewerLoading, setViewerLoading] = React.useState(false);
     // Resolved URL (blob or raw) for the *current* item only. Rebuilt on each
     // navigation so blobs are added/removed as you move through the arrows.
     const [viewerBlobUrl, setViewerBlobUrl] = React.useState<string | null>(null);
@@ -1827,9 +1832,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     // viewer does NOT convert every item up front — instead it builds a blob
     // URL for the current item only and revokes it when you navigate away
     // (or close). So blobs are added and removed as you move through the
-    // arrows. The flat list spans every result item across ALL generations of
-    // the current workflow, so ←/→ cycle through the whole workflow, not
-    // just the one run you clicked.
+    // arrows.
+    //
+    // The sidebar list is lightweight (GenerationSummary — no result
+    // payloads), so opening the viewer fetches the FULL generation entry on
+    // demand via GET /v1/comfy/workflows/{id}/generate/{generate_id}. The
+    // viewer is scoped to that single generation's results; ←/→ cycle
+    // within it. This keeps the polling list tiny (no megabytes of base64
+    // per generation) while still loading the images when actually needed.
 
     const revokeCurrentViewerBlob = React.useCallback(() => {
         if (viewerBlobUrlRef.current) {
@@ -1839,28 +1849,31 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     }, []);
 
     const openViewer = React.useCallback(
-        (startGenerationId: string) => {
-            // Flatten every result item across all generations of the current
-            // workflow so the arrows can cycle through them all. The viewer
-            // opens at the first item of the clicked generation.
-            const flat: ViewerEntry[] = [];
-            let startIndex = 0;
-            let found = false;
-            for (const gen of store.generations) {
-                if (gen.id === startGenerationId && !found) {
-                    startIndex = flat.length;
-                    found = true;
-                }
-                for (const item of gen.result) {
-                    flat.push({ ...item, generationId: gen.id });
-                }
+        async (startGenerationId: string) => {
+            const workflowId = store.selectedId;
+            if (!workflowId) return;
+            // The sidebar list carries no result payloads — fetch the full
+            // generation on demand. This is the only path that needs the
+            // actual image/video data, so the heavy payload is loaded only
+            // when the user previews a generation.
+            setViewerLoading(true);
+            try {
+                const generation = await fetchGeneration(workflowId, startGenerationId);
+                const items: ViewerEntry[] = (generation.result ?? []).map((item) => ({
+                    ...item,
+                    generationId: generation.id
+                }));
+                if (items.length === 0) return;
+                setViewerItems(items);
+                setViewerIndex(0);
+                setViewerOpen(true);
+            } catch (err) {
+                console.error(`Failed to load generation ${startGenerationId}:`, err);
+            } finally {
+                setViewerLoading(false);
             }
-            if (flat.length === 0) return;
-            setViewerItems(flat);
-            setViewerIndex(startIndex);
-            setViewerOpen(true);
         },
-        [store.generations]
+        [store.selectedId, fetchGeneration]
     );
 
     const closeViewer = React.useCallback(() => {
@@ -2391,10 +2404,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 const genStart = performance.now();
                 const collectedResults: GenerationResultItem[] = [];
                 console.log(`[Agent] (${i + 1}/${pendingGenerations.length}) Submitting generation ${gen.id}...`);
-                console.log(`[Agent] Prompt payload:`, JSON.stringify(gen.prompt, null, 2));
 
                 try {
-                    const apiPrompt = workflowToApiPrompt(gen.prompt);
+                    // The list endpoint returns lightweight summaries (no
+                    // prompt), so fetch the full generation to get the
+                    // snapshotted prompt before submitting to the pod.
+                    const workflowId = editingWorkflowId;
+                    if (!workflowId) continue;
+                    const fullGen = await fetchGeneration(workflowId, gen.id);
+                    console.log(`[Agent] Prompt payload:`, JSON.stringify(fullGen.prompt, null, 2));
+                    const apiPrompt = workflowToApiPrompt(fullGen.prompt);
                     console.log(`[Agent] Converted API prompt:`, JSON.stringify(apiPrompt, null, 2));
 
                     const response = await cloudPrompt(baseUrl, {
@@ -2512,7 +2531,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 refreshGenerations(editingWorkflowId);
             }
         }
-    }, [agentRunning, baseUrl, store.generations, editingWorkflowId, updateGeneration, refreshGenerations]);
+    }, [agentRunning, baseUrl, store.generations, editingWorkflowId, updateGeneration, refreshGenerations, fetchGeneration]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection, so probing
@@ -2671,7 +2690,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             <EmptyHint>No generations yet.</EmptyHint>
                         )}
                         {store.generations.map((gen) => {
-                            const hasResults = gen.result && gen.result.length > 0;
+                            const hasResults = gen.resultCount > 0;
                             const genStatusColor =
                                 gen.status === 'completed'
                                     ? theme.success
@@ -2712,7 +2731,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                     marginLeft: 4
                                                 }}
                                             >
-                                                {gen.result.length} item{gen.result.length !== 1 ? 's' : ''}
+                                                {gen.resultCount} item{gen.resultCount !== 1 ? 's' : ''}
                                             </span>
                                         )}
                                     </QueueItemHeader>
@@ -3429,6 +3448,27 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             <BtnPrimary onClick={submitRename}>Save</BtnPrimary>
                         </div>
                     </div>
+                </div>
+            )}
+
+            {/* ── Image/Video Viewer loading overlay ─────────────────── */}
+            {viewerLoading && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 2000,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: 'rgba(0,0,0,0.85)',
+                        color: 'rgba(255,255,255,0.85)',
+                        gap: 12,
+                        fontSize: theme.fontSize.sm
+                    }}
+                >
+                    <SpinnerEl style={{ width: 28, height: 28, borderWidth: 3 }} />
+                    <span>Loading generation…</span>
                 </div>
             )}
 

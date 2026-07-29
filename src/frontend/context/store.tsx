@@ -12,11 +12,12 @@ import {
     updateWorkflow as updateWorkflowApi,
     generateWorkflow as generateWorkflowApi,
     fetchGenerations as fetchGenerationsApi,
+    fetchGeneration as fetchGenerationApi,
     updateGeneration as updateGenerationApi,
     fetchQueue,
     fetchStatus
 } from '../api';
-import type { WorkflowMeta, Workflow, QueueItem, ServerStatus, GenerationEntry, GenerationResultItem } from '../api';
+import type { WorkflowMeta, Workflow, QueueItem, ServerStatus, GenerationEntry, GenerationSummary, GenerationResultItem } from '../api';
 
 // ── localStorage helpers ──────────────────────────────────────────────
 const STORAGE_KEY_WORKFLOWS = 'comfyDashboard:workflows';
@@ -85,7 +86,7 @@ export type DashboardStore = {
     searchQuery: string;
     queue: QueueItem[];
     status: ServerStatus | null;
-    generations: GenerationEntry[];
+    generations: GenerationSummary[];
     config: {
         baseUrl: string;
         pollIntervalMs: number;
@@ -106,6 +107,7 @@ type DashboardStoreContextValue = {
     refreshQueue: () => Promise<void>;
     refreshStatus: () => Promise<void>;
     refreshGenerations: (workflowId: string) => Promise<void>;
+    fetchGeneration: (workflowId: string, generateId: string) => Promise<GenerationEntry>;
     generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>) => Promise<GenerationEntry>;
     updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>) => Promise<void>;
 };
@@ -305,6 +307,15 @@ export const DashboardStoreProvider: React.FC<{
         }
     }, [store.config.baseUrl, setStore]);
 
+    // Fetch a single generation's full data (prompt, result, stream). The
+    // list endpoint only returns lightweight summaries, so the UI calls
+    // this on demand when previewing a generation's outputs (or when an
+    // agent needs the snapshotted prompt to submit).
+    const fetchGeneration = useCallback(async (workflowId: string, generateId: string): Promise<GenerationEntry> => {
+        const { generation } = await fetchGenerationApi(`${store.config.baseUrl}`, workflowId, generateId);
+        return generation;
+    }, [store.config.baseUrl]);
+
     const updateGeneration = useCallback(async (
         workflowId: string,
         generateId: string,
@@ -334,6 +345,7 @@ export const DashboardStoreProvider: React.FC<{
             refreshQueue,
             refreshStatus,
             refreshGenerations,
+            fetchGeneration,
             generateWorkflow,
             updateGeneration
         }}>

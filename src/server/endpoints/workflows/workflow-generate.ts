@@ -14,15 +14,25 @@
 //   provided (the UI sends the API prompt built from its live edited node
 //   tree), falling back to the stored workflow.json otherwise.
 //
-// GET — Lists all generation files for the workflow.
+// GET (list) — Lists all generation files for the workflow as lightweight
+//   GenerationSummary entries (id, status, timestamps, resultCount). The
+//   heavy prompt / result / stream fields are omitted so the list loads
+//   fast; fetch the full entry with GET .../generate/{generate_id}.
+//
+// GET (one)  — Returns the complete GenerationEntry (prompt + result +
+//   stream) for a single generate_id. Used when previewing a generation's
+//   outputs.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 import {
     patchGenerationFile,
+    readGenerationFile,
+    toGenerationSummary,
     type GenerationEntry,
-    type GenerationPatch
+    type GenerationPatch,
+    type GenerationSummary
 } from './generation-store';
 
 function timestampFile(date: Date): string {
@@ -38,7 +48,7 @@ function timestampFile(date: Date): string {
     );
 }
 
-/** GET — List all generations for a workflow. */
+/** GET — List all generations for a workflow as lightweight summaries. */
 export const workflowGenerateList = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
     const workflowId = parameters.path.id;
@@ -56,33 +66,43 @@ export const workflowGenerateList = asHandlerMethod(async (_, parameters, variab
     }
 
     const entries = fs.readdirSync(generationDir, { withFileTypes: true });
-    const generations: GenerationEntry[] = [];
+    const summaries: GenerationSummary[] = [];
 
     for (const entry of entries) {
         if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-        try {
-            const raw = fs.readFileSync(path.join(generationDir, entry.name), 'utf-8');
-            const data = JSON.parse(raw);
-            generations.push({
-                id: data.id ?? entry.name.replace('.json', ''),
-                status: data.status ?? 'pending',
-                createdDate: data.createdDate ?? '',
-                completedDate: data.completedDate ?? null,
-                generatedTime: data.generatedTime ?? null,
-                error: data.error ?? null,
-                prompt: data.prompt ?? {},
-                result: Array.isArray(data.result) ? data.result : [],
-                stream: Array.isArray(data.stream) ? data.stream : []
-            });
-        } catch {
-            // Skip corrupted files
-        }
+        // readGenerationFile normalizes older files and returns null for
+        // missing/corrupted entries — skip those. We project to a summary
+        // so the list never carries the heavy prompt/result/stream fields.
+        const full = readGenerationFile(projectRoot, workflowId, entry.name.replace('.json', ''));
+        if (!full) continue;
+        summaries.push(toGenerationSummary(full));
     }
 
     // Sort by createdDate descending (newest first)
-    generations.sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
+    summaries.sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
 
-    return { status: 200, response: { generations } };
+    return { status: 200, response: { generations: summaries } };
+});
+
+/** GET — Fetch a single generation entry (full data: prompt, result, stream). */
+export const workflowGenerateGet = asHandlerMethod(async (_, parameters, variables) => {
+    const projectRoot = variables.root;
+    const workflowId = parameters.path.id;
+    const generateId = parameters.path.generate_id;
+
+    if (!workflowId) {
+        return { status: 400, response: { error: 'id is required' } };
+    }
+    if (!generateId) {
+        return { status: 400, response: { error: 'generate_id is required' } };
+    }
+
+    const entry = readGenerationFile(projectRoot, workflowId, generateId);
+    if (!entry) {
+        return { status: 404, response: { error: `Generation '${generateId}' not found` } };
+    }
+
+    return { status: 200, response: { generation: entry } };
 });
 
 /** POST — Create a new generation snapshot. */

@@ -12,7 +12,7 @@ info:
     streaming. Multiple generations may be queued on the same pod
     concurrently; each submission is scoped by its own client_id so only
     its job's events land in its generation json.
-  version: 0.4.2
+  version: 0.5.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -183,8 +183,16 @@ paths:
       operationId: listGenerations
       summary: List generations for a workflow
       description: >-
-        Returns all generation snapshots for the given workflow, sorted by
-        createdDate descending (newest first).
+        Returns lightweight summaries of all generation snapshots for the
+        given workflow, sorted by createdDate descending (newest first).
+        Each summary omits the heavy prompt (full workflow JSON), result
+        (image/video data: URLs, often megabytes of base64), and stream
+        (raw NDJSON events) fields so the list loads fast — fetch the full
+        entry with GET /v1/comfy/workflows/{id}/generate/{generate_id} when
+        a generation's outputs need to be previewed. Each summary includes a
+        resultCount so callers can render "N items" and decide whether to
+        fetch the full entry without needing the result payloads
+        themselves.
       tags:
         - Workflows
       parameters:
@@ -195,7 +203,7 @@ paths:
             type: string
       responses:
         '200':
-          description: List of generation entries
+          description: List of generation summaries
           content:
             application/json:
               schema:
@@ -278,6 +286,43 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
   /v1/comfy/workflows/{id}/generate/{generate_id}:
+    get:
+      operationId: getGeneration
+      summary: Get a single generation (full data)
+      description: >-
+        Returns the complete generation entry for the given workflow and
+        generate_id, including the snapshotted prompt, result payloads
+        (image/video data: URLs), and the raw NDJSON stream. Use this to
+        preview a generation's outputs — the list endpoint
+        (GET /v1/comfy/workflows/{id}/generate) returns only lightweight
+        summaries (no prompt/result/stream) for fast loading, so the full
+        entry must be fetched on demand per generation.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: generate_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The full generation entry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateWorkflowResponse'
+        '404':
+          description: Generation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     put:
       operationId: updateGeneration
       summary: Update a generation entry
@@ -707,12 +752,67 @@ components:
 
     GenerationListResponse:
       type: object
-      description: List of generation snapshots for a workflow.
+      description: >-
+        Lightweight summaries of generation snapshots for a workflow. The
+        list endpoint returns summaries (no prompt/result/stream) so it
+        loads fast; fetch the full entry via
+        GET /v1/comfy/workflows/{id}/generate/{generate_id} when needed.
       properties:
         generations:
           type: array
           items:
-            $ref: '#/components/schemas/GenerationEntry'
+            $ref: '#/components/schemas/GenerationSummary'
+
+    GenerationSummary:
+      type: object
+      description: >-
+        Lightweight summary of a generation entry — what the list endpoint
+        (GET /v1/comfy/workflows/{id}/generate) returns. Excludes the heavy
+        prompt (full workflow JSON), result (image/video data: URLs, often
+        megabytes of base64), and stream (raw NDJSON events) so the list
+        stays small. Fetch the full entry via
+        GET /v1/comfy/workflows/{id}/generate/{generate_id} when the
+        outputs need to be previewed.
+      properties:
+        id:
+          type: string
+          description: Generation identifier (timestamp-based filename without .json)
+          example: "20260728-153045"
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+          description: Current status of the generation
+        createdDate:
+          type: string
+          format: date-time
+          description: ISO timestamp when the generation was created
+        completedDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO timestamp when the generation completed (null if pending)
+        generatedTime:
+          type: string
+          nullable: true
+          description: Human-readable generation duration (e.g. "12.5s")
+        error:
+          type: string
+          nullable: true
+          description: Error message if the generation failed
+        resultCount:
+          type: integer
+          description: >-
+            Number of result items (images/videos) in the full entry. Lets
+            callers render "N items" and decide whether to fetch the full
+            entry without needing the result payloads themselves.
+      required:
+        - id
+        - status
+        - createdDate
+        - completedDate
+        - generatedTime
+        - error
+        - resultCount
 
     UpdateGenerationRequest:
       type: object
@@ -750,7 +850,11 @@ components:
       type: object
       description: >-
         A generation snapshot. Contains the workflow prompt and metadata
-        tracking its status.
+        tracking its status. Returned in full by POST /v1/comfy/workflows/{id}/generate
+        (on creation), GET /v1/comfy/workflows/{id}/generate/{generate_id}
+        (single-entry fetch), and PUT .../generate/{generate_id} (update).
+        The list endpoint (GET /v1/comfy/workflows/{id}/generate) returns
+        lightweight GenerationSummary entries instead.
       properties:
         id:
           type: string

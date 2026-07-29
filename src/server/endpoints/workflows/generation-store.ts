@@ -36,9 +36,45 @@ export type GenerationEntry = {
     stream: StreamEvent[];
 };
 
+/**
+ * Lightweight summary of a generation entry — what the list endpoint
+ * (GET /v1/comfy/workflows/{id}/generate) returns.
+ *
+ * Excludes the heavy `prompt` (full workflow JSON), `result` (image/video
+ * data: URLs, often megabytes of base64 each), and `stream` (raw NDJSON
+ * events) so the list stays small and loads fast. The full entry is
+ * available via GET /v1/comfy/workflows/{id}/generate/{generate_id}.
+ *
+ * `resultCount` lets callers render "N items" and decide whether to fetch
+ * the full entry without needing the result payloads themselves.
+ */
+export type GenerationSummary = {
+    id: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    createdDate: string;
+    completedDate: string | null;
+    generatedTime: string | null;
+    error: string | null;
+    /** Number of result items (images/videos) in the full entry. */
+    resultCount: number;
+};
+
 export type GenerationPatch = Partial<
     Pick<GenerationEntry, 'status' | 'result' | 'stream' | 'generatedTime' | 'completedDate' | 'error'>
 >;
+
+/** Project a full GenerationEntry down to its lightweight summary. */
+export function toGenerationSummary(entry: GenerationEntry): GenerationSummary {
+    return {
+        id: entry.id,
+        status: entry.status,
+        createdDate: entry.createdDate,
+        completedDate: entry.completedDate,
+        generatedTime: entry.generatedTime,
+        error: entry.error,
+        resultCount: entry.result.length
+    };
+}
 
 export function generationFilePath(root: string, workflowId: string, generateId: string): string {
     return path.join(

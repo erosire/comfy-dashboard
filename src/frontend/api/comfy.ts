@@ -11,6 +11,12 @@
 //   PATCH  /v1/comfy/workflows/:id   → { workflow: Workflow }
 //   DELETE /v1/comfy/workflows/:id   → { success: boolean, id: string }
 //
+// Generations (lightweight list + full single-entry fetch):
+//   GET    /v1/comfy/workflows/:id/generate                → { generations: GenerationSummary[] }
+//   POST   /v1/comfy/workflows/:id/generate                → { generation: GenerationEntry }
+//   GET    /v1/comfy/workflows/:id/generate/:generate_id   → { generation: GenerationEntry }
+//   PUT    /v1/comfy/workflows/:id/generate/:generate_id   → { generation: GenerationEntry }
+//
 // Queue:
 //   GET /v1/comfy/queue              → { queue: QueueItem[] }
 //   POST /v1/comfy/queue             → { id: string, message: string }
@@ -83,6 +89,27 @@ export type GenerationEntry = {
     result: GenerationResultItem[];
     /** Raw NDJSON events streamed back from POST /v1/comfy/cloud/prompt. */
     stream: CloudStreamEvent[];
+};
+
+/**
+ * Lightweight summary of a generation entry — what the list endpoint
+ * (GET /v1/comfy/workflows/{id}/generate) returns.
+ *
+ * Excludes the heavy `prompt` (full workflow JSON), `result` (image/video
+ * data: URLs, often megabytes), and `stream` (raw NDJSON events) so the
+ * list loads fast. Fetch the full entry with `fetchGeneration` when a
+ * generation's outputs need to be previewed. `resultCount` lets the UI
+ * render "N items" and enable the preview affordance without the payloads.
+ */
+export type GenerationSummary = {
+    id: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    createdDate: string;
+    completedDate: string | null;
+    generatedTime: string | null;
+    error: string | null;
+    /** Number of result items (images/videos) in the full entry. */
+    resultCount: number;
 };
 
 // ── API Functions ──────────────────────────────────────────────────────
@@ -282,11 +309,13 @@ export async function generateWorkflow(
     return (await response.json()) as { generation: GenerationEntry };
 }
 
-// Fetch all generations for a workflow.
+// Fetch all generations for a workflow (lightweight summaries — no prompt,
+// result, or stream). Use fetchGeneration to load a single generation's full
+// data when previewing its outputs.
 export async function fetchGenerations(
     baseUrl: string,
     workflowId: string
-): Promise<{ generations: GenerationEntry[] }> {
+): Promise<{ generations: GenerationSummary[] }> {
     const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate`;
     const response = await fetch(url);
     if (!response.ok) {
@@ -297,8 +326,29 @@ export async function fetchGenerations(
         } catch { /* ignore */ }
         throw new Error(message);
     }
-    const data = (await response.json()) as { generations: GenerationEntry[] };
+    const data = (await response.json()) as { generations: GenerationSummary[] };
     return { generations: Array.isArray(data.generations) ? data.generations : [] };
+}
+
+// Fetch a single generation's full data (prompt, result, stream) by id.
+// Called when previewing a generation's outputs — the list endpoint only
+// returns lightweight summaries, so the full entry is fetched on demand.
+export async function fetchGeneration(
+    baseUrl: string,
+    workflowId: string,
+    generateId: string
+): Promise<{ generation: GenerationEntry }> {
+    const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        let message = `Failed to fetch generation (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    return (await response.json()) as { generation: GenerationEntry };
 }
 
 // Update a generation entry (PUT) — e.g. with results + stream after agent completion.
