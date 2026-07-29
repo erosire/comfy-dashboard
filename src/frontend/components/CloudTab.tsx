@@ -500,6 +500,13 @@ const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAreaElemen
     const ref = React.useRef<HTMLTextAreaElement | null>(null);
     const lastWidthRef = React.useRef(0);
 
+    // Keep the latest onChange/onPaste in refs so the (stable) paste handler
+    // always invokes the freshest callbacks without re-attaching listeners.
+    const onChangeRef = React.useRef(props.onChange);
+    onChangeRef.current = props.onChange;
+    const onPasteRef = React.useRef(props.onPaste);
+    onPasteRef.current = props.onPaste;
+
     const resize = React.useCallback(() => {
         const el = ref.current;
         if (!el) return;
@@ -533,7 +540,43 @@ const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAreaElemen
         return () => ro.disconnect();
     }, [resize]);
 
-    return <WidgetTextarea ref={ref} rows={1} {...props} />;
+    // Paste an image from the clipboard as a base64 data: URL — mirrors the
+    // UniversalDataToImage node's universal_data_input.js: when the clipboard
+    // holds an image, convert it to a data URI and write it into the field
+    // (replacing the value) via onChange so the parent state updates. This
+    // applies to every widget-value field (subgraph + main node cards) since
+    // they all render through this component. Non-image pastes fall through to
+    // the browser's default text behaviour (and any caller-supplied onPaste),
+    // so plain text / URLs still paste normally.
+    const handlePaste = React.useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        const items = e.clipboardData?.items;
+        if (items) {
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    e.preventDefault();
+                    const blob = items[i].getAsFile();
+                    if (blob) {
+                        const reader = new FileReader();
+                        reader.onload = (ev) => {
+                            const dataUri = ev.target?.result;
+                            if (typeof dataUri === 'string') {
+                                onChangeRef.current?.(
+                                    { target: { value: dataUri } } as React.ChangeEvent<HTMLTextAreaElement>
+                                );
+                            }
+                        };
+                        reader.readAsDataURL(blob);
+                    }
+                    return;
+                }
+            }
+        }
+        // No image in the clipboard — defer to the caller's onPaste (if any)
+        // and otherwise let the default text paste proceed unchanged.
+        onPasteRef.current?.(e);
+    }, []);
+
+    return <WidgetTextarea ref={ref} rows={1} {...props} onPaste={handlePaste} />;
 };
 
 const LinkBadge = styled('span')({
