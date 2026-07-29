@@ -88,6 +88,9 @@ function dataUrlToBlobUrl(dataUrl: string): string | null {
     }
 }
 
+/** A result item flattened across all generations, tagged with its source generation id. */
+type ViewerEntry = GenerationResultItem & { generationId: string };
+
 /** Maximum number of workflow items to display in the sidebar. */
 const MAX_SIDEBAR_ITEMS = 10;
 
@@ -1769,48 +1772,87 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [executingNodeId, setExecutingNodeId] = React.useState<string | null>(null);
     const [agentCount, setAgentCount] = React.useState(0);
     const [viewerOpen, setViewerOpen] = React.useState(false);
-    const [viewerItems, setViewerItems] = React.useState<GenerationResultItem[]>([]);
+    const [viewerItems, setViewerItems] = React.useState<ViewerEntry[]>([]);
     const [viewerIndex, setViewerIndex] = React.useState(0);
+    // Resolved URL (blob or raw) for the *current* item only. Rebuilt on each
+    // navigation so blobs are added/removed as you move through the arrows.
+    const [viewerBlobUrl, setViewerBlobUrl] = React.useState<string | null>(null);
+    const viewerBlobUrlRef = React.useRef<string | null>(null);
 
     // ── Viewer blob lifecycle ───────────────────────────────────────
-    // Generation results persist data: URLs in the server-side json.
-    // Blob URLs are generated fresh each time the viewer opens (cheap,
-    // avoids re-rendering megabytes of base64 through React) and revoked
-    // when it closes — blobs are view-time only, never persisted.
+    // Generation results persist data: URLs in the server-side json. The
+    // viewer does NOT convert every item up front — instead it builds a blob
+    // URL for the current item only and revokes it when you navigate away
+    // (or close). So blobs are added and removed as you move through the
+    // arrows. The flat list spans every result item across ALL generations of
+    // the current workflow, so ←/→ cycle through the whole workflow, not
+    // just the one run you clicked.
 
-    const viewerBlobUrlsRef = React.useRef<string[]>([]);
-
-    const revokeViewerBlobs = React.useCallback(() => {
-        for (const url of viewerBlobUrlsRef.current) {
-            URL.revokeObjectURL(url);
+    const revokeCurrentViewerBlob = React.useCallback(() => {
+        if (viewerBlobUrlRef.current) {
+            URL.revokeObjectURL(viewerBlobUrlRef.current);
+            viewerBlobUrlRef.current = null;
         }
-        viewerBlobUrlsRef.current = [];
     }, []);
 
     const openViewer = React.useCallback(
-        (items: GenerationResultItem[], index = 0) => {
-            revokeViewerBlobs(); // free blobs from any previously viewed generation
-            const mapped = items.map((item) => {
-                if (!item.url.startsWith('data:')) return item;
-                const blobUrl = dataUrlToBlobUrl(item.url);
-                if (!blobUrl) return item; // fall back to the raw URL (still renders)
-                viewerBlobUrlsRef.current.push(blobUrl);
-                return { ...item, url: blobUrl };
-            });
-            setViewerItems(mapped);
-            setViewerIndex(index);
+        (startGenerationId: string) => {
+            // Flatten every result item across all generations of the current
+            // workflow so the arrows can cycle through them all. The viewer
+            // opens at the first item of the clicked generation.
+            const flat: ViewerEntry[] = [];
+            let startIndex = 0;
+            let found = false;
+            for (const gen of store.generations) {
+                if (gen.id === startGenerationId && !found) {
+                    startIndex = flat.length;
+                    found = true;
+                }
+                for (const item of gen.result) {
+                    flat.push({ ...item, generationId: gen.id });
+                }
+            }
+            if (flat.length === 0) return;
+            setViewerItems(flat);
+            setViewerIndex(startIndex);
             setViewerOpen(true);
         },
-        [revokeViewerBlobs]
+        [store.generations]
     );
 
     const closeViewer = React.useCallback(() => {
+        // The layout effect revokes the current blob when viewerOpen flips to
+        // false; clearing the state here too so the <img> never holds a dead URL.
         setViewerOpen(false);
-        revokeViewerBlobs();
-    }, [revokeViewerBlobs]);
+        setViewerBlobUrl(null);
+        revokeCurrentViewerBlob();
+    }, [revokeCurrentViewerBlob]);
 
-    // Revoke any outstanding viewer blobs when the component unmounts.
-    React.useEffect(() => revokeViewerBlobs, [revokeViewerBlobs]);
+    // Add/remove the blob for the current item as the index or open state
+    // changes. Runs before paint (useLayoutEffect) so the swap is flicker-free;
+    // the previous blob is revoked before the new one is created.
+    React.useLayoutEffect(() => {
+        if (!viewerOpen) {
+            revokeCurrentViewerBlob();
+            setViewerBlobUrl(null);
+            return;
+        }
+        const item = viewerItems[viewerIndex];
+        if (!item) return;
+        revokeCurrentViewerBlob();
+        let resolved = item.url;
+        if (item.url.startsWith('data:')) {
+            const blobUrl = dataUrlToBlobUrl(item.url);
+            if (blobUrl) {
+                viewerBlobUrlRef.current = blobUrl;
+                resolved = blobUrl;
+            }
+        }
+        setViewerBlobUrl(resolved);
+    }, [viewerOpen, viewerIndex, viewerItems, revokeCurrentViewerBlob]);
+
+    // Revoke any outstanding viewer blob when the component unmounts.
+    React.useEffect(() => revokeCurrentViewerBlob, [revokeCurrentViewerBlob]);
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2612,7 +2654,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                             ? { cursor: 'pointer', transition: `border-color ${theme.transition}` }
                                             : undefined
                                     }
-                                    onClick={hasResults ? () => openViewer(gen.result) : undefined}
+                                    onClick={hasResults ? () => openViewer(gen.id) : undefined}
                                 >
                                     <QueueItemHeader>
                                         <QueueItemName title={gen.id}>
@@ -3413,9 +3455,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             gap: 12
                         }}
                     >
-                        {viewerItems[viewerIndex]?.type === 'image' ? (
+                        {viewerBlobUrl && viewerItems[viewerIndex]?.type === 'image' ? (
                             <img
-                                src={viewerItems[viewerIndex].url}
+                                src={viewerBlobUrl}
                                 alt={`Result ${viewerIndex + 1}`}
                                 style={{
                                     maxWidth: '85vw',
@@ -3425,9 +3467,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     boxShadow: '0 4px 24px rgba(0,0,0,0.5)'
                                 }}
                             />
-                        ) : viewerItems[viewerIndex]?.type === 'video' ? (
+                        ) : viewerBlobUrl && viewerItems[viewerIndex]?.type === 'video' ? (
                             <video
-                                src={viewerItems[viewerIndex].url}
+                                src={viewerBlobUrl}
                                 controls
                                 autoPlay
                                 style={{
@@ -3452,6 +3494,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             <span>
                                 {viewerIndex + 1} / {viewerItems.length}
                             </span>
+                            <span style={{ opacity: 0.5 }}>|</span>
+                            <span>gen {viewerItems[viewerIndex]?.generationId}</span>
                             <span style={{ opacity: 0.5 }}>|</span>
                             <span>{viewerItems[viewerIndex]?.mimeType}</span>
                             <span style={{ opacity: 0.5 }}>|</span>

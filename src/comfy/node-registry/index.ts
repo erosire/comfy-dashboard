@@ -38,6 +38,7 @@ export {
 
 import type { NodeWidgetLayout } from './types';
 
+// ── Core ComfyUI nodes ──────────────────────────────────────────────────────
 import { EmptyLatentImage } from './EmptyLatentImage';
 import { EmptyFlux2LatentImage } from './EmptyFlux2LatentImage';
 import { EmptySD3LatentImage } from './EmptySD3LatentImage';
@@ -86,8 +87,6 @@ import { ImageToMask } from './ImageToMask';
 
 import { ModelSamplingFlux } from './ModelSamplingFlux';
 
-import { ClownsharKSampler_Beta } from './ClownsharKSampler_Beta';
-
 // Built-in ComfyUI nodes (additional)
 import { ConditioningZeroOut } from './ConditioningZeroOut';
 import { ReferenceLatent } from './ReferenceLatent';
@@ -102,47 +101,32 @@ import { ComfySwitchNode } from './ComfySwitchNode';
 import { PreviewAny } from './PreviewAny';
 import { TextGenerate } from './TextGenerate';
 
-// Custom node packs
-import { TextBox1 } from './TextBox1';
+// ── Custom node pack imports ────────────────────────────────────────────────
 
-// KJNodes
-import { ImageResizeKJv2 } from './ImageResizeKJv2';
+// ComfyUI-VideoHelperSuite
+import { vhsNodes } from './ComfyUI-VideoHelperSuite';
+
+// ComfyUI-KJNodes
+import { ComfyUIKJNodes } from './ComfyUI-KJNodes';
 
 // rgthree-comfy
-import { PowerLoraLoaderrgthree } from './PowerLoraLoaderrgthree';
-import { Seedrgthree } from './Seedrgthree';
-import { Contextrgthree } from './Contextrgthree';
-import { ContextBigrgthree } from './ContextBigrgthree';
-import { ContextSwitchrgthree } from './ContextSwitchrgthree';
-import { ContextSwitchBigrgthree } from './ContextSwitchBigrgthree';
-import { ContextMergergthree } from './ContextMergergthree';
-import { ContextMergeBigrgthree } from './ContextMergeBigrgthree';
-import { DisplayIntrgthree } from './DisplayIntrgthree';
-import { DisplayAnyrgthree } from './DisplayAnyrgthree';
-import { LoraLoaderStackrgthree } from './LoraLoaderStackrgthree';
-import { ImageInsetCropprgthree } from './ImageInsetCropprgthree';
-import { PowerPromptrgthree } from './PowerPromptrgthree';
-import { PowerPromptSimplergthree } from './PowerPromptSimplergthree';
-import { KSamplerConfigrgthree } from './KSamplerConfigrgthree';
-import { SDXLEmptyLatentImagergthree } from './SDXLEmptyLatentImagergthree';
-import { SDXLPowerPromptPositivergthree } from './SDXLPowerPromptPositivergthree';
-import { SDXLPowerPromptSimplenegativethree } from './SDXLPowerPromptSimplenegativethree';
-import { AnySwitchrgthree } from './AnySwitchrgthree';
-import { ImageComparerrgthree } from './ImageComparerrgthree';
-import { PowerPrimitivergthree } from './PowerPrimitivergthree';
-import { ImageOrLatentSizergthree } from './ImageOrLatentSizergthree';
-import { ImageResizergthree } from './ImageResizergthree';
-import { PowerPuttergthree } from './PowerPuttergthree';
-import { FastGroupsMuterthree } from './FastGroupsMuterthree';
+import { rgthreeNodes } from './rgthree-comfy';
+
+// RES4LYF
+import {
+    ClownsharKSampler_Beta,
+    TextBox1,
+} from './RES4LYF';
+import { res4lyfNodes } from './RES4LYF';
+
+// ComfyUI-GGUF
+import { ggufNodes } from './ComfyUI-GGUF';
 
 // ComfyUI-CloudClient
-import { ClientImageDownloadNode } from './ClientImageDownloadNode';
-import { ClientVideoDownloadNode } from './ClientVideoDownloadNode';
-import { RemoteImageLoader } from './RemoteImageLoader';
-import { ServerMemoryImageNode } from './ServerMemoryImageNode';
-import { TemporaryImagePreviewCloudClient } from './TemporaryImagePreviewCloudClient';
-import { UniversalDataToImage } from './UniversalDataToImage';
-import { UniversalDataToAudioVideo } from './UniversalDataToAudioVideo';
+import { cloudClientNodes } from './ComfyUI-CloudClient';
+
+// 10S-Comfy-nodes
+import { tensNodes } from './10S-Comfy-nodes';
 
 /**
  * The primary node widget registry.
@@ -160,6 +144,8 @@ import { UniversalDataToAudioVideo } from './UniversalDataToAudioVideo';
  *   comfyNodeRegistry["LoraLoader"].widgets[1].label; // "Model Strength"
  */
 export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
+    // ── Core ComfyUI nodes ──────────────────────────────────────────────────
+
     // Latent
     EmptyLatentImage,
     EmptyFlux2LatentImage,
@@ -219,9 +205,6 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     // Model / Flux
     ModelSamplingFlux,
 
-    // Third-party / Custom nodes
-    ClownsharKSampler_Beta,
-
     // Additional built-in ComfyUI nodes
     ConditioningZeroOut,
     ReferenceLatent,
@@ -236,47 +219,20 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     PreviewAny,
     TextGenerate,
 
-    // Custom node packs
+    // ── Third-party / Custom node packs ─────────────────────────────────────
+
+    // RES4LYF (direct imports for nodes used by other code)
+    ClownsharKSampler_Beta,
     TextBox1,
 
-    // KJNodes (kijai)
-    ImageResizeKJv2,
-
-    // rgthree-comfy
-    [PowerLoraLoaderrgthree.nodeType]: PowerLoraLoaderrgthree,
-    [Seedrgthree.nodeType]: Seedrgthree,
-    [Contextrgthree.nodeType]: Contextrgthree,
-    [ContextBigrgthree.nodeType]: ContextBigrgthree,
-    [ContextSwitchrgthree.nodeType]: ContextSwitchrgthree,
-    [ContextSwitchBigrgthree.nodeType]: ContextSwitchBigrgthree,
-    [ContextMergergthree.nodeType]: ContextMergergthree,
-    [ContextMergeBigrgthree.nodeType]: ContextMergeBigrgthree,
-    [DisplayIntrgthree.nodeType]: DisplayIntrgthree,
-    [DisplayAnyrgthree.nodeType]: DisplayAnyrgthree,
-    [LoraLoaderStackrgthree.nodeType]: LoraLoaderStackrgthree,
-    [ImageInsetCropprgthree.nodeType]: ImageInsetCropprgthree,
-    [PowerPromptrgthree.nodeType]: PowerPromptrgthree,
-    [PowerPromptSimplergthree.nodeType]: PowerPromptSimplergthree,
-    [KSamplerConfigrgthree.nodeType]: KSamplerConfigrgthree,
-    [SDXLEmptyLatentImagergthree.nodeType]: SDXLEmptyLatentImagergthree,
-    [SDXLPowerPromptPositivergthree.nodeType]: SDXLPowerPromptPositivergthree,
-    [SDXLPowerPromptSimplenegativethree.nodeType]: SDXLPowerPromptSimplenegativethree,
-    [AnySwitchrgthree.nodeType]: AnySwitchrgthree,
-    [ImageComparerrgthree.nodeType]: ImageComparerrgthree,
-    [PowerPrimitivergthree.nodeType]: PowerPrimitivergthree,
-    [ImageOrLatentSizergthree.nodeType]: ImageOrLatentSizergthree,
-    [ImageResizergthree.nodeType]: ImageResizergthree,
-    [PowerPuttergthree.nodeType]: PowerPuttergthree,
-    [FastGroupsMuterthree.nodeType]: FastGroupsMuterthree,
-
-    // ComfyUI-CloudClient
-    ClientImageDownloadNode,
-    ClientVideoDownloadNode,
-    RemoteImageLoader,
-    ServerMemoryImageNode,
-    [TemporaryImagePreviewCloudClient.nodeType]: TemporaryImagePreviewCloudClient,
-    UniversalDataToImage,
-    UniversalDataToAudioVideo,
+    // Spread all custom node pack registries
+    ...vhsNodes,
+    ...ComfyUIKJNodes,
+    ...rgthreeNodes,
+    ...res4lyfNodes,
+    ...ggufNodes,
+    ...cloudClientNodes,
+    ...tensNodes,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

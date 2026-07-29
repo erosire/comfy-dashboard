@@ -1,0 +1,13 @@
+import type { NodeWidgetLayout } from '../types';
+
+export const FluxGuidanceDisable: NodeWidgetLayout = {
+    nodeType: 'FluxGuidanceDisable',
+    displayName: 'FluxGuidanceDisable',
+    category: 'RES4LYF/models',
+    github: {
+        repo: 'https://github.com/ClownsharkBatwing/RES4LYF',
+        path: 'models.py',
+        extension: 'RES4LYF',
+    },
+    widgets: [],
+};
