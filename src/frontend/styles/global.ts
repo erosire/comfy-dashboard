@@ -66,6 +66,44 @@ const sheet = `
     animation: sg-spin 700ms linear infinite;
 }
 
+/* Circular loading border — a conic-gradient arc rotating around the
+   element's border, masked into a 1px ring. Applied to pod buttons while
+   spawning or with jobs in flight (replaces the inline spinner). The
+   element's own border stays as the dim track; the bright arc sweeps
+   around it, mimicking a spinner.
+   The arc rotates via the registered --sg-ring-angle custom property
+   (@property makes angles animatable; unsupported browsers degrade to a
+   static arc instead of the ring disappearing). */
+@property --sg-ring-angle {
+    syntax: '<angle>';
+    initial-value: 0deg;
+    inherits: false;
+}
+.sg-ring-loading { position: relative; }
+.sg-ring-loading::before {
+    content: "";
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    padding: 1px;
+    background: conic-gradient(
+        from var(--sg-ring-angle),
+        transparent 0deg,
+        transparent 250deg,
+        ${theme.accent} 330deg,
+        ${theme.accentHover} 360deg
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    animation: sg-ring-spin 900ms linear infinite;
+    pointer-events: none;
+}
+@keyframes sg-ring-spin {
+    to { --sg-ring-angle: 360deg; }
+}
+
 @keyframes sg-fade-in {
     from { opacity: 0; }
     to   { opacity: 1; }

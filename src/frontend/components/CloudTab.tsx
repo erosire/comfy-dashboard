@@ -65,6 +65,29 @@ function base64ByteSize(b64: string): number {
 }
 
 /**
+ * Spreadsheet-style pod letter for the pod button: 1 → A, 2 → B, …
+ * 26 → Z, 27 → AA. Derived from the monotonic podNumber.
+ */
+function podLetter(podNumber: number): string {
+    let n = Math.max(1, podNumber);
+    let letters = '';
+    while (n > 0) {
+        letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+        n = Math.floor((n - 1) / 26);
+    }
+    return letters;
+}
+
+/**
+ * Pod button label — pod letter followed by the two-digit in-flight
+ * queue count: A00 when idle, A03 with three jobs queued. Counts past
+ * 99 simply widen the label (never clamped).
+ */
+function podButtonLabel(podNumber: number, inFlight: number): string {
+    return `${podLetter(podNumber)}${String(inFlight).padStart(2, '0')}`;
+}
+
+/**
  * A result item flattened across all generations — display metadata only
  * (no payload), tagged with its source generation id and its zero-based
  * index within that generation's result array. The media itself streams
@@ -107,6 +130,13 @@ const POD_HEARTBEAT_MS = 30_000;
 
 /** Consecutive heartbeat failures before a dead pod removes itself. */
 const MAX_POD_FAILURES = 2;
+
+/**
+ * Dim accent track for the pod button's circular loading border — the
+ * static border color while the sg-ring-loading arc sweeps over it.
+ * Matches the SpinnerEl track alpha.
+ */
+const POD_RING_TRACK = 'rgba(129, 140, 248, 0.30)';
 
 // ── Styled: shared ────────────────────────────────────────────────────
 
@@ -2571,7 +2601,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             const podEntry: PodEntry = {
                 id: `gen-pod-${Date.now()}-${podNumber}`,
                 podNumber,
-                name: `#${podNumber}`,
+                name: podLetter(podNumber),
                 pod_url: '',
                 status: 'spawning',
                 failCount: 0,
@@ -2592,7 +2622,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         } catch (err: any) {
             // Spawn failed — no pod_url ever existed; remove the button.
             setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
-            alert(`Failed to spawn pod #${podNumber}: ${err.message ?? String(err)}`);
+            alert(`Failed to spawn pod ${podLetter(podNumber)}: ${err.message ?? String(err)}`);
             return;
         }
         console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl}`);
@@ -2614,7 +2644,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }
     }, [nodes.length, editingWorkflowId, baseUrl, runGenerationOnPod]);
 
-    // ── #N: same as Generate but reuses an existing pod_url ─────────
+    // ── Pod button (A00): same as Generate but reuses an existing pod_url ──
     // NEVER blocked while running: each click queues ANOTHER job on the
     // pod. The server scopes each submission with its own client_id and
     // filters the shared pod stream by prompt_id, so every generation
@@ -3611,58 +3641,52 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
             <div style={{ flex: '1 1 auto' }} />
 
-            {/* #N: queue another generation on an existing pod (skips pod
-                creation). Appears the moment Generate is clicked (spawning
-                spinner while the pod_url resolves). Sits immediately left of
-                Generate. Never disabled while running — pods accept
-                concurrent jobs; the in-flight count is shown next to the
-                label. Carry their own status: spinner while spawning / while
-                jobs are in flight, colored border for the last settled
-                result, heartbeat removal when the pod_url dies. */}
+            {/* A00: queue another generation on an existing pod (skips pod
+                creation). Appears the moment Generate is clicked (loading
+                border ring while the pod_url resolves). Sits immediately
+                left of Generate. Never disabled while running — pods accept
+                concurrent jobs; the two-digit label suffix counts the queued
+                jobs (A03 = pod A with 3 in flight). Carry their own status:
+                circular loading border while spawning / while jobs are in
+                flight, colored border for the last settled result,
+                heartbeat removal when the pod_url dies. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';
                 const inFlight = p.activeGenerationIds.length;
+                const isLoading = isSpawning || inFlight > 0;
+                const letter = podLetter(p.podNumber);
                 const isDisabled =
                     isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
                 return (
                     <Btn
                         key={p.id}
-                        className="sg-hover"
+                        className={isLoading ? 'sg-hover sg-ring-loading' : 'sg-hover'}
                         onClick={() => handlePodGenerate(p)}
                         disabled={isDisabled}
                         title={
                             isSpawning
-                                ? `#${p.podNumber} — starting up…`
+                                ? `Pod ${letter} — starting up…`
                                 : p.status !== 'ready'
-                                  ? `#${p.podNumber} — ${p.error || 'unavailable'} ` +
+                                  ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
                                     `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
                                   : inFlight > 0
-                                    ? `#${p.podNumber} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                    ? `Pod ${letter} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
                                       `in flight on ${p.pod_url} — click to queue another`
                                     : `Queue a new generation on ${p.pod_url}`
                         }
                         style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 6,
-                            borderColor:
-                                isSpawning || inFlight > 0
-                                    ? theme.accent
-                                    : p.run.status === 'error'
-                                      ? theme.dangerBorder
-                                      : p.run.status === 'done'
-                                        ? theme.success
-                                        : theme.border
+                            fontFamily: theme.fontMono,
+                            borderColor: isLoading
+                                ? POD_RING_TRACK
+                                : p.run.status === 'error'
+                                  ? theme.dangerBorder
+                                  : p.run.status === 'done'
+                                    ? theme.success
+                                    : theme.border
                         }}
                         data-testid={`pod-generate-${p.podNumber}`}
                     >
-                        {(isSpawning || inFlight > 0) && <SpinnerEl />}
-                        #{p.podNumber}
-                        {inFlight > 0 && (
-                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600 }}>
-                                ×{inFlight}
-                            </span>
-                        )}
+                        {podButtonLabel(p.podNumber, inFlight)}
                     </Btn>
                 );
             })}
