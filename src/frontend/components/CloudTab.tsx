@@ -2013,7 +2013,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
     // Content area switcher — "json" shows the workflow node layout;
     // "prompt" shows the quick-edit fields picked via label clicks.
-    const [contentTab, setContentTab] = React.useState<'json' | 'prompt'>('json');
+    const [contentTab, setContentTab] = React.useState<'json' | 'prompt' | 'results'>('json');
     // Keys of widgets promoted into the PROMPT quick-edit tab. Clicking a
     // widget label in the JSON layout toggles its key here. Persisted into
     // the workflow json (extra.promptFields) via Save so it survives reload.
@@ -2075,7 +2075,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const openViewer = React.useCallback(
         (startGenerationId: string) => {
             if (!store.selectedId) return;
-            // Generations with viewable results, in sidebar order.
+            // Generations with viewable results, in Results-tab order.
             const gens = store.generations.filter((g) => (g.resultItems?.length ?? 0) > 0);
             const startPos = gens.findIndex((g) => g.id === startGenerationId);
             if (startPos === -1) return;
@@ -2953,108 +2953,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     </EmptyHint>
                 )}
             </SidebarScroll>
-
-            {/* ── Generations section ──────────────────────── */}
-            {isEditingSaved && (
-                <>
-                    <div style={{ borderTop: `1px solid ${theme.border}`, margin: '0 6px' }} />
-                    <SidebarHeader>
-                        <span>
-                            Generations <SidebarCount>({store.generations.length})</SidebarCount>
-                        </span>
-                    </SidebarHeader>
-                    {/* Cap the generations list at 50% of the sidebar height so
-                        it can never crowd out the Workflows list above it. The
-                        Workflows list (SidebarScroll, flex: 1 1 auto) keeps
-                        flex-grow: 1 and so always claims the remaining space.
-                        flex-grow: 0 here means Generations only takes what its
-                        content needs (up to the 50% cap) and scrolls internally
-                        beyond that, instead of growing to fill free space. */}
-                    <div style={{ padding: '0 6px 12px', overflowY: 'auto', flex: '0 1 auto', maxHeight: '50%' }}>
-                        {store.generations.length === 0 && (
-                            <EmptyHint>No generations yet.</EmptyHint>
-                        )}
-                        {store.generations.map((gen) => {
-                            const hasResults = (gen.resultItems?.length ?? 0) > 0;
-                            const genStatusColor =
-                                gen.status === 'completed'
-                                    ? theme.success
-                                    : gen.status === 'failed'
-                                        ? theme.danger
-                                        : gen.status === 'processing'
-                                            ? theme.accent
-                                            : theme.textDim;
-                            const genStatusBg =
-                                gen.status === 'completed'
-                                    ? theme.successSoft
-                                    : gen.status === 'failed'
-                                        ? theme.dangerSoft
-                                        : gen.status === 'processing'
-                                            ? theme.accentSoft
-                                            : theme.surface2;
-                            return (
-                                <QueueItemEl
-                                    key={gen.id}
-                                    data-testid={`gen-item-${gen.id}`}
-                                    style={
-                                        hasResults
-                                            ? { cursor: 'pointer', transition: `border-color ${theme.transition}` }
-                                            : undefined
-                                    }
-                                    onClick={hasResults ? () => openViewer(gen.id) : undefined}
-                                >
-                                    <QueueItemHeader>
-                                        <QueueItemName title={gen.id}>
-                                            {gen.id}
-                                        </QueueItemName>
-                                        {hasResults && (
-                                            <span
-                                                style={{
-                                                    fontSize: theme.fontSize.xs,
-                                                    color: theme.accent,
-                                                    flexShrink: 0,
-                                                    marginLeft: 4
-                                                }}
-                                            >
-                                                {gen.resultCount} item{gen.resultCount !== 1 ? 's' : ''}
-                                            </span>
-                                        )}
-                                    </QueueItemHeader>
-                                    <QueueItemMeta>
-                                        <QueueStatusBadge style={{
-                                            color: genStatusColor,
-                                            backgroundColor: genStatusBg
-                                        }}>
-                                            {gen.status === 'processing' && <SpinnerEl />}
-                                            {gen.status}
-                                        </QueueStatusBadge>
-                                        {gen.generatedTime && (
-                                            <span style={{ color: theme.accent, fontWeight: 500 }}>
-                                                {gen.generatedTime}
-                                            </span>
-                                        )}
-                                        <span title={gen.createdDate}>
-                                            {formatRelativeTime(gen.createdDate)}
-                                        </span>
-                                    </QueueItemMeta>
-                                    {gen.error && (
-                                        <div style={{
-                                            fontSize: theme.fontSize.xs,
-                                            color: theme.danger,
-                                            marginTop: 4,
-                                            overflow: 'hidden',
-                                            textOverflow: 'ellipsis',
-                                            whiteSpace: 'nowrap' as const
-                                        }} title={gen.error}>
-                                            {gen.error}
-                                        </div>
-                                    )}
-                                </QueueItemEl>
-                            );
-                        })}
-                    </div>
-                </>
-            )}
         </SidebarPanel>
     );
 
@@ -3116,9 +3014,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             </EditorAreaEmpty>
                         )}
 
-                        {/* Content tabs — JSON shows the workflow layout;
-                            PROMPT is a placeholder (blank for now).
-                            Copy/Clone sit on the right of the tab strip. */}
+                        {/* Content tabs — JSON shows the workflow layout, PROMPT
+                            shows the selected prompt fields, RESULTS lists the
+                            workflow's generations. Copy/Clone sit on the right
+                            of the tab strip. */}
                         <div
                             style={{
                                 display: 'flex',
@@ -3169,18 +3068,20 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     }
                                 >
                                     PROMPT
-                                    {promptFields.size > 0 && (
-                                        <span
-                                            style={{
-                                                marginLeft: 6,
-                                                fontSize: theme.fontSize.xs,
-                                                color: theme.accent,
-                                                fontWeight: 600
-                                            }}
-                                        >
-                                            {promptFields.size}
-                                        </span>
-                                    )}
+                                </TabBtn>
+                                <TabBtn
+                                    className="sg-hover"
+                                    role="tab"
+                                    aria-selected={contentTab === 'results'}
+                                    data-testid="tab-results"
+                                    onClick={() => setContentTab('results')}
+                                    style={
+                                        contentTab === 'results'
+                                            ? { color: theme.accent, borderBottomColor: theme.accent }
+                                            : undefined
+                                    }
+                                >
+                                    RESULTS
                                 </TabBtn>
                             </div>
                             <div style={{ display: 'flex', gap: 6, flexShrink: 0, paddingBottom: 4 }}>
@@ -3567,6 +3468,95 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                         </InputRow>
                                     ))
                                 )}
+                            </div>
+                        )}
+
+                        {/* RESULTS tab — the workflow's generations (moved out
+                            of the sidebar). The editor area scrolls, so no
+                            height cap is needed here. */}
+                        {contentTab === 'results' && (
+                            <div data-testid="results-tab-pane">
+                                {store.generations.length === 0 && (
+                                    <EmptyHint>No generations yet.</EmptyHint>
+                                )}
+                                {store.generations.map((gen) => {
+                                    const hasResults = (gen.resultItems?.length ?? 0) > 0;
+                                    const genStatusColor =
+                                        gen.status === 'completed'
+                                            ? theme.success
+                                            : gen.status === 'failed'
+                                                ? theme.danger
+                                                : gen.status === 'processing'
+                                                    ? theme.accent
+                                                    : theme.textDim;
+                                    const genStatusBg =
+                                        gen.status === 'completed'
+                                            ? theme.successSoft
+                                            : gen.status === 'failed'
+                                                ? theme.dangerSoft
+                                                : gen.status === 'processing'
+                                                    ? theme.accentSoft
+                                                    : theme.surface2;
+                                    return (
+                                        <QueueItemEl
+                                            key={gen.id}
+                                            data-testid={`gen-item-${gen.id}`}
+                                            style={
+                                                hasResults
+                                                    ? { cursor: 'pointer', transition: `border-color ${theme.transition}` }
+                                                    : undefined
+                                            }
+                                            onClick={hasResults ? () => openViewer(gen.id) : undefined}
+                                        >
+                                            <QueueItemHeader>
+                                                <QueueItemName title={gen.id}>
+                                                    {gen.id}
+                                                </QueueItemName>
+                                                {hasResults && (
+                                                    <span
+                                                        style={{
+                                                            fontSize: theme.fontSize.xs,
+                                                            color: theme.accent,
+                                                            flexShrink: 0,
+                                                            marginLeft: 4
+                                                        }}
+                                                    >
+                                                        {gen.resultCount} item{gen.resultCount !== 1 ? 's' : ''}
+                                                    </span>
+                                                )}
+                                            </QueueItemHeader>
+                                            <QueueItemMeta>
+                                                <QueueStatusBadge style={{
+                                                    color: genStatusColor,
+                                                    backgroundColor: genStatusBg
+                                                }}>
+                                                    {gen.status === 'processing' && <SpinnerEl />}
+                                                    {gen.status}
+                                                </QueueStatusBadge>
+                                                {gen.generatedTime && (
+                                                    <span style={{ color: theme.accent, fontWeight: 500 }}>
+                                                        {gen.generatedTime}
+                                                    </span>
+                                                )}
+                                                <span title={gen.createdDate}>
+                                                    {formatRelativeTime(gen.createdDate)}
+                                                </span>
+                                            </QueueItemMeta>
+                                            {gen.error && (
+                                                <div style={{
+                                                    fontSize: theme.fontSize.xs,
+                                                    color: theme.danger,
+                                                    marginTop: 4,
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap' as const
+                                                }} title={gen.error}>
+                                                    {gen.error}
+                                                </div>
+                                            )}
+                                        </QueueItemEl>
+                                    );
+                                })}
                             </div>
                         )}
                     </NodeList>
