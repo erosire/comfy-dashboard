@@ -32,6 +32,11 @@ export type StreamEvent = {
     data: Record<string, unknown>;
 };
 
+// NOTE: the raw NDJSON event stream of a run is intentionally NOT part of
+// the entry — the timestamped .log file written next to the json (see
+// appendGenerationLog / generationLogPath) already carries the full
+// chronological trail of status changes and per-event summaries, without
+// bloating the json with megabytes of transient event data.
 export type GenerationEntry = {
     id: string;
     status: 'pending' | 'processing' | 'completed' | 'failed';
@@ -41,17 +46,16 @@ export type GenerationEntry = {
     error: string | null;
     prompt: Record<string, unknown>;
     result: GenerationResultItem[];
-    stream: StreamEvent[];
 };
 
 /**
  * Lightweight summary of a generation entry — what the list endpoint
  * (GET /v1/comfy/workflows/{id}/generate) returns.
  *
- * Excludes the heavy `prompt` (full workflow JSON), `result` (image/video
- * data: URLs, often megabytes of base64 each), and `stream` (raw NDJSON
- * events) so the list stays small and loads fast. The full entry is
- * available via GET /v1/comfy/workflows/{id}/generate/{generate_id}.
+ * Excludes the heavy `prompt` (full workflow JSON) and `result` payloads
+ * (image/video data: URLs, often megabytes of base64 each) so the list
+ * stays small and loads fast. The full entry is available via
+ * GET /v1/comfy/workflows/{id}/generate/{generate_id}.
  *
  * `resultCount` lets callers render "N items" and decide whether to open
  * the results, while `resultItems` provides the per-result display metadata
@@ -73,7 +77,7 @@ export type GenerationSummary = {
 };
 
 export type GenerationPatch = Partial<
-    Pick<GenerationEntry, 'status' | 'result' | 'stream' | 'generatedTime' | 'completedDate' | 'error'>
+    Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>
 >;
 
 /** Project a full GenerationEntry down to its lightweight summary. */
@@ -164,8 +168,10 @@ export function readGenerationFile(
             generatedTime: data.generatedTime ?? null,
             error: data.error ?? null,
             prompt: data.prompt ?? {},
-            result: Array.isArray(data.result) ? data.result : [],
-            stream: Array.isArray(data.stream) ? data.stream : []
+            result: Array.isArray(data.result) ? data.result : []
+            // A legacy `stream` field on disk is intentionally NOT carried
+            // over — runs traced in it predate the .log file trail; leaving
+            // it out here means the next write of this file drops it.
         };
     } catch {
         return null;
@@ -204,7 +210,6 @@ export function patchGenerationFile(
     if (patch.generatedTime !== undefined) existing.generatedTime = patch.generatedTime;
     if (patch.error !== undefined) existing.error = patch.error;
     if (patch.result !== undefined) existing.result = patch.result;
-    if (patch.stream !== undefined) existing.stream = patch.stream;
 
     writeGenerationFile(root, workflowId, generateId, existing);
     return existing;

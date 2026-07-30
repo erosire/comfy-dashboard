@@ -189,14 +189,13 @@ paths:
       description: >-
         Returns lightweight summaries of all generation snapshots for the
         given workflow, sorted by createdDate descending (newest first).
-        Each summary omits the heavy prompt (full workflow JSON), result
-        (image/video data: URLs, often megabytes of base64), and stream
-        (raw NDJSON events) fields so the list loads fast — fetch the full
-        entry with GET /v1/comfy/workflows/{id}/generate/{generate_id} when
-        a generation's outputs need to be previewed. Each summary includes a
-        resultCount so callers can render "N items" and decide whether to
-        fetch the full entry without needing the result payloads
-        themselves.
+        Each summary omits the heavy prompt (full workflow JSON) and result
+        payloads (image/video data: URLs, often megabytes of base64) so the
+        list loads fast. Each summary includes a resultCount and
+        resultItems (per-result metadata without payloads) so callers can
+        render "N items" and stream previews straight from
+        GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}
+        without fetching the full entry.
       tags:
         - Workflows
       parameters:
@@ -224,7 +223,9 @@ paths:
       description: >-
         Creates a generation snapshot and stores it in a "generation"
         subfolder inside the workflow's directory as a timestamped JSON
-        file with metadata (status, createdDate, stream, etc.).
+        file with metadata (status, createdDate, etc.). The event
+        progression of the subsequent run lives in the sibling .log file,
+        not in the json.
         The snapshotted `prompt` is the optional request body's prompt
         when provided — the UI sends the API prompt built from its live
         (possibly edited) node tree, so the generation captures exactly
@@ -295,12 +296,14 @@ paths:
       summary: Get a single generation (full data)
       description: >-
         Returns the complete generation entry for the given workflow and
-        generate_id, including the snapshotted prompt, result payloads
-        (image/video data: URLs), and the raw NDJSON stream. Use this to
-        preview a generation's outputs — the list endpoint
+        generate_id, including the snapshotted prompt and result payloads
+        (image/video data: URLs). The list endpoint
         (GET /v1/comfy/workflows/{id}/generate) returns only lightweight
-        summaries (no prompt/result/stream) for fast loading, so the full
-        entry must be fetched on demand per generation.
+        summaries (no prompt, no result payloads) for fast loading, so the
+        full entry must be fetched on demand per generation — typically only
+        when the snapshotted prompt is needed, since result media streams
+        via
+        GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}.
       tags:
         - Workflows
       parameters:
@@ -609,8 +612,10 @@ paths:
         `POST <pod_url>/` on the Tier 2 ComfyProxy endpoint, consumes the
         resulting NDJSON event stream in the background, and keeps the
         generation json updated by itself (status → processing/completed/
-        failed, results, stream, timing — the same file written by
-        /v1/comfy/workflows/{id}/generate). Returns 202 immediately;
+        failed, results, timing — the same file written by
+        /v1/comfy/workflows/{id}/generate). The event progression itself is
+        traced into the sibling .log file — it is intentionally NOT stored
+        in the generation json. Returns 202 immediately;
         clients poll GET /v1/comfy/workflows/{id}/generate for progress.
 
         **Legacy proxy mode** — no workflow reference. Streams the pod's
@@ -686,8 +691,9 @@ paths:
             Accepted for server-side processing (workflow_id and
             generation_id were provided). The server consumes the pod's
             NDJSON stream in the background and updates the generation
-            json file itself. There is no response stream — poll
-            GET /v1/comfy/workflows/{id}/generate for progress.
+            json file itself (the raw events are traced into the sibling
+            .log file, not into the json). There is no response stream —
+            poll GET /v1/comfy/workflows/{id}/generate for progress.
           content:
             application/json:
               schema:
@@ -892,8 +898,8 @@ components:
       type: object
       description: >-
         Lightweight summaries of generation snapshots for a workflow. The
-        list endpoint returns summaries (no prompt/result/stream) so it
-        loads fast; fetch the full entry via
+        list endpoint returns summaries (no prompt, no result payloads) so
+        it loads fast; fetch the full entry via
         GET /v1/comfy/workflows/{id}/generate/{generate_id} when needed.
       properties:
         generations:
@@ -906,14 +912,13 @@ components:
       description: >-
         Lightweight summary of a generation entry — what the list endpoint
         (GET /v1/comfy/workflows/{id}/generate) returns. Excludes the heavy
-        prompt (full workflow JSON), result payloads (image/video data:
-        URLs, often megabytes of base64), and stream (raw NDJSON events) so
-        the list stays small. The resultItems metadata lets clients preview
-        outputs via
+        prompt (full workflow JSON) and result payloads (image/video data:
+        URLs, often megabytes of base64) so the list stays small. The
+        resultItems metadata lets clients preview outputs via
         GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}
         (streamable binary — usable directly in <img>/<video>) without
-        fetching the full entry; the full prompt/stream remain available
-        via GET /v1/comfy/workflows/{id}/generate/{generate_id}.
+        fetching the full entry; the full prompt remains available via
+        GET /v1/comfy/workflows/{id}/generate/{generate_id}.
       properties:
         id:
           type: string
@@ -977,13 +982,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GenerationResultItem'
-        stream:
-          type: array
-          description: >-
-            Raw NDJSON event stream captured from POST /v1/comfy/cloud/prompt
-            while processing this generation.
-          items:
-            $ref: '#/components/schemas/CloudStreamEvent'
         generatedTime:
           type: string
           nullable: true
@@ -1039,14 +1037,10 @@ components:
           description: Array of generated outputs (images, videos, etc.)
           items:
             $ref: '#/components/schemas/GenerationResultItem'
-        stream:
-          type: array
-          description: >-
-            Raw NDJSON event stream from the pod, captured by the server
-            while processing this generation via POST /v1/comfy/cloud/prompt
-            (empty until processed).
-          items:
-            $ref: '#/components/schemas/CloudStreamEvent'
+          # The raw NDJSON event progression of a run is intentionally NOT
+          # stored in the generation json — the server writes a timestamped
+          # .log file next to the json with a line per status change and per
+          # streamed event, which is sufficient to understand the run.
           # All fields are always present in responses — the server
           # normalizes older files on read (nullable fields read as null,
           # arrays as []).
@@ -1059,7 +1053,6 @@ components:
         - error
         - prompt
         - result
-        - stream
 
     GenerationResultItem:
       type: object

@@ -5,23 +5,23 @@
 //     ├── workflow.json
 //     ├── meta.json
 //     └── generation/
-//           ├── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, stream, ... }
+//           ├── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, result, ... }
 //           └── YYYYMMDD-HHMMSS.log    ← timestamped processing log, written by
 //                                        POST /v1/comfy/cloud/prompt while it
-//                                        consumes the pod's NDJSON stream
+//                                        consumes the pod's NDJSON stream. This
+//                                        log (not the json) is the event trail.
 //
 //   The snapshotted prompt is the request's optional { prompt } body when
 //   provided (the UI sends the API prompt built from its live edited node
 //   tree), falling back to the stored workflow.json otherwise.
 //
 // GET (list) — Lists all generation files for the workflow as lightweight
-//   GenerationSummary entries (id, status, timestamps, resultCount). The
-//   heavy prompt / result / stream fields are omitted so the list loads
-//   fast; fetch the full entry with GET .../generate/{generate_id}.
+//   GenerationSummary entries (id, status, timestamps, resultCount,
+//   resultItems). The heavy prompt / result payloads are omitted so the
+//   list loads fast; fetch the full entry with GET .../generate/{generate_id}.
 //
-// GET (one)  — Returns the complete GenerationEntry (prompt + result +
-//   stream) for a single generate_id. Used when previewing a generation's
-//   outputs.
+// GET (one)  — Returns the complete GenerationEntry (prompt + result) for a
+//   single generate_id. Used when the agent needs the snapshotted prompt.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -175,8 +175,7 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         generatedTime: null,
         error: null,
         prompt: promptData,
-        result: [],
-        stream: []
+        result: []
     };
 
     fs.writeFileSync(filePath, JSON.stringify(generation, null, 2), 'utf-8');

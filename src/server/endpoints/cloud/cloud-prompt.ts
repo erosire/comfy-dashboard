@@ -5,8 +5,10 @@
 // 1) Server-side processing — body includes `workflow_id` + `generation_id`.
 //    The server submits the prompt to the pod, consumes the NDJSON stream
 //    in the background, and keeps the generation json file updated by
-//    itself (status → processing/completed/failed, results, stream, timing
-//    — same file the workflow generation API writes). The client gets an
+//    itself (status → processing/completed/failed, results, timing
+//    — same file the workflow generation API writes). The event progression
+//    is traced line-by-line into the sibling .log file — the raw events are
+//    intentionally NOT stored in the json. The client gets an
 //    immediate 202 and observes progress by polling
 //    GET /v1/comfy/workflows/:id/generate.
 //
@@ -183,8 +185,9 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
 
 /**
  * Submit the prompt to the pod, consume its NDJSON stream, and persist
- * everything into the generation json file. Never throws — failures are
- * recorded in the generation entry itself.
+ * the outcome (status, results, timing, error) into the generation json
+ * file. The event stream itself is traced into the sibling .log file only.
+ * Never throws — failures are recorded in the generation entry itself.
  */
 async function processPodPromptInBackground(
     root: string,
@@ -195,9 +198,9 @@ async function processPodPromptInBackground(
     authorization?: string
 ): Promise<void> {
     const startedAt = Date.now();
-    const events: StreamEvent[] = [];
     const results: GenerationResultItem[] = [];
     let failureMessage: string | null = null;
+    let eventCount = 0;
     const clientId = promptPayload.client_id as string | undefined;
 
     // Append a timestamped line to <generationId>.log (next to the .json)
@@ -241,14 +244,19 @@ async function processPodPromptInBackground(
                 (errorBody as { error?: string })?.error ?? `Pod returned HTTP ${upstream.status}`;
             log(`Pod error response: ${failureMessage}`);
         } else {
-            failureMessage = await consumeNdjsonStream(upstream, events, results, log);
+            const outcome = await consumeNdjsonStream(upstream, results, log);
+            failureMessage = outcome.failure;
+            eventCount = outcome.eventCount;
         }
     } catch (err: any) {
         failureMessage = err.message ?? String(err);
         log(`Exception while processing: ${failureMessage}`);
     }
 
-    // Persist the final state — stream + results into the generation json
+    // Persist the final state — results into the generation json. The event
+    // progression is NOT stored: the .log file next to the json already
+    // carries the full chronological trail (a line per status change and
+    // per streamed event), which is sufficient to understand the run.
     const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
     const completedDate = new Date().toISOString();
     if (failureMessage) {
@@ -256,11 +264,10 @@ async function processPodPromptInBackground(
             status: 'failed',
             error: failureMessage,
             result: results,
-            stream: events,
             generatedTime: elapsed,
             completedDate
         });
-        log(`Generation FAILED in ${elapsed}: ${failureMessage} (${events.length} event(s), ${results.length} result(s))`);
+        log(`Generation FAILED in ${elapsed}: ${failureMessage} (${eventCount} event(s), ${results.length} result(s))`);
         console.error(
             `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed ` +
             `in ${elapsed}: ${failureMessage}`
@@ -270,41 +277,42 @@ async function processPodPromptInBackground(
             status: 'completed',
             error: null,
             result: results,
-            stream: events,
             generatedTime: elapsed,
             completedDate
         });
-        log(`Generation COMPLETED in ${elapsed} — ${events.length} event(s), ${results.length} result(s)`);
+        log(`Generation COMPLETED in ${elapsed} — ${eventCount} event(s), ${results.length} result(s)`);
         console.log(
             `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${clientId}) completed ` +
-            `in ${elapsed} — ${events.length} stream event(s), ${results.length} result(s)`
+            `in ${elapsed} — ${eventCount} stream event(s), ${results.length} result(s)`
         );
     }
 }
 
 /**
- * Read the pod's NDJSON response to completion, collecting every event
- * into `events` and image previews into `results`.
- * Returns a failure message on execution_error/proxy_error, else null.
+ * Read the pod's NDJSON response to completion, capturing image previews
+ * into `results` and counting events.
+ * Returns `{ failure, eventCount }` — failure is the execution_error /
+ * proxy_error message, else null.
  *
- * Each event is also appended to the generation's .log (via `log`) so the
- * run leaves a chronological, human-readable trail next to its .json.
+ * Every event is appended to the generation's .log (via `log`), which is
+ * the chronological, human-readable trail of the run. Events are NOT
+ * persisted into the generation json — the .log is sufficient.
  */
 async function consumeNdjsonStream(
     upstream: Response,
-    events: StreamEvent[],
     results: GenerationResultItem[],
     log: (message: string) => void
-): Promise<string | null> {
+): Promise<{ failure: string | null; eventCount: number }> {
     const reader = (upstream.body as ReadableStream<Uint8Array> | null)?.getReader();
     if (!reader) {
         log('Pod returned an empty body — no stream to consume');
-        return 'Pod returned an empty body';
+        return { failure: 'Pod returned an empty body', eventCount: 0 };
     }
 
     const decoder = new TextDecoder();
     let buffer = '';
     let failureMessage: string | null = null;
+    let eventCount = 0;
 
     // ── Job scoping (client_id → prompt_id) ─────────────────────────
     // Several generations may share the pod at once; ComfyUI broadcasts
@@ -333,7 +341,9 @@ async function consumeNdjsonStream(
             }
         }
 
-        events.push(event);
+        // Count + trace every event — the .log trail replaces the old
+        // practice of persisting the raw events into the generation json.
+        eventCount++;
         log(`Event: ${event.type} ${summarizeEventData(event.data)}`);
 
         // Capture image previews as results
@@ -399,7 +409,7 @@ async function consumeNdjsonStream(
         reader.releaseLock();
     }
 
-    return failureMessage;
+    return { failure: failureMessage, eventCount };
 }
 
 /**

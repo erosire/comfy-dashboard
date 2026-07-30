@@ -28,8 +28,6 @@
 // Status:
 //   GET /v1/comfy/status             → { status: ServerStatus }
 
-import type { CloudStreamEvent } from './cloud';
-
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type WorkflowMeta = {
@@ -89,6 +87,11 @@ export type GenerationResultItem = {
  */
 export type GenerationResultMeta = Omit<GenerationResultItem, 'url'>;
 
+// NOTE: the raw NDJSON event stream of a run is intentionally NOT part of
+// the entry — the server writes a timestamped .log file next to the
+// generation json with the full chronological trail (a line per status
+// change and per streamed event). Keeping transient event megabytes out of
+// the json keeps it small and quick to read/write.
 export type GenerationEntry = {
     id: string;
     status: 'pending' | 'processing' | 'completed' | 'failed';
@@ -98,8 +101,6 @@ export type GenerationEntry = {
     error: string | null;
     prompt: Record<string, unknown>;
     result: GenerationResultItem[];
-    /** Raw NDJSON events streamed back from POST /v1/comfy/cloud/prompt. */
-    stream: CloudStreamEvent[];
 };
 
 /**
@@ -380,12 +381,12 @@ export function generationResultUrl(
     return `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}/result/${index}`;
 }
 
-// Update a generation entry (PUT) — e.g. with results + stream after agent completion.
+// Update a generation entry (PUT) — e.g. with results after agent completion.
 export async function updateGeneration(
     baseUrl: string,
     workflowId: string,
     generateId: string,
-    body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>
+    body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>
 ): Promise<{ generation: GenerationEntry }> {
     const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}`;
     const response = await fetch(url, {

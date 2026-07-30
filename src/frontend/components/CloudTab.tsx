@@ -36,14 +36,14 @@ type PodEntry = {
     status: 'spawning' | 'ready' | 'error';
     /**
      * Consecutive heartbeat failures. Reset to 0 on every successful probe.
-     * The pod (and its "Pod#N" button) is removed once this reaches
+     * The pod (and its "#N" button) is removed once this reaches
      * MAX_POD_FAILURES — i.e. when the pod_url has stopped working.
      */
     failCount: number;
     run: RunState;
     /**
      * Generations currently processed server-side for this pod. A pod is
-     * never blocked — every Pod#N click queues another job. The
+     * never blocked — every #N click queues another job. The
      * generations polling effect prunes this list and settles run.status
      * (done/error) once nothing is left in flight.
      */
@@ -1785,6 +1785,91 @@ function flattenSubgraphNodes(nodes: UINode[]): UINode[] {
     return result;
 }
 
+/**
+ * Serialize the editor tree's widget edits back into a raw workflow JSON.
+ *
+ * The editor tree (UINode[]) is the source of truth while the user edits —
+ * `updateNodeWidget` mutates only the tree, never `rawJson`. The Save
+ * button needs those edits persisted in the stored workflow format, so this
+ * deep-clones the raw JSON, locates each edited node's origin (via
+ * `_raw.id`, and via the shared subgraph definition for internal nodes),
+ * and writes widget values back in the exact shape they were read from
+ * (array `widgets_values`, Record `widgets_values`, or API-prompt `inputs`).
+ *
+ * Everything else (positions, links, groups, definitions) passes through
+ * untouched, and unlinked nodes that the execution sort dropped from the
+ * tree remain in the clone as-is.
+ */
+function applyWidgetEditsToRaw(raw: Record<string, unknown>, nodes: UINode[]): Record<string, unknown> {
+    const clone = JSON.parse(JSON.stringify(raw)) as Record<string, unknown>;
+
+    /** Write a node's edited widget values back into its raw representation. */
+    const writeWidgetsBack = (rawNode: Record<string, unknown>, uiNode: UINode): void => {
+        if (uiNode.widgets.length === 0) return;
+        const widgetsValues = rawNode.widgets_values;
+        if (Array.isArray(widgetsValues)) {
+            for (const widget of uiNode.widgets) {
+                if (widget.index < widgetsValues.length) {
+                    widgetsValues[widget.index] = widget.value;
+                }
+            }
+        } else if (widgetsValues && typeof widgetsValues === 'object') {
+            const record = widgetsValues as Record<string, unknown>;
+            const keys = Object.keys(record);
+            for (const widget of uiNode.widgets) {
+                const key = widget.inferredName ?? keys[widget.index];
+                if (key != null) record[key] = widget.value;
+            }
+        }
+    };
+
+    if (Array.isArray(clone.nodes)) {
+        // ── Workflow format (v0.4 / v1) ──────────────────────────────
+        const applyList = (uiNodes: UINode[], rawList: WorkflowNode[]): void => {
+            for (const uiNode of uiNodes) {
+                const rawNode = rawList.find((n) => String(n?.id) === String(uiNode._raw?.id));
+                if (rawNode) {
+                    writeWidgetsBack(rawNode as Record<string, unknown>, uiNode);
+                }
+                // Recurse into subgraph definitions — internal node edits
+                // live on the shared definition (matched by the wrapper's
+                // UUID type). Definitions are global to the workflow, so
+                // any nesting depth resolves against the same list.
+                if (uiNode.subgraphNodes && uiNode.subgraphNodes.length > 0) {
+                    const defs = (clone.definitions as any)?.subgraphs;
+                    const sgId = uiNode.subgraphDef?.id ?? (uiNode._raw?.type as string | undefined);
+                    const def = Array.isArray(defs) ? defs.find((sg: any) => sg?.id === sgId) : undefined;
+                    if (def && Array.isArray(def.nodes)) {
+                        applyList(uiNode.subgraphNodes, def.nodes as WorkflowNode[]);
+                    }
+                }
+            }
+        };
+
+        applyList(nodes, clone.nodes as WorkflowNode[]);
+        return clone;
+    }
+
+    // ── API prompt format ────────────────────────────────────────────
+    // The renumbered tree's ids no longer match the original dict keys, so
+    // regenerate the whole prompt from the tree — byte-for-byte what
+    // Generate submits — then swap out the node entries while preserving
+    // any non-node keys (extra, config, ...).
+    const regenerated = editorTreeToApiPrompt(nodes);
+    if ('prompt' in clone && typeof clone.prompt === 'object' && clone.prompt !== null) {
+        clone.prompt = regenerated;
+    } else {
+        for (const key of Object.keys(clone)) {
+            const value = clone[key];
+            if (value && typeof value === 'object' && 'class_type' in value) {
+                delete clone[key];
+            }
+        }
+        Object.assign(clone, regenerated);
+    }
+    return clone;
+}
+
 // ── Component ──────────────────────────────────────────────────────────
 
 export type CloudTabProps = {
@@ -1917,7 +2002,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-    // Monotonic counter for naming generation pods ("Pod#1", "Pod#2", …)
+    // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
 
     const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
@@ -1945,7 +2030,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     // ── Sync pod buttons from polled generations ────────────────────
     // Pod processing lives on the server; polling the generation list is
-    // what settles each "Pod#N" button's state. A pod can have several
+    // what settles each "#N" button's state. A pod can have several
     // jobs in flight — it stays "running" until the LAST one settles,
     // then shows done (all succeeded) or error (any failed).
 
@@ -2175,6 +2260,27 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }
     }, [editingWorkflowId, deleteWorkflow]);
 
+    // ── Save workflow edits ────────────────────────────────────────────
+    // Persist the editor tree's widget edits back into the stored workflow
+    // json (the tree — not rawJson — holds the user's edits).
+
+    const [saving, setSaving] = React.useState(false);
+
+    const handleSave = React.useCallback(async () => {
+        if (!editingWorkflowId || !rawJson || saving) return;
+        setSaving(true);
+        try {
+            const updatedRaw = applyWidgetEditsToRaw(rawJson, nodes);
+            await updateWorkflow(editingWorkflowId, { raw: updatedRaw });
+            // Keep the local copy in sync so a subsequent Save builds from it.
+            setRawJson(updatedRaw);
+        } catch (err: any) {
+            alert(`Failed to save: ${err.message ?? String(err)}`);
+        } finally {
+            setSaving(false);
+        }
+    }, [editingWorkflowId, rawJson, nodes, saving, updateWorkflow]);
+
     // ── Rename workflow ────────────────────────────────────────────
 
     const openRename = React.useCallback(() => {
@@ -2196,7 +2302,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     }, [editingWorkflowId, renameValue, updateWorkflow]);
 
     // ── Run a generation on a cloud pod ────────────────────────────
-    // Shared by "Generate" (spawns a fresh pod) and "Pod#N" (reuses a pod).
+    // Shared by "Generate" (spawns a fresh pod) and "#N" (reuses a pod).
     //
     // 1. Builds the API prompt from the CURRENT editor tree — every
     //    widget edit is included (the stored workflow json is NOT read).
@@ -2272,26 +2378,26 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     // ── Generate workflow ──────────────────────────────────────────
     // Creates a cloud pod first, then runs a new generation snapshot on it
-    // via POST /v1/comfy/cloud/prompt. The "Pod#N" button appears
+    // via POST /v1/comfy/cloud/prompt. The "#N" button appears
     // IMMEDIATELY on click — in "spawning" state (spinner) while the
     // pod_url is being resolved — then flips to ready. Clicking a ready
-    // Pod#N does the same thing but reuses that pod (skipping pod creation).
+    // #N does the same thing but reuses that pod (skipping pod creation).
     //
     // Generate is NEVER blocked: every click spawns a fresh pod, as fast
     // as the user can click. Per-pod status (spawning, running, done/error)
-    // lives on the individual "Pod#N" button, not on Generate.
+    // lives on the individual "#N" button, not on Generate.
 
     const handleGenerate = React.useCallback(async () => {
         if (nodes.length === 0 || !editingWorkflowId) return;
 
-        // Step 1 — register the pod entry immediately so the "Pod#N"
+        // Step 1 — register the pod entry immediately so the "#N"
         // button shows up while the pod_url is still being resolved.
         podCounterRef.current += 1;
         const podNumber = podCounterRef.current;
             const podEntry: PodEntry = {
                 id: `gen-pod-${Date.now()}-${podNumber}`,
                 podNumber,
-                name: `Pod#${podNumber}`,
+                name: `#${podNumber}`,
                 pod_url: '',
                 status: 'spawning',
                 failCount: 0,
@@ -2312,7 +2418,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         } catch (err: any) {
             // Spawn failed — no pod_url ever existed; remove the button.
             setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
-            alert(`Failed to spawn Pod#${podNumber}: ${err.message ?? String(err)}`);
+            alert(`Failed to spawn pod #${podNumber}: ${err.message ?? String(err)}`);
             return;
         }
         console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl}`);
@@ -2334,7 +2440,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         }
     }, [nodes.length, editingWorkflowId, baseUrl, runGenerationOnPod]);
 
-    // ── Pod#N: same as Generate but reuses an existing pod_url ──────
+    // ── #N: same as Generate but reuses an existing pod_url ─────────
     // NEVER blocked while running: each click queues ANOTHER job on the
     // pod. The server scopes each submission with its own client_id and
     // filters the shared pod stream by prompt_id, so every generation
@@ -2547,7 +2653,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     // the first strike marks the pod as error (button disabled, stays
     // visible in case it recovers); once strikes reach MAX_POD_FAILURES
     // the pod's pod_url is considered dead and the pod is removed
-    // entirely — its "Pod#N" button and badge disappear.
+    // entirely — its "#N" button disappears.
     //
     // Skips the tick if the previous one is still in flight (cold start).
 
@@ -2830,7 +2936,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             </EditorAreaEmpty>
                         )}
 
-                        {/* Workflow name header with Clone/Delete */}
+                        {/* Workflow name header with Copy/Clone */}
                         <div
                             style={{
                                 display: 'flex',
@@ -2869,22 +2975,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                         Copy
                                     </Btn>
                                     {isEditingSaved && (
-                                        <>
-                                            <Btn
-                                                className="sg-hover"
-                                                onClick={handleClone}
-                                                style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
-                                            >
-                                                Clone
-                                            </Btn>
-                                            <BtnDanger
-                                                className="sg-danger"
-                                                onClick={handleDelete}
-                                                style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
-                                            >
-                                                Delete
-                                            </BtnDanger>
-                                        </>
+                                        <Btn
+                                            className="sg-hover"
+                                            onClick={handleClone}
+                                            style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
+                                        >
+                                            Clone
+                                        </Btn>
                                     )}
                                 </div>
                             )}
@@ -3170,6 +3267,104 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             );
                         })}
                     </NodeList>
+
+                    {/* Workflow action bar — sits at the bottom of the node
+                        list. Delete on the left; pod run controls and Save
+                        on the right. */}
+                    {(isEditingSaved || pods.length > 0) && (
+                        <div
+                            style={{
+                                display: 'flex',
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap' as const,
+                                marginTop: 12
+                            }}
+                        >
+                            {/* Delete — destructive action, on the left */}
+                            {isEditingSaved && (
+                                <BtnDanger
+                                    className="sg-danger"
+                                    onClick={handleDelete}
+                                    title="Delete this workflow permanently"
+                                >
+                                    Delete
+                                </BtnDanger>
+                            )}
+
+                            <div style={{ flex: '1 1 auto' }} />
+
+                            {/* #N: queue another generation on an existing pod (skips pod
+                                creation). Appears the moment Generate is clicked (spawning
+                                spinner while the pod_url resolves). Never disabled while
+                                running — pods accept concurrent jobs; the in-flight count is
+                                shown next to the label. Carry their own status: spinner
+                                while spawning / while jobs are in flight, colored border for
+                                the last settled result, heartbeat removal when the pod_url
+                                dies. */}
+                            {pods.map((p) => {
+                                const isSpawning = p.status === 'spawning';
+                                const inFlight = p.activeGenerationIds.length;
+                                const isDisabled =
+                                    isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
+                                return (
+                                    <Btn
+                                        key={p.id}
+                                        className="sg-hover"
+                                        onClick={() => handlePodGenerate(p)}
+                                        disabled={isDisabled}
+                                        title={
+                                            isSpawning
+                                                ? `#${p.podNumber} — starting up…`
+                                                : p.status !== 'ready'
+                                                  ? `#${p.podNumber} — ${p.error || 'unavailable'} ` +
+                                                    `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
+                                                  : inFlight > 0
+                                                    ? `#${p.podNumber} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                                      `in flight on ${p.pod_url} — click to queue another`
+                                                    : `Queue a new generation on ${p.pod_url}`
+                                        }
+                                        style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: 6,
+                                            borderColor:
+                                                isSpawning || inFlight > 0
+                                                    ? theme.accent
+                                                    : p.run.status === 'error'
+                                                      ? theme.dangerBorder
+                                                      : p.run.status === 'done'
+                                                        ? theme.success
+                                                        : theme.border
+                                        }}
+                                        data-testid={`pod-generate-${p.podNumber}`}
+                                    >
+                                        {(isSpawning || inFlight > 0) && <SpinnerEl />}
+                                        #{p.podNumber}
+                                        {inFlight > 0 && (
+                                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600 }}>
+                                                ×{inFlight}
+                                            </span>
+                                        )}
+                                    </Btn>
+                                );
+                            })}
+
+                            {/* Save — persist the editor's widget edits back into the
+                                stored workflow json. */}
+                            {isEditingSaved && (
+                                <Btn
+                                    className="sg-hover"
+                                    onClick={handleSave}
+                                    disabled={saving}
+                                    title="Save changes to the workflow"
+                                >
+                                    {saving ? 'Saving…' : 'Save'}
+                                </Btn>
+                            )}
+                        </div>
+                    )}
                 </EditorArea>
             )}
         </>
@@ -3179,143 +3374,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
     const footer = (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
-            {/* Pod number badges — color reflects pod + run state */}
-            {pods.map((p) => {
-                const isPodRunning = p.run.status === 'running';
-                const isPodDone = p.run.status === 'done';
-                const isPodError = p.run.status === 'error' || p.status === 'error';
-
-                const badgeColor =
-                    isPodRunning
-                        ? theme.accent
-                        : isPodDone
-                          ? theme.success
-                          : isPodError
-                            ? theme.danger
-                            : p.status === 'spawning'
-                              ? theme.textDim
-                              : theme.success;
-                const bgColor =
-                    isPodRunning
-                        ? theme.accentSoft
-                        : isPodDone
-                          ? theme.successSoft
-                          : isPodError
-                            ? theme.dangerSoft
-                            : p.status === 'spawning'
-                              ? theme.surface2
-                              : theme.successSoft;
-
-                const label = p.status === 'spawning'
-                    ? ''
-                    : isPodRunning
-                      ? `${p.podNumber}`
-                      : isPodDone
-                        ? `${p.podNumber}✓`
-                        : isPodError
-                          ? `${p.podNumber}✗`
-                          : String(p.podNumber);
-
-                return (
-                    <span
-                        key={p.id}
-                        title={
-                            p.status === 'spawning'
-                                ? `Pod ${p.podNumber} — starting up…`
-                                : isPodRunning
-                                  ? `Pod ${p.podNumber} — processing…`
-                                  : isPodDone
-                                    ? `Pod ${p.podNumber} — done`
-                                    : isPodError
-                                      ? `Pod ${p.podNumber} — ${p.run.status === 'error' ? p.run.message : ''} ${p.error || 'error'}`
-                                      : `Pod ${p.podNumber} — ready`
-                        }
-                        style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            minWidth: 28,
-                            height: 28,
-                            borderRadius: 14,
-                            fontSize: theme.fontSize.xs,
-                            fontWeight: 600,
-                            color: badgeColor,
-                            backgroundColor: bgColor,
-                            border: `1px solid ${badgeColor}`,
-                            flex: '0 0 auto',
-                            padding: '0 6px',
-                            gap: 3
-                        }}
-                    >
-                        {p.status === 'spawning' ? (
-                            <SpinnerEl />
-                        ) : (
-                            <>
-                                {isPodRunning && <SpinnerEl />}
-                                {label}
-                            </>
-                        )}
-                    </span>
-                );
-            })}
-
             <div style={{ flex: '1 1 auto' }} />
-
-            {/* Pod#N: queue another generation on an existing pod (skips pod
-                creation). Appears the moment Generate is clicked (spawning
-                spinner while the pod_url resolves). Never disabled while
-                running — pods accept concurrent jobs; the in-flight count is
-                shown next to the label. Carry their own status: spinner
-                while spawning / while jobs are in flight, colored border for
-                the last settled result, heartbeat removal when the pod_url
-                dies. */}
-            {pods.map((p) => {
-                const isSpawning = p.status === 'spawning';
-                const inFlight = p.activeGenerationIds.length;
-                const isDisabled =
-                    isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
-                return (
-                    <Btn
-                        key={p.id}
-                        className="sg-hover"
-                        onClick={() => handlePodGenerate(p)}
-                        disabled={isDisabled}
-                        title={
-                            isSpawning
-                                ? `Pod#${p.podNumber} — starting up…`
-                                : p.status !== 'ready'
-                                  ? `Pod#${p.podNumber} — ${p.error || 'unavailable'} ` +
-                                    `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
-                                  : inFlight > 0
-                                    ? `Pod#${p.podNumber} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
-                                      `in flight on ${p.pod_url} — click to queue another`
-                                    : `Queue a new generation on ${p.pod_url}`
-                        }
-                        style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 6,
-                            borderColor:
-                                isSpawning || inFlight > 0
-                                    ? theme.accent
-                                    : p.run.status === 'error'
-                                      ? theme.dangerBorder
-                                      : p.run.status === 'done'
-                                        ? theme.success
-                                        : theme.border
-                        }}
-                        data-testid={`pod-generate-${p.podNumber}`}
-                    >
-                        {(isSpawning || inFlight > 0) && <SpinnerEl />}
-                        Pod#{p.podNumber}
-                        {inFlight > 0 && (
-                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600 }}>
-                                ×{inFlight}
-                            </span>
-                        )}
-                    </Btn>
-                );
-            })}
 
             {/* Generate: spawns a fresh cloud pod, snapshots the workflow, and
                 streams the run back via POST /v1/comfy/cloud/prompt.

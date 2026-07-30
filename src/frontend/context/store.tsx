@@ -109,7 +109,7 @@ type DashboardStoreContextValue = {
     refreshGenerations: (workflowId: string) => Promise<void>;
     fetchGeneration: (workflowId: string, generateId: string) => Promise<GenerationEntry>;
     generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>) => Promise<GenerationEntry>;
-    updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>) => Promise<void>;
+    updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>) => Promise<void>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
@@ -307,10 +307,10 @@ export const DashboardStoreProvider: React.FC<{
         }
     }, [store.config.baseUrl, setStore]);
 
-    // Fetch a single generation's full data (prompt, result, stream). The
-    // list endpoint only returns lightweight summaries, so the UI calls
-    // this on demand when previewing a generation's outputs (or when an
-    // agent needs the snapshotted prompt to submit).
+    // Fetch a single generation's full data (prompt + result). The list
+    // endpoint returns lightweight summaries, and result media streams via
+    // generationResultUrl(), so the remaining use is when an agent needs
+    // the snapshotted prompt to submit.
     const fetchGeneration = useCallback(async (workflowId: string, generateId: string): Promise<GenerationEntry> => {
         const { generation } = await fetchGenerationApi(`${store.config.baseUrl}`, workflowId, generateId);
         return generation;
@@ -319,7 +319,7 @@ export const DashboardStoreProvider: React.FC<{
     const updateGeneration = useCallback(async (
         workflowId: string,
         generateId: string,
-        body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error' | 'stream'>>
+        body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>
     ) => {
         await updateGenerationApi(`${store.config.baseUrl}`, workflowId, generateId, body);
         // Refresh generations after update
