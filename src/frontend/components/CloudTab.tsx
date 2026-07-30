@@ -3562,9 +3562,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     </NodeList>
 
                     {/* Workflow action bar — sits at the bottom of the node
-                        list. Delete on the left; pod run controls and Save
-                        on the right. */}
-                    {(isEditingSaved || pods.length > 0) && (
+                        list, below the JSON/PROMPT tabs. Delete on the left,
+                        Save on the right. Hidden on the RESULTS tab, where
+                        neither action applies. The pod run controls (#N)
+                        live in the footer, immediately left of Generate. */}
+                    {isEditingSaved && contentTab !== 'results' && (
                         <div
                             style={{
                                 display: 'flex',
@@ -3576,86 +3578,26 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             }}
                         >
                             {/* Delete — destructive action, on the left */}
-                            {isEditingSaved && (
-                                <BtnDanger
-                                    className="sg-danger"
-                                    onClick={handleDelete}
-                                    title="Delete this workflow permanently"
-                                >
-                                    Delete
-                                </BtnDanger>
-                            )}
+                            <BtnDanger
+                                className="sg-danger"
+                                onClick={handleDelete}
+                                title="Delete this workflow permanently"
+                            >
+                                Delete
+                            </BtnDanger>
 
                             <div style={{ flex: '1 1 auto' }} />
 
-                            {/* #N: queue another generation on an existing pod (skips pod
-                                creation). Appears the moment Generate is clicked (spawning
-                                spinner while the pod_url resolves). Never disabled while
-                                running — pods accept concurrent jobs; the in-flight count is
-                                shown next to the label. Carry their own status: spinner
-                                while spawning / while jobs are in flight, colored border for
-                                the last settled result, heartbeat removal when the pod_url
-                                dies. */}
-                            {pods.map((p) => {
-                                const isSpawning = p.status === 'spawning';
-                                const inFlight = p.activeGenerationIds.length;
-                                const isDisabled =
-                                    isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
-                                return (
-                                    <Btn
-                                        key={p.id}
-                                        className="sg-hover"
-                                        onClick={() => handlePodGenerate(p)}
-                                        disabled={isDisabled}
-                                        title={
-                                            isSpawning
-                                                ? `#${p.podNumber} — starting up…`
-                                                : p.status !== 'ready'
-                                                  ? `#${p.podNumber} — ${p.error || 'unavailable'} ` +
-                                                    `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
-                                                  : inFlight > 0
-                                                    ? `#${p.podNumber} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
-                                                      `in flight on ${p.pod_url} — click to queue another`
-                                                    : `Queue a new generation on ${p.pod_url}`
-                                        }
-                                        style={{
-                                            display: 'inline-flex',
-                                            alignItems: 'center',
-                                            gap: 6,
-                                            borderColor:
-                                                isSpawning || inFlight > 0
-                                                    ? theme.accent
-                                                    : p.run.status === 'error'
-                                                      ? theme.dangerBorder
-                                                      : p.run.status === 'done'
-                                                        ? theme.success
-                                                        : theme.border
-                                        }}
-                                        data-testid={`pod-generate-${p.podNumber}`}
-                                    >
-                                        {(isSpawning || inFlight > 0) && <SpinnerEl />}
-                                        #{p.podNumber}
-                                        {inFlight > 0 && (
-                                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600 }}>
-                                                ×{inFlight}
-                                            </span>
-                                        )}
-                                    </Btn>
-                                );
-                            })}
-
                             {/* Save — persist the editor's widget edits back into the
                                 stored workflow json. */}
-                            {isEditingSaved && (
-                                <Btn
-                                    className="sg-hover"
-                                    onClick={handleSave}
-                                    disabled={saving}
-                                    title="Save changes to the workflow"
-                                >
-                                    {saving ? 'Saving…' : 'Save'}
-                                </Btn>
-                            )}
+                            <Btn
+                                className="sg-hover"
+                                onClick={handleSave}
+                                disabled={saving}
+                                title="Save changes to the workflow"
+                            >
+                                {saving ? 'Saving…' : 'Save'}
+                            </Btn>
                         </div>
                     )}
                 </EditorArea>
@@ -3668,6 +3610,62 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const footer = (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
             <div style={{ flex: '1 1 auto' }} />
+
+            {/* #N: queue another generation on an existing pod (skips pod
+                creation). Appears the moment Generate is clicked (spawning
+                spinner while the pod_url resolves). Sits immediately left of
+                Generate. Never disabled while running — pods accept
+                concurrent jobs; the in-flight count is shown next to the
+                label. Carry their own status: spinner while spawning / while
+                jobs are in flight, colored border for the last settled
+                result, heartbeat removal when the pod_url dies. */}
+            {pods.map((p) => {
+                const isSpawning = p.status === 'spawning';
+                const inFlight = p.activeGenerationIds.length;
+                const isDisabled =
+                    isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
+                return (
+                    <Btn
+                        key={p.id}
+                        className="sg-hover"
+                        onClick={() => handlePodGenerate(p)}
+                        disabled={isDisabled}
+                        title={
+                            isSpawning
+                                ? `#${p.podNumber} — starting up…`
+                                : p.status !== 'ready'
+                                  ? `#${p.podNumber} — ${p.error || 'unavailable'} ` +
+                                    `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
+                                  : inFlight > 0
+                                    ? `#${p.podNumber} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                      `in flight on ${p.pod_url} — click to queue another`
+                                    : `Queue a new generation on ${p.pod_url}`
+                        }
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            borderColor:
+                                isSpawning || inFlight > 0
+                                    ? theme.accent
+                                    : p.run.status === 'error'
+                                      ? theme.dangerBorder
+                                      : p.run.status === 'done'
+                                        ? theme.success
+                                        : theme.border
+                        }}
+                        data-testid={`pod-generate-${p.podNumber}`}
+                    >
+                        {(isSpawning || inFlight > 0) && <SpinnerEl />}
+                        #{p.podNumber}
+                        {inFlight > 0 && (
+                            <span style={{ fontSize: theme.fontSize.xs, color: theme.accent, fontWeight: 600 }}>
+                                ×{inFlight}
+                            </span>
+                        )}
+                    </Btn>
+                );
+            })}
 
             {/* Generate: spawns a fresh cloud pod, snapshots the workflow, and
                 streams the run back via POST /v1/comfy/cloud/prompt.
@@ -3995,48 +3993,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 }}
                             />
                         ) : null}
-
-                        {/* Info bar — floating overlay on mobile so it never
-                            shrinks the image's box; in-flow on desktop. */}
-                        <div
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                gap: 12,
-                                color: 'rgba(255,255,255,0.8)',
-                                fontSize: theme.fontSize.sm,
-                                ...(isMobile
-                                    ? {
-                                          position: 'absolute' as const,
-                                          bottom: 12,
-                                          left: '50%',
-                                          transform: 'translateX(-50%)',
-                                          maxWidth: '92vw',
-                                          flexWrap: 'wrap' as const,
-                                          padding: '6px 12px',
-                                          borderRadius: theme.radiusMd,
-                                          backgroundColor: 'rgba(0,0,0,0.55)'
-                                      }
-                                    : {})
-                            }}
-                        >
-                            <span>
-                                {viewerIndex + 1} / {viewerEntries.length}
-                            </span>
-                            {viewerCurrent && (
-                                <>
-                                    <span style={{ opacity: 0.5 }}>|</span>
-                                    <span>gen {viewerCurrent.generationId}</span>
-                                    <span style={{ opacity: 0.5 }}>|</span>
-                                    <span>{viewerCurrent.mimeType}</span>
-                                    <span style={{ opacity: 0.5 }}>|</span>
-                                    <span>{viewerCurrent.size ? `${(viewerCurrent.size / 1024).toFixed(1)} KB` : ''}</span>
-                                    <span style={{ opacity: 0.5 }}>|</span>
-                                    <span>node {viewerCurrent.nodeId}</span>
-                                </>
-                            )}
-                        </div>
                     </div>
 
                     {/* Right arrow */}
