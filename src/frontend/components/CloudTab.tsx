@@ -612,7 +612,9 @@ const SubgraphNodeCard: React.FC<{
     node: UINode;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
     executingNodeId?: string | null;
-}> = React.memo(({ node, updateNodeWidget, executingNodeId }) => {
+    promptFields: Set<string>;
+    togglePromptField: (node: UINode, widgetIdx: number) => void;
+}> = React.memo(({ node, updateNodeWidget, executingNodeId, promptFields, togglePromptField }) => {
     const isSubgraph = !!node.subgraphDef;
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
@@ -714,16 +716,31 @@ const SubgraphNodeCard: React.FC<{
                         </LinkBadge>
                     </InputRow>
                 ))}
-                {node.widgets.map((widget) => (
-                    <InputRow key={`w${widget.index}`}>
-                        <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
-                        <AutoGrowTextarea
-                            value={displayValue(widget.value)}
-                            onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
-                            readOnly={false}
-                        />
-                    </InputRow>
-                ))}
+                {node.widgets.map((widget) => {
+                    const fieldKey = promptWidgetKey(node, widget);
+                    const isPromptField = promptFields.has(fieldKey);
+                    return (
+                        <InputRow key={`w${widget.index}`}>
+                            <InputLabel
+                                onClick={() => togglePromptField(node, widget.index)}
+                                title={isPromptField ? 'Remove from the PROMPT tab' : 'Add to the PROMPT tab'}
+                                style={{
+                                    cursor: 'pointer',
+                                    userSelect: 'none',
+                                    color: isPromptField ? theme.accent : undefined,
+                                    fontWeight: isPromptField ? 600 : undefined
+                                }}
+                            >
+                                {getWidgetLabel(node.classType, widget.index)}
+                            </InputLabel>
+                            <AutoGrowTextarea
+                                value={displayValue(widget.value)}
+                                onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
+                                readOnly={false}
+                            />
+                        </InputRow>
+                    );
+                })}
                 {node.outputs.length > 0 && (
                     <div
                         style={{
@@ -817,6 +834,8 @@ const SubgraphNodeCard: React.FC<{
                                     node={inner}
                                     updateNodeWidget={updateNodeWidget}
                                     executingNodeId={executingNodeId}
+                                    promptFields={promptFields}
+                                    togglePromptField={togglePromptField}
                                 />
                             ))}
                         </div>
@@ -1879,6 +1898,83 @@ function applyWidgetEditsToRaw(raw: Record<string, unknown>, nodes: UINode[]): R
     return clone;
 }
 
+// ── PROMPT tab field selection ────────────────────────────────────────
+//
+// Every widget label in the JSON node layout is a toggle: clicking it adds
+// (or removes) that field from the PROMPT tab, which offers a compact list
+// of just the chosen fields — the quick way to tweak a long workflow
+// without scrolling. The selection is stored in the workflow json itself
+// (extra.promptFields — ComfyUI tolerates and preserves unknown extra keys)
+// so it rides along with Save and is restored on the next load.
+
+/** Where the selection lives inside the workflow json's `extra` object. */
+const PROMPT_FIELDS_EXTRA_KEY = 'promptFields' as const;
+
+/** A selected field: which widget on which node (tree reference + its key). */
+type PromptWidgetRef = { key: string; node: UINode; widget: UIWidget };
+
+/**
+ * Stable key for a widget: "<nodeId>:<apiInputName>". The registry input
+ * name is preferred (it is the canonical API key); unregistered nodes fall
+ * back to the inferred name, then to a positional key. The node id portion
+ * is produced at parse time and is deterministic for a given workflow json,
+ * so saved keys re-resolve after every load of that same json.
+ */
+function promptWidgetKey(node: UINode, widget: UIWidget): string {
+    const name =
+        comfyNodeRegistry[node.classType]?.widgets[widget.index]?.name ??
+        widget.inferredName ??
+        `widget_${widget.index}`;
+    return `${node.id}:${name}`;
+}
+
+/** Flatten the editor tree (recursing into subgraphs) into every widget, in display order. */
+function collectPromptWidgets(nodes: UINode[]): Map<string, PromptWidgetRef> {
+    const map = new Map<string, PromptWidgetRef>();
+    const walk = (list: UINode[]): void => {
+        for (const node of list) {
+            for (const widget of node.widgets) {
+                const key = promptWidgetKey(node, widget);
+                if (!map.has(key)) map.set(key, { key, node, widget });
+            }
+            if (node.subgraphNodes && node.subgraphNodes.length > 0) {
+                walk(node.subgraphNodes);
+            }
+        }
+    };
+    walk(nodes);
+    return map;
+}
+
+/** Read the saved selection from raw.extra, dropping keys that no longer exist in the tree. */
+function readSavedPromptFields(raw: Record<string, unknown>, nodes: UINode[]): Set<string> {
+    const saved = (raw.extra as Record<string, unknown> | undefined)?.[PROMPT_FIELDS_EXTRA_KEY];
+    if (!Array.isArray(saved)) return new Set();
+    const valid = collectPromptWidgets(nodes);
+    const set = new Set<string>();
+    for (const key of saved) {
+        if (typeof key === 'string' && valid.has(key)) set.add(key);
+    }
+    return set;
+}
+
+/** Copy of raw with the selection stored under extra (removed entirely when empty). */
+function writePromptFieldsToRaw(raw: Record<string, unknown>, fields: Set<string>): Record<string, unknown> {
+    const extra = { ...((raw.extra as Record<string, unknown> | undefined) ?? {}) };
+    if (fields.size > 0) {
+        extra[PROMPT_FIELDS_EXTRA_KEY] = [...fields].sort();
+    } else {
+        delete extra[PROMPT_FIELDS_EXTRA_KEY];
+    }
+    const clone: Record<string, unknown> = { ...raw };
+    if (Object.keys(extra).length > 0) {
+        clone.extra = extra;
+    } else {
+        delete clone.extra;
+    }
+    return clone;
+}
+
 // ── Component ──────────────────────────────────────────────────────────
 
 export type CloudTabProps = {
@@ -1915,9 +2011,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [renameOpen, setRenameOpen] = React.useState(false);
     const [renameValue, setRenameValue] = React.useState('');
     const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
-    // Content area switcher — "json" shows the workflow node layout,
-    // "prompt" is a placeholder (blank for now).
+    // Content area switcher — "json" shows the workflow node layout;
+    // "prompt" shows the quick-edit fields picked via label clicks.
     const [contentTab, setContentTab] = React.useState<'json' | 'prompt'>('json');
+    // Keys of widgets promoted into the PROMPT quick-edit tab. Clicking a
+    // widget label in the JSON layout toggles its key here. Persisted into
+    // the workflow json (extra.promptFields) via Save so it survives reload.
+    const [promptFields, setPromptFields] = React.useState<Set<string>>(new Set());
     const [agentRunning, setAgentRunning] = React.useState(false);
     const [executingNodeId, setExecutingNodeId] = React.useState<string | null>(null);
     const [agentCount, setAgentCount] = React.useState(0);
@@ -2117,9 +2217,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     React.useEffect(() => {
         const full = store.selectedWorkflow;
         if (full && full.raw) {
+            const parsed = renumberNodes(sortNodesDeep(parseWorkflowJson(full.raw)));
             setRawJson(full.raw);
-            setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(full.raw))));
+            setNodes(parsed);
             setFileName(`${full.name}.json`);
+            // Restore the saved PROMPT field selection; with fields present
+            // the PROMPT tab becomes the active view.
+            const fields = readSavedPromptFields(full.raw, parsed);
+            setPromptFields(fields);
+            setContentTab(fields.size > 0 ? 'prompt' : 'json');
         }
     }, [store.selectedWorkflow]);
 
@@ -2148,13 +2254,18 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             reader.onload = () => {
                 try {
                     const parsed = JSON.parse(reader.result as string) as Record<string, unknown>;
+                    const uiNodes = renumberNodes(sortNodesDeep(parseWorkflowJson(parsed)));
                     setRawJson(parsed);
-                    setNodes(renumberNodes(sortNodesDeep(parseWorkflowJson(parsed))));
+                    setNodes(uiNodes);
                     const name = file.name.replace(/\.json$/i, '') || 'Untitled Workflow';
                     setFileName(file.name);
                     // Auto-save the workflow with the filename as the name.
                     // Pods are independent of workflows — do not reset them.
                     autoSaveWorkflow(parsed, name);
+                    // Dropped files may carry a saved PROMPT selection too.
+                    const fields = readSavedPromptFields(parsed, uiNodes);
+                    setPromptFields(fields);
+                    setContentTab(fields.size > 0 ? 'prompt' : 'json');
                 } catch {
                     alert('Invalid JSON file');
                 }
@@ -2206,6 +2317,41 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             });
         setNodes((prev) => updateInTree(prev));
     }, []);
+
+    // ── PROMPT tab field toggling ──────────────────────────────────────
+    // Clicking a widget label (in either tab) toggles the field in/out of
+    // the PROMPT quick-edit list. Both tabs bind to the same tree state, so
+    // edits on one side are instantly reflected on the other.
+
+    const togglePromptField = React.useCallback((node: UINode, widgetIdx: number) => {
+        const widget = node.widgets.find((w) => w.index === widgetIdx);
+        if (!widget) return;
+        const key = promptWidgetKey(node, widget);
+        setPromptFields((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    }, []);
+
+    /** Selected fields resolved against the current tree, in display order. */
+    const promptEntries = React.useMemo(() => {
+        const all = collectPromptWidgets(nodes);
+        const refs: PromptWidgetRef[] = [];
+        for (const [key, ref] of all) {
+            if (promptFields.has(key)) refs.push(ref);
+        }
+        return refs;
+    }, [nodes, promptFields]);
+
+    // The PROMPT tab only makes sense with something in it — fall back to
+    // JSON when the last field is removed while PROMPT is active.
+    React.useEffect(() => {
+        if (contentTab === 'prompt' && promptFields.size === 0) {
+            setContentTab('json');
+        }
+    }, [contentTab, promptFields]);
 
     // ── Build API prompt from the current editor tree ────────────────
     // The editor tree (with all widget edits) is the source of truth —
@@ -2278,6 +2424,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             setNodes([]);
             setRawJson(null);
             setFileName('');
+            setPromptFields(new Set());
+            setContentTab('json');
         } catch (err: any) {
             alert(`Failed to delete: ${err.message ?? String(err)}`);
         }
@@ -2293,7 +2441,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         if (!editingWorkflowId || !rawJson || saving) return;
         setSaving(true);
         try {
-            const updatedRaw = applyWidgetEditsToRaw(rawJson, nodes);
+            // Widget edits AND the PROMPT field selection both persist into
+            // the stored json (widget values into widgets_values, the field
+            // selection into extra.promptFields).
+            const updatedRaw = writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields);
             await updateWorkflow(editingWorkflowId, { raw: updatedRaw });
             // Keep the local copy in sync so a subsequent Save builds from it.
             setRawJson(updatedRaw);
@@ -2302,7 +2453,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         } finally {
             setSaving(false);
         }
-    }, [editingWorkflowId, rawJson, nodes, saving, updateWorkflow]);
+    }, [editingWorkflowId, rawJson, nodes, promptFields, saving, updateWorkflow]);
 
     // ── Rename workflow ────────────────────────────────────────────
 
@@ -2997,15 +3148,39 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     className="sg-hover"
                                     role="tab"
                                     aria-selected={contentTab === 'prompt'}
+                                    aria-disabled={promptFields.size === 0}
                                     data-testid="tab-prompt"
-                                    onClick={() => setContentTab('prompt')}
-                                    style={
-                                        contentTab === 'prompt'
-                                            ? { color: theme.accent, borderBottomColor: theme.accent }
+                                    onClick={() => {
+                                        // Nothing to show until at least one
+                                        // field is toggled on the JSON side.
+                                        if (promptFields.size > 0) setContentTab('prompt');
+                                    }}
+                                    title={
+                                        promptFields.size === 0
+                                            ? 'Click a field label in the JSON tab to add it here'
                                             : undefined
+                                    }
+                                    style={
+                                        promptFields.size === 0
+                                            ? { opacity: 0.4, cursor: 'not-allowed' }
+                                            : contentTab === 'prompt'
+                                              ? { color: theme.accent, borderBottomColor: theme.accent }
+                                              : undefined
                                     }
                                 >
                                     PROMPT
+                                    {promptFields.size > 0 && (
+                                        <span
+                                            style={{
+                                                marginLeft: 6,
+                                                fontSize: theme.fontSize.xs,
+                                                color: theme.accent,
+                                                fontWeight: 600
+                                            }}
+                                        >
+                                            {promptFields.size}
+                                        </span>
+                                    )}
                                 </TabBtn>
                             </div>
                             <div style={{ display: 'flex', gap: 6, flexShrink: 0, paddingBottom: 4 }}>
@@ -3172,20 +3347,42 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                             </InputRow>
                                         ))}
 
-                                        {/* Widget values */}
-                                        {node.widgets.map((widget) => (
-                                            <InputRow key={`w${widget.index}`}>
-                                                <InputLabel>{getWidgetLabel(node.classType, widget.index)}</InputLabel>
-                                                <AutoGrowTextarea
-                                                    value={displayValue(widget.value)}
-                                                    onChange={(e) =>
-                                                        updateNodeWidget(node.id, widget.index, e.target.value)
-                                                    }
-                                                    readOnly={false}
-                                                    data-testid={`cloud-widget-${node.id}-${widget.index}`}
-                                                />
-                                            </InputRow>
-                                        ))}
+                                        {/* Widget values — labels are clickable
+                                            toggles: a toggled field also appears
+                                            in the PROMPT quick-edit tab. */}
+                                        {node.widgets.map((widget) => {
+                                            const fieldKey = promptWidgetKey(node, widget);
+                                            const isPromptField = promptFields.has(fieldKey);
+                                            return (
+                                                <InputRow key={`w${widget.index}`}>
+                                                    <InputLabel
+                                                        onClick={() => togglePromptField(node, widget.index)}
+                                                        title={
+                                                            isPromptField
+                                                                ? 'Remove from the PROMPT tab'
+                                                                : 'Add to the PROMPT tab'
+                                                        }
+                                                        style={{
+                                                            cursor: 'pointer',
+                                                            userSelect: 'none',
+                                                            color: isPromptField ? theme.accent : undefined,
+                                                            fontWeight: isPromptField ? 600 : undefined
+                                                        }}
+                                                        data-testid={`cloud-widget-label-${node.id}-${widget.index}`}
+                                                    >
+                                                        {getWidgetLabel(node.classType, widget.index)}
+                                                    </InputLabel>
+                                                    <AutoGrowTextarea
+                                                        value={displayValue(widget.value)}
+                                                        onChange={(e) =>
+                                                            updateNodeWidget(node.id, widget.index, e.target.value)
+                                                        }
+                                                        readOnly={false}
+                                                        data-testid={`cloud-widget-${node.id}-${widget.index}`}
+                                                    />
+                                                </InputRow>
+                                            );
+                                        })}
 
                                         {/* Output slots */}
                                         {node.outputs.length > 0 && (
@@ -3302,6 +3499,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                             node={inner}
                                                             updateNodeWidget={updateNodeWidget}
                                                             executingNodeId={executingNodeId}
+                                                            promptFields={promptFields}
+                                                            togglePromptField={togglePromptField}
                                                         />
                                                     ))}
                                                 </div>
@@ -3314,9 +3513,61 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             </>
                         )}
 
-                        {/* PROMPT tab — intentionally blank for now */}
+                        {/* PROMPT tab — compact list of every field toggled on
+                            the JSON side, in workflow (display) order. Edits
+                            write into the same tree state the JSON tab shows. */}
                         {contentTab === 'prompt' && (
-                            <div data-testid="prompt-tab-pane" style={{ minHeight: 160 }} />
+                            <div data-testid="prompt-tab-pane">
+                                {promptEntries.length === 0 ? (
+                                    <div
+                                        style={{
+                                            fontSize: theme.fontSize.sm,
+                                            color: theme.textFaint,
+                                            padding: '20px 4px'
+                                        }}
+                                    >
+                                        No fields selected — click a field label in the JSON tab to add it here.
+                                    </div>
+                                ) : (
+                                    promptEntries.map(({ key, node, widget }) => (
+                                        <InputRow
+                                            key={key}
+                                            style={{ alignItems: 'flex-start', marginBottom: 6 }}
+                                        >
+                                            <InputLabel
+                                                onClick={() => togglePromptField(node, widget.index)}
+                                                title={`Remove from the PROMPT tab (${node.classType} #${node.id})`}
+                                                style={{
+                                                    cursor: 'pointer',
+                                                    userSelect: 'none',
+                                                    color: theme.accent,
+                                                    fontWeight: 600,
+                                                    paddingTop: 4,
+                                                    minWidth: 140
+                                                }}
+                                            >
+                                                {getWidgetLabel(node.classType, widget.index)}
+                                                <span
+                                                    style={{
+                                                        display: 'block',
+                                                        fontWeight: 400,
+                                                        color: theme.textFaint,
+                                                        fontSize: '0.9em'
+                                                    }}
+                                                >
+                                                    {node.classType} #{node.id}
+                                                </span>
+                                            </InputLabel>
+                                            <AutoGrowTextarea
+                                                value={displayValue(widget.value)}
+                                                onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
+                                                readOnly={false}
+                                                data-testid={`prompt-widget-${key}`}
+                                            />
+                                        </InputRow>
+                                    ))
+                                )}
+                            </div>
                         )}
                     </NodeList>
 
