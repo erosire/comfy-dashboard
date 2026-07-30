@@ -175,11 +175,20 @@ const SpinnerEl = styled('span')({
     animation: 'sg-spin 700ms linear infinite'
 });
 
-const SectionLabel = styled('div')({
+// TabBtn — a tab-strip item for the content area switcher. The active tab
+// gets an accent underline (via the style prop) that overlaps the strip's
+// 1px bottom border (marginBottom: -1).
+const TabBtn = styled('button')({
+    padding: '6px 14px',
     fontSize: theme.fontSize.sm,
     fontWeight: 600,
+    border: 'none',
+    backgroundColor: 'transparent',
     color: theme.textDim,
-    marginBottom: 6
+    cursor: 'pointer',
+    borderBottom: `2px solid transparent`,
+    marginBottom: -1,
+    transition: `color ${theme.transition}, border-color ${theme.transition}`
 });
 
 const ToggleButton = styled('button')({
@@ -1906,6 +1915,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [renameOpen, setRenameOpen] = React.useState(false);
     const [renameValue, setRenameValue] = React.useState('');
     const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
+    // Content area switcher — "json" shows the workflow node layout,
+    // "prompt" is a placeholder (blank for now).
+    const [contentTab, setContentTab] = React.useState<'json' | 'prompt'>('json');
     const [agentRunning, setAgentRunning] = React.useState(false);
     const [executingNodeId, setExecutingNodeId] = React.useState<string | null>(null);
     const [agentCount, setAgentCount] = React.useState(0);
@@ -2953,57 +2965,73 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             </EditorAreaEmpty>
                         )}
 
-                        {/* Workflow name header with Copy/Clone */}
+                        {/* Content tabs — JSON shows the workflow layout;
+                            PROMPT is a placeholder (blank for now).
+                            Copy/Clone sit on the right of the tab strip. */}
                         <div
                             style={{
                                 display: 'flex',
-                                alignItems: 'center',
+                                alignItems: 'flex-end',
                                 justifyContent: 'space-between',
                                 gap: 8,
-                                marginBottom: 10
+                                marginBottom: 10,
+                                borderBottom: `1px solid ${theme.border}`
                             }}
                         >
-                            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
-                                <SectionLabel style={{ marginBottom: 0, whiteSpace: 'nowrap' }}>
-                                    {isEditingSaved && store.selectedWorkflow ? store.selectedWorkflow.name : 'Unsaved'}
-                                </SectionLabel>
-                                {isEditingSaved && store.selectedWorkflow?.description && (
-                                    <span
-                                        style={{
-                                            fontSize: theme.fontSize.xs,
-                                            color: theme.textFaint,
-                                            overflow: 'hidden',
-                                            textOverflow: 'ellipsis',
-                                            whiteSpace: 'nowrap' as const
-                                        }}
-                                    >
-                                        {store.selectedWorkflow.description}
-                                    </span>
-                                )}
-
+                            <div style={{ display: 'flex', gap: 4 }} role="tablist">
+                                <TabBtn
+                                    className="sg-hover"
+                                    role="tab"
+                                    aria-selected={contentTab === 'json'}
+                                    data-testid="tab-json"
+                                    onClick={() => setContentTab('json')}
+                                    style={
+                                        contentTab === 'json'
+                                            ? { color: theme.accent, borderBottomColor: theme.accent }
+                                            : undefined
+                                    }
+                                >
+                                    JSON
+                                </TabBtn>
+                                <TabBtn
+                                    className="sg-hover"
+                                    role="tab"
+                                    aria-selected={contentTab === 'prompt'}
+                                    data-testid="tab-prompt"
+                                    onClick={() => setContentTab('prompt')}
+                                    style={
+                                        contentTab === 'prompt'
+                                            ? { color: theme.accent, borderBottomColor: theme.accent }
+                                            : undefined
+                                    }
+                                >
+                                    PROMPT
+                                </TabBtn>
                             </div>
-                            {nodes.length > 0 && (
-                                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                            <div style={{ display: 'flex', gap: 6, flexShrink: 0, paddingBottom: 4 }}>
+                                <Btn
+                                    className="sg-hover"
+                                    onClick={handleCopyJson}
+                                    style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
+                                >
+                                    Copy
+                                </Btn>
+                                {isEditingSaved && (
                                     <Btn
                                         className="sg-hover"
-                                        onClick={handleCopyJson}
+                                        onClick={handleClone}
                                         style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
                                     >
-                                        Copy
+                                        Clone
                                     </Btn>
-                                    {isEditingSaved && (
-                                        <Btn
-                                            className="sg-hover"
-                                            onClick={handleClone}
-                                            style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
-                                        >
-                                            Clone
-                                        </Btn>
-                                    )}
-                                </div>
-                            )}
+                                )}
+                            </div>
                         </div>
-                        {nodes.map((node) => {
+
+                        {/* JSON tab — the workflow node layout */}
+                        {contentTab === 'json' && (
+                            <>
+                                {nodes.map((node) => {
                             const isSubgraph = !!node.subgraphDef;
                             const registryEntry = comfyNodeRegistry[node.classType];
                             const isUnregistered = !isSubgraph && !registryEntry;
@@ -3283,6 +3311,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 </NodeCard>
                             );
                         })}
+                            </>
+                        )}
+
+                        {/* PROMPT tab — intentionally blank for now */}
+                        {contentTab === 'prompt' && (
+                            <div data-testid="prompt-tab-pane" style={{ minHeight: 160 }} />
+                        )}
                     </NodeList>
 
                     {/* Workflow action bar — sits at the bottom of the node
