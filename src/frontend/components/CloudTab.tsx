@@ -1905,6 +1905,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [searchText, setSearchText] = React.useState(store.searchQuery);
     const [renameOpen, setRenameOpen] = React.useState(false);
     const [renameValue, setRenameValue] = React.useState('');
+    const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
     const [agentRunning, setAgentRunning] = React.useState(false);
     const [executingNodeId, setExecutingNodeId] = React.useState<string | null>(null);
     const [agentCount, setAgentCount] = React.useState(0);
@@ -1919,7 +1920,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const viewerTouchRef = React.useRef<{ x: number; y: number } | null>(null);
     const viewerRef = React.useRef<HTMLDivElement>(null);
     // Mobile breakpoint — matches ComfyDashboard's (max-width: 767px).
-    const viewerIsMobile = useMediaQuery('(max-width: 767px)');
+    // Drives all JS-side responsive behavior (viewer chrome, editor padding).
+    const isMobile = useMediaQuery('(max-width: 767px)');
 
     // ── Viewer navigation model ───────────────────────────────────────
     // Generation summaries carry per-result metadata (resultItems) WITHOUT
@@ -2243,10 +2245,19 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     }, [editingWorkflowId, cloneWorkflow, selectWorkflow]);
 
     // ── Delete workflow ──────────────────────────────────────────────
+    // Delete is destructive, so the button only opens a confirmation
+    // dialog — an accidental click can never wipe a workflow. A custom
+    // modal is used instead of window.confirm, which some embedded
+    // webviews silently suppress.
 
-    const handleDelete = React.useCallback(async () => {
+    const handleDelete = React.useCallback(() => {
         if (!editingWorkflowId) return;
-        if (!confirm('Delete this workflow permanently?')) return;
+        setDeleteConfirmOpen(true);
+    }, [editingWorkflowId]);
+
+    const confirmDelete = React.useCallback(async () => {
+        if (!editingWorkflowId) return;
+        setDeleteConfirmOpen(false);
         try {
             await deleteWorkflow(editingWorkflowId);
             // Clear editor. Pods are independent Beam cloud instances —
@@ -2914,7 +2925,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     onDrop={handleDrop}
                     onDragOver={handleDragOver}
                     onDragLeave={handleDragLeave}
-                    style={dragOver ? { backgroundColor: theme.accentSoft } : undefined}
+                    style={{
+                        ...(dragOver ? { backgroundColor: theme.accentSoft } : undefined),
+                        // Narrower horizontal padding on mobile — the default
+                        // 24px per side eats too much of a small screen.
+                        paddingLeft: isMobile ? 8 : 24,
+                        paddingRight: isMobile ? 8 : 24
+                    }}
                     data-testid="cloud-content-area"
                 >
                     <NodeList data-testid="cloud-node-list">
@@ -3515,6 +3532,49 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 </div>
             )}
 
+            {/* Delete confirmation dialog — guards against accidental clicks */}
+            {deleteConfirmOpen && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 1000,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: 'rgba(0,0,0,0.5)'
+                    }}
+                    onClick={() => setDeleteConfirmOpen(false)}
+                >
+                    <div
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                            // Solid base surface (theme.bg), same as the rename
+                            // dialog — translucent surface tokens would let the
+                            // dashboard show through the modal backdrop.
+                            backgroundColor: theme.bg,
+                            border: `1px solid ${theme.border}`,
+                            borderRadius: theme.radiusLg,
+                            padding: 20,
+                            minWidth: 320,
+                            boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+                        }}
+                    >
+                        <div style={{ fontSize: theme.fontSize.sm, fontWeight: 600, color: theme.text, marginBottom: 8 }}>
+                            Delete Workflow
+                        </div>
+                        <div style={{ fontSize: theme.fontSize.sm, color: theme.textMuted, lineHeight: 1.5 }}>
+                            Delete {store.selectedWorkflow?.name ? `"${store.selectedWorkflow.name}"` : 'this workflow'} permanently?
+                            This cannot be undone.
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
+                            <Btn onClick={() => setDeleteConfirmOpen(false)} autoFocus>Cancel</Btn>
+                            <BtnDanger className="sg-danger" onClick={confirmDelete}>Delete</BtnDanger>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* ── Image/Video Viewer Modal ──────────────────────────── */}
             {viewerOpen && viewerEntries.length > 0 && (
                 <div
@@ -3527,7 +3587,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         alignItems: 'center',
                         justifyContent: 'center',
                         // Fully opaque on mobile — the image goes edge to edge.
-                        backgroundColor: viewerIsMobile ? '#000' : 'rgba(0,0,0,0.85)',
+                        backgroundColor: isMobile ? '#000' : 'rgba(0,0,0,0.85)',
                         // Swipes are handled manually; block pull-to-refresh
                         // and page scroll leaking from behind the modal.
                         touchAction: 'none'
@@ -3607,7 +3667,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     <div
                         onClick={(e) => e.stopPropagation()}
                         style={
-                            viewerIsMobile
+                            isMobile
                                 ? {
                                       width: '100vw',
                                       height: '100dvh',
@@ -3637,11 +3697,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     // ratio; on mobile the box is the full
                                     // viewport so the image is as large as it
                                     // can possibly be (letterboxed as needed).
-                                    maxWidth: viewerIsMobile ? '100vw' : '85vw',
-                                    maxHeight: viewerIsMobile ? '100dvh' : '80vh',
+                                    maxWidth: isMobile ? '100vw' : '85vw',
+                                    maxHeight: isMobile ? '100dvh' : '80vh',
                                     objectFit: 'contain',
-                                    borderRadius: viewerIsMobile ? 0 : theme.radiusMd,
-                                    boxShadow: viewerIsMobile ? 'none' : '0 4px 24px rgba(0,0,0,0.5)'
+                                    borderRadius: isMobile ? 0 : theme.radiusMd,
+                                    boxShadow: isMobile ? 'none' : '0 4px 24px rgba(0,0,0,0.5)'
                                 }}
                             />
                         ) : viewerMediaUrl && viewerCurrent?.type === 'video' ? (
@@ -3652,10 +3712,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 controls
                                 autoPlay
                                 style={{
-                                    maxWidth: viewerIsMobile ? '100vw' : '85vw',
-                                    maxHeight: viewerIsMobile ? '100dvh' : '80vh',
-                                    borderRadius: viewerIsMobile ? 0 : theme.radiusMd,
-                                    boxShadow: viewerIsMobile ? 'none' : '0 4px 24px rgba(0,0,0,0.5)'
+                                    maxWidth: isMobile ? '100vw' : '85vw',
+                                    maxHeight: isMobile ? '100dvh' : '80vh',
+                                    borderRadius: isMobile ? 0 : theme.radiusMd,
+                                    boxShadow: isMobile ? 'none' : '0 4px 24px rgba(0,0,0,0.5)'
                                 }}
                             />
                         ) : null}
@@ -3670,7 +3730,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 gap: 12,
                                 color: 'rgba(255,255,255,0.8)',
                                 fontSize: theme.fontSize.sm,
-                                ...(viewerIsMobile
+                                ...(isMobile
                                     ? {
                                           position: 'absolute' as const,
                                           bottom: 12,
@@ -3738,7 +3798,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     {/* Close affordance: explicit ✕ button on mobile (there's
                         little tappable backdrop around an edge-to-edge image),
                         keyboard hint on desktop. */}
-                    {viewerIsMobile ? (
+                    {isMobile ? (
                         <button
                             onClick={closeViewer}
                             aria-label="Close"
