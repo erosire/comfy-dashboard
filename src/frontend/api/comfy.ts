@@ -17,6 +17,9 @@
 //   GET    /v1/comfy/workflows/:id/generate/:generate_id   → { generation: GenerationEntry }
 //   PUT    /v1/comfy/workflows/:id/generate/:generate_id   → { generation: GenerationEntry }
 //
+// Generation result media (streamable binary — <img src> / <video src> ready):
+//   GET    /v1/comfy/workflows/:id/generate/:generate_id/result/:index → raw bytes (image/*, video/*)
+//
 // Queue:
 //   GET /v1/comfy/queue              → { queue: QueueItem[] }
 //   POST /v1/comfy/queue             → { id: string, message: string }
@@ -78,6 +81,14 @@ export type GenerationResultItem = {
     nodeId: string;
 };
 
+/**
+ * A result item WITHOUT its heavy `url` payload — what GenerationSummary
+ * entries carry so the UI can label/count results (and pick <img> vs
+ * <video>) without pulling megabytes of base64. The bytes themselves are
+ * streamed on demand via `generationResultUrl()`.
+ */
+export type GenerationResultMeta = Omit<GenerationResultItem, 'url'>;
+
 export type GenerationEntry = {
     id: string;
     status: 'pending' | 'processing' | 'completed' | 'failed';
@@ -95,11 +106,13 @@ export type GenerationEntry = {
  * Lightweight summary of a generation entry — what the list endpoint
  * (GET /v1/comfy/workflows/{id}/generate) returns.
  *
- * Excludes the heavy `prompt` (full workflow JSON), `result` (image/video
- * data: URLs, often megabytes), and `stream` (raw NDJSON events) so the
- * list loads fast. Fetch the full entry with `fetchGeneration` when a
- * generation's outputs need to be previewed. `resultCount` lets the UI
- * render "N items" and enable the preview affordance without the payloads.
+ * Excludes the heavy `prompt` (full workflow JSON), result payloads
+ * (image/video data: URLs, often megabytes), and `stream` (raw NDJSON
+ * events) so the list loads fast. `resultItems` carries the per-result
+ * display metadata (no payloads), and `resultCount` lets the UI render
+ * "N items" — previews stream straight from `generationResultUrl()`
+ * without fetching the full entry. The full entry (prompt, stream) is
+ * still available with `fetchGeneration` when actually needed.
  */
 export type GenerationSummary = {
     id: string;
@@ -110,6 +123,8 @@ export type GenerationSummary = {
     error: string | null;
     /** Number of result items (images/videos) in the full entry. */
     resultCount: number;
+    /** Per-result display metadata — everything except the heavy url payload. */
+    resultItems: GenerationResultMeta[];
 };
 
 // ── API Functions ──────────────────────────────────────────────────────
@@ -349,6 +364,20 @@ export async function fetchGeneration(
         throw new Error(message);
     }
     return (await response.json()) as { generation: GenerationEntry };
+}
+
+// Build the URL that streams a single generation result (image/video) as
+// raw binary with its real Content-Type. Point <img src> / <video src>
+// straight at it — no need to fetch the full generation entry and convert
+// base64 data: URLs into blob URLs. The server honors byte-range requests,
+// so <video> playback + seeking works (including on Safari).
+export function generationResultUrl(
+    baseUrl: string,
+    workflowId: string,
+    generateId: string,
+    index: number
+): string {
+    return `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}/result/${index}`;
 }
 
 // Update a generation entry (PUT) — e.g. with results + stream after agent completion.

@@ -4,15 +4,19 @@ info:
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
     CRUD for workflows,     generation snapshots, and a unified endpoint for
-    spawning/checking Beam cloud pods. Prompt processing happens
+    spawning/checking Beam cloud pods.     Prompt processing happens
     server-side: POST /v1/comfy/cloud/prompt (with workflow_id +
     generation_id) consumes the pod's NDJSON stream in the background and
     keeps the generation json updated — clients poll
     GET /v1/comfy/workflows/{id}/generate for progress instead of
-    streaming. Multiple generations may be queued on the same pod
+    streaming. Result media (images/videos) is streamed per item from
+    GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index},
+    usable directly in <img>/<video> tags — clients never need to pull the
+    heavy base64 payloads stored in the generation json. Multiple
+    generations may be queued on the same pod
     concurrently; each submission is scoped by its own client_id so only
     its job's events land in its generation json.
-  version: 0.5.0
+  version: 0.6.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -353,10 +357,144 @@ paths:
           description: Generation updated successfully
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/GenerateWorkflowResponse'
+                schema:
+                  $ref: '#/components/schemas/GenerateWorkflowResponse'
         '404':
           description: Generation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}:
+    get:
+      operationId: getGenerationResult
+      summary: Stream a single generation result (image/video)
+      description: >-
+        Streams one result item of a generation back as raw binary with its
+        real Content-Type, so the URL can be used directly as
+        `<img src="...">` or `<video src="...">` — clients never need to pull
+        the full generation entry (megabytes of base64) just to preview an
+        output.
+
+        Behavior depends on how the result was persisted
+        (see GenerationResultItem.url):
+        - **`data:` URL** (base64 payload captured from the pod's event
+          stream) — decoded server-side and streamed with the stored
+          `Content-Type`. `Accept-Ranges: bytes` is advertised and single
+          `Range: bytes=start-end` requests are honored (206 Partial
+          Content), which some browsers (e.g. Safari) require before they
+          will play `<video>` at all, and which enables seeking on large
+          payloads.
+        - **Remote http(s) URL** — answered with a `302` redirect so the
+          upstream server delivers the bytes directly.
+
+        The lightweight `resultItems` array on GenerationSummary entries
+        (GET /v1/comfy/workflows/{id}/generate) carries the per-result
+        metadata (type, mimeType, size, nodeId) — everything this endpoint
+        needs except the payload itself — so a UI can build these URLs as
+        `/result/0`, `/result/1`, ... straight from the summary list without
+        any extra fetch.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: generate_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: index
+          in: path
+          required: true
+          description: Zero-based position of the result within the generation's `result` array.
+          schema:
+            type: integer
+            minimum: 0
+        - name: Range
+          in: header
+          required: false
+          description: >-
+            Optional byte range (e.g. `bytes=0-1023`) — served as 206 Partial
+            Content for data:-backed results.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The result payload (full body).
+          headers:
+            Content-Type:
+              description: The stored mimeType of the result (e.g. image/png, video/mp4).
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+            Cache-Control:
+              schema:
+                type: string
+                example: private, max-age=3600
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            video/*:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Partial content for a successful Range request.
+          headers:
+            Content-Range:
+              schema:
+                type: string
+                example: bytes 0-1023/2048576
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+            video/*:
+              schema:
+                type: string
+                format: binary
+        '302':
+          description: >-
+            The result is stored as a remote URL — redirect to it so the
+            upstream server delivers the bytes.
+        '400':
+          description: Missing/invalid path parameter (index not a non-negative integer)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Generation not found, or index out of range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '416':
+          description: Range cannot be satisfied
+          headers:
+            Content-Range:
+              schema:
+                type: string
+                example: bytes */2048576
+        '422':
+          description: Result payload is not servable (unsupported url format)
           content:
             application/json:
               schema:
@@ -768,11 +906,14 @@ components:
       description: >-
         Lightweight summary of a generation entry — what the list endpoint
         (GET /v1/comfy/workflows/{id}/generate) returns. Excludes the heavy
-        prompt (full workflow JSON), result (image/video data: URLs, often
-        megabytes of base64), and stream (raw NDJSON events) so the list
-        stays small. Fetch the full entry via
-        GET /v1/comfy/workflows/{id}/generate/{generate_id} when the
-        outputs need to be previewed.
+        prompt (full workflow JSON), result payloads (image/video data:
+        URLs, often megabytes of base64), and stream (raw NDJSON events) so
+        the list stays small. The resultItems metadata lets clients preview
+        outputs via
+        GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}
+        (streamable binary — usable directly in <img>/<video>) without
+        fetching the full entry; the full prompt/stream remain available
+        via GET /v1/comfy/workflows/{id}/generate/{generate_id}.
       properties:
         id:
           type: string
@@ -803,8 +944,16 @@ components:
           type: integer
           description: >-
             Number of result items (images/videos) in the full entry. Lets
-            callers render "N items" and decide whether to fetch the full
-            entry without needing the result payloads themselves.
+            callers render "N items" without the result payloads themselves.
+        resultItems:
+          type: array
+          description: >-
+            Lightweight per-result metadata — everything except the heavy
+            `url` payload (type, mimeType, size, nodeId). Lets a UI pick
+            <img> vs <video> and build streaming URLs directly:
+            GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}.
+          items:
+            $ref: '#/components/schemas/GenerationResultMeta'
       required:
         - id
         - status
@@ -813,6 +962,7 @@ components:
         - generatedTime
         - error
         - resultCount
+        - resultItems
 
     UpdateGenerationRequest:
       type: object
@@ -925,8 +1075,10 @@ components:
             (e.g. "data:image/png;base64,...") for previews captured from
             the pod's event stream, or a remote URL. Blob URLs are
             intentionally never stored: they die with the page session.
-            Viewers convert `data:` payloads into throwaway blob URLs at
-            view time and revoke them when done.
+            Viewers no longer convert `data:` payloads into throwaway blob
+            URLs — they stream the bytes straight from
+            GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}
+            instead, which works directly as <img src> / <video src>.
         mimeType:
           type: string
           example: "image/png"
@@ -937,6 +1089,29 @@ components:
           type: string
           description: The workflow node that produced this result
       required: [type, url, mimeType, size, nodeId]
+
+    GenerationResultMeta:
+      type: object
+      description: >-
+        A GenerationResultItem WITHOUT its heavy `url` payload — the display
+        metadata carried by GenerationSummary entries so clients can label
+        results and build streaming URLs without pulling megabytes of base64.
+        The bytes are served by
+        GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}.
+      properties:
+        type:
+          type: string
+          enum: [image, video]
+        mimeType:
+          type: string
+          example: "image/png"
+        size:
+          type: integer
+          description: Size in bytes
+        nodeId:
+          type: string
+          description: The workflow node that produced this result
+      required: [type, mimeType, size, nodeId]
 
     # ── Cloud ──────────────────────────────────────────────────────
 

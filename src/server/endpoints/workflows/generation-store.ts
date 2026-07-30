@@ -19,6 +19,14 @@ export type GenerationResultItem = {
     nodeId: string;
 };
 
+/**
+ * A result item WITHOUT its heavy `url` payload — what summary responses
+ * carry so a caller can label/count results (and choose <img> vs <video>)
+ * without pulling megabytes of base64. The bytes themselves are streamed
+ * on demand via GET .../generate/{generate_id}/result/{index}.
+ */
+export type GenerationResultMeta = Omit<GenerationResultItem, 'url'>;
+
 export type StreamEvent = {
     type: string;
     data: Record<string, unknown>;
@@ -45,8 +53,11 @@ export type GenerationEntry = {
  * events) so the list stays small and loads fast. The full entry is
  * available via GET /v1/comfy/workflows/{id}/generate/{generate_id}.
  *
- * `resultCount` lets callers render "N items" and decide whether to fetch
- * the full entry without needing the result payloads themselves.
+ * `resultCount` lets callers render "N items" and decide whether to open
+ * the results, while `resultItems` provides the per-result display metadata
+ * (type/mime/size/node — but NOT the `url` payloads). The actual bytes are
+ * streamed from GET .../generate/{generate_id}/result/{index}, which can be
+ * used directly as <img src> / <video src>.
  */
 export type GenerationSummary = {
     id: string;
@@ -57,6 +68,8 @@ export type GenerationSummary = {
     error: string | null;
     /** Number of result items (images/videos) in the full entry. */
     resultCount: number;
+    /** Per-result display metadata — everything except the heavy url payload. */
+    resultItems: GenerationResultMeta[];
 };
 
 export type GenerationPatch = Partial<
@@ -72,7 +85,10 @@ export function toGenerationSummary(entry: GenerationEntry): GenerationSummary {
         completedDate: entry.completedDate,
         generatedTime: entry.generatedTime,
         error: entry.error,
-        resultCount: entry.result.length
+        resultCount: entry.result.length,
+        // Drop the heavy `url` (data: base64 / remote link) — everything else
+        // is small display metadata the UI needs without the payload.
+        resultItems: entry.result.map(({ url: _url, ...meta }) => meta)
     };
 }
 

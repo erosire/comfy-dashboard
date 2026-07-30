@@ -11,8 +11,8 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
-import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta, GenerationResultItem, GenerationSummary } from '../api';
-import { cloud, cloudPrompt, cloudReadNdjson } from '../api';
+import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta, GenerationResultItem, GenerationResultMeta, GenerationSummary } from '../api';
+import { cloud, cloudPrompt, cloudReadNdjson, generationResultUrl } from '../api';
 import { useDashboardStore } from '../context';
 import type {
     ApiPromptNode,
@@ -65,31 +65,13 @@ function base64ByteSize(b64: string): number {
 }
 
 /**
- * Convert a data: URL into a fresh object URL for viewing.
- * The caller owns the returned URL and MUST revokeObjectURL it when done.
- * Returns null for non-data URLs or undecodable payloads.
+ * A result item flattened across all generations — display metadata only
+ * (no payload), tagged with its source generation id and its zero-based
+ * index within that generation's result array. The media itself streams
+ * from GET .../generate/{generationId}/result/{resultIndex}, which the
+ * viewer points <img>/<video> straight at.
  */
-function dataUrlToBlobUrl(dataUrl: string): string | null {
-    if (!dataUrl.startsWith('data:')) return null;
-    const commaIdx = dataUrl.indexOf(',');
-    if (commaIdx === -1) return null;
-    try {
-        const meta = dataUrl.substring(0, commaIdx);
-        const b64 = dataUrl.substring(commaIdx + 1);
-        const mime = /^data:(.*?);/.exec(meta)?.[1] ?? 'image/png';
-        const byteChars = atob(b64);
-        const byteArray = new Uint8Array(byteChars.length);
-        for (let i = 0; i < byteChars.length; i++) {
-            byteArray[i] = byteChars.charCodeAt(i);
-        }
-        return URL.createObjectURL(new Blob([byteArray], { type: mime }));
-    } catch {
-        return null;
-    }
-}
-
-/** A result item flattened across all generations, tagged with its source generation id. */
-type ViewerEntry = GenerationResultItem & { generationId: string };
+type ViewerEntry = GenerationResultMeta & { generationId: string; resultIndex: number };
 
 /**
  * Reactive media-query hook. The viewer uses inline styles (no CSS media
@@ -1843,28 +1825,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const [agentCount, setAgentCount] = React.useState(0);
     const [viewerOpen, setViewerOpen] = React.useState(false);
     // Navigation spine: every generation of the selected workflow that has
-    // results, in the SAME order as the sidebar list. The viewer scrolls
-    // across the whole workflow — viewerIndex is a global index into the
-    // flattened result list of all these generations.
+    // results, in the SAME order as the sidebar list, snapshotted at open
+    // time. The viewer scrolls across the whole workflow — viewerIndex is a
+    // global index into the flattened result list of all these generations.
     const [viewerGens, setViewerGens] = React.useState<GenerationSummary[]>([]);
-    // Full result payloads (base64 data: URLs — often megabytes) are fetched
-    // per generation ON DEMAND and cached here, so payloads enter memory only
-    // for generations the user actually scrolls to.
-    const [viewerCache, setViewerCache] = React.useState<Record<string, ViewerEntry[]>>({});
     const [viewerIndex, setViewerIndex] = React.useState(0);
-    // True while a full generation entry is being fetched — on open, and when
-    // navigation crosses into a generation that isn't cached yet. The sidebar
-    // list is lightweight (no result payloads), so payloads load on demand.
-    const [viewerLoading, setViewerLoading] = React.useState(false);
-    // Resolved URL (blob or raw) for the *current* item only. Rebuilt on each
-    // navigation so blobs are added/removed as you move through the arrows.
-    const [viewerBlobUrl, setViewerBlobUrl] = React.useState<string | null>(null);
-    const viewerBlobUrlRef = React.useRef<string | null>(null);
-    // Monotonic counter invalidating async fetches once superseded/closed, so
-    // a slow fetch can never apply its result over newer viewer state.
-    const viewerFetchRef = React.useRef(0);
-    // Generation ids currently being prefetched (de-dupes prefetch requests).
-    const viewerPrefetchRef = React.useRef<Set<string>>(new Set());
     // Touch-start point for swipe navigation (null while no gesture is live).
     const viewerTouchRef = React.useRef<{ x: number; y: number } | null>(null);
     const viewerRef = React.useRef<HTMLDivElement>(null);
@@ -1872,186 +1837,76 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     const viewerIsMobile = useMediaQuery('(max-width: 767px)');
 
     // ── Viewer navigation model ───────────────────────────────────────
-    // The sidebar list is lightweight (GenerationSummary — no result
-    // payloads), so opening the viewer fetches the FULL generation entry on
-    // demand via GET /v1/comfy/workflows/{id}/generate/{generate_id}. The
-    // viewer scrolls through EVERY result image/video of the workflow —
-    // even ones belonging to other generations. To keep memory bounded,
-    // payloads are fetched lazily as navigation crosses generation
-    // boundaries (plus a one-generation look-ahead prefetch), and only the
-    // currently-viewed item ever gets a blob URL (revoked on navigation).
+    // Generation summaries carry per-result metadata (resultItems) WITHOUT
+    // payloads, so the viewer needs NO generation fetch at all: the media
+    // streams straight from
+    //   GET /v1/comfy/workflows/{id}/generate/{genId}/result/{index}
+    // which <img>/<video> consume natively. The browser handles caching and
+    // range-seeking against that endpoint itself — no megabytes of base64 in
+    // React state, no throwaway blob URLs, nothing to revoke.
 
-    // Cumulative resultCount offsets: global index → generation slot.
-    const viewerOffsets = React.useMemo(() => {
-        const offsets: number[] = [];
-        let total = 0;
-        for (const g of viewerGens) {
-            offsets.push(total);
-            total += g.resultCount;
+    // Flattened display-metadata list across all snapshot generations —
+    // viewerIndex addresses this array directly.
+    const viewerEntries = React.useMemo<ViewerEntry[]>(() => {
+        const flat: ViewerEntry[] = [];
+        for (const gen of viewerGens) {
+            (gen.resultItems ?? []).forEach((item, resultIndex) => {
+                flat.push({ ...item, generationId: gen.id, resultIndex });
+            });
         }
-        return { offsets, total };
+        return flat;
     }, [viewerGens]);
 
-    // Map a global viewer index to its generation + local index within it.
-    const locateViewerIndex = React.useCallback(
-        (index: number): { gen: GenerationSummary; genPos: number; localIndex: number } | null => {
-            for (let i = viewerGens.length - 1; i >= 0; i--) {
-                if (index >= viewerOffsets.offsets[i]) {
-                    const localIndex = index - viewerOffsets.offsets[i];
-                    if (localIndex < viewerGens[i].resultCount) {
-                        return { gen: viewerGens[i], genPos: i, localIndex };
-                    }
-                    return null;
-                }
-            }
-            return null;
-        },
-        [viewerGens, viewerOffsets]
-    );
+    // Currently displayed item.
+    const viewerCurrent: ViewerEntry | undefined = viewerEntries[viewerIndex];
 
-    // Currently displayed item — undefined while its generation's payload is
-    // still being fetched (the modal shows a spinner in that case).
-    const viewerCurrent: ViewerEntry | undefined = React.useMemo(() => {
-        const located = locateViewerIndex(viewerIndex);
-        return located ? viewerCache[located.gen.id]?.[located.localIndex] : undefined;
-    }, [locateViewerIndex, viewerIndex, viewerCache]);
-
-    // ── Viewer blob lifecycle ─────────────────────────────────────────
-    // Generation results persist data: URLs in the server-side json. The
-    // viewer does NOT convert every item up front — instead it builds a blob
-    // URL for the current item only and revokes it when you navigate away
-    // (or close). So blobs are added and removed as you move through the
-    // arrows, keeping only one decoded blob alive at a time even when the
-    // flattened list spans many generations.
-
-    const revokeCurrentViewerBlob = React.useCallback(() => {
-        if (viewerBlobUrlRef.current) {
-            URL.revokeObjectURL(viewerBlobUrlRef.current);
-            viewerBlobUrlRef.current = null;
-        }
-    }, []);
-
-    // Fetch one generation's full result payload, tagged for the viewer.
-    // Returns null on failure (navigation then stays put).
-    const fetchViewerGeneration = React.useCallback(
-        async (genId: string): Promise<ViewerEntry[] | null> => {
-            const workflowId = store.selectedId;
-            if (!workflowId) return null;
-            try {
-                const generation = await fetchGeneration(workflowId, genId);
-                return (generation.result ?? []).map((item) => ({
-                    ...item,
-                    generationId: generation.id
-                }));
-            } catch (err) {
-                console.error(`Failed to load generation ${genId}:`, err);
-                return null;
-            }
-        },
-        [store.selectedId, fetchGeneration]
-    );
+    // URL streaming the current item's bytes — dropped straight into
+    // <img src>/<video src>.
+    const viewerMediaUrl = React.useMemo(() => {
+        const workflowId = store.selectedId;
+        if (!viewerOpen || !viewerCurrent || !workflowId) return null;
+        return generationResultUrl(
+            store.config.baseUrl,
+            workflowId,
+            viewerCurrent.generationId,
+            viewerCurrent.resultIndex
+        );
+    }, [viewerOpen, viewerCurrent, store.selectedId, store.config.baseUrl]);
 
     const openViewer = React.useCallback(
-        async (startGenerationId: string) => {
-            const workflowId = store.selectedId;
-            if (!workflowId) return;
-            // The sidebar list carries no result payloads — fetch the clicked
-            // generation's full entry on demand. This is the only path that
-            // needs the actual image/video data up front; further generations
-            // load lazily as the user scrolls across their boundaries.
-            const gens = store.generations.filter((g) => g.resultCount > 0);
+        (startGenerationId: string) => {
+            if (!store.selectedId) return;
+            // Generations with viewable results, in sidebar order.
+            const gens = store.generations.filter((g) => (g.resultItems?.length ?? 0) > 0);
             const startPos = gens.findIndex((g) => g.id === startGenerationId);
             if (startPos === -1) return;
             // Global index of the clicked generation's first result item.
-            const startIndex = gens.slice(0, startPos).reduce((sum, g) => sum + g.resultCount, 0);
-            const fetchId = ++viewerFetchRef.current;
-            viewerPrefetchRef.current.clear();
+            const startIndex = gens
+                .slice(0, startPos)
+                .reduce((sum, g) => sum + (g.resultItems?.length ?? 0), 0);
             setViewerGens(gens);
-            setViewerCache({});
-            setViewerLoading(true);
-            try {
-                const generation = await fetchGeneration(workflowId, startGenerationId);
-                if (viewerFetchRef.current !== fetchId) return; // superseded
-                const items: ViewerEntry[] = (generation.result ?? []).map((item) => ({
-                    ...item,
-                    generationId: generation.id
-                }));
-                if (items.length === 0) return;
-                setViewerCache({ [generation.id]: items });
-                setViewerIndex(startIndex);
-                setViewerOpen(true);
-            } catch (err) {
-                console.error(`Failed to load generation ${startGenerationId}:`, err);
-            } finally {
-                if (viewerFetchRef.current === fetchId) setViewerLoading(false);
-            }
+            setViewerIndex(startIndex);
+            setViewerOpen(true);
         },
-        [store.selectedId, store.generations, fetchGeneration]
+        [store.selectedId, store.generations]
     );
 
     const closeViewer = React.useCallback(() => {
-        // Invalidate in-flight fetches and reset the full navigation state.
-        // The layout effect revokes the current blob when viewerOpen flips to
-        // false; clearing the state here too so the <img> never holds a dead URL.
-        viewerFetchRef.current++;
-        viewerPrefetchRef.current.clear();
         setViewerOpen(false);
         setViewerGens([]);
-        setViewerCache({});
         setViewerIndex(0);
-        setViewerLoading(false);
-        setViewerBlobUrl(null);
-        revokeCurrentViewerBlob();
-    }, [revokeCurrentViewerBlob]);
+    }, []);
 
     // Move one step through the flattened result list (wraps around at both
-    // ends, matching the original single-generation behavior). If the target
-    // lands in a generation whose payload isn't cached yet, it's fetched
-    // first and the index is applied once loaded (spinner shows meanwhile).
+    // ends, matching the original single-generation behavior).
     const navigateViewer = React.useCallback(
         (delta: 1 | -1) => {
-            const { total } = viewerOffsets;
+            const total = viewerEntries.length;
             if (total === 0) return;
-            const target = (viewerIndex + delta + total) % total;
-            if (target === viewerIndex) return;
-            const located = locateViewerIndex(target);
-            if (!located) return;
-            if (viewerCache[located.gen.id]) {
-                setViewerIndex(target);
-                return;
-            }
-            const fetchId = ++viewerFetchRef.current;
-            setViewerLoading(true);
-            void fetchViewerGeneration(located.gen.id).then((items) => {
-                if (viewerFetchRef.current !== fetchId) return; // superseded
-                setViewerLoading(false);
-                if (!items || items.length === 0) return;
-                setViewerCache((prev) => ({ ...prev, [located.gen.id]: items }));
-                setViewerIndex(target);
-            });
+            setViewerIndex((prev) => (prev + delta + total) % total);
         },
-        [viewerOffsets, viewerIndex, locateViewerIndex, viewerCache, fetchViewerGeneration]
+        [viewerEntries.length]
     );
-
-    // Prefetch the generations adjacent to the one being viewed so crossing a
-    // generation boundary feels instant. Prefetches never toggle the loading
-    // overlay and are de-duped via viewerPrefetchRef.
-    React.useEffect(() => {
-        if (!viewerOpen) return;
-        const located = locateViewerIndex(viewerIndex);
-        if (!located) return;
-        for (const pos of [located.genPos - 1, located.genPos + 1]) {
-            const gen = viewerGens[pos];
-            if (!gen) continue;
-            if (viewerCache[gen.id] || viewerPrefetchRef.current.has(gen.id)) continue;
-            viewerPrefetchRef.current.add(gen.id);
-            void fetchViewerGeneration(gen.id).then((items) => {
-                viewerPrefetchRef.current.delete(gen.id);
-                if (!items || items.length === 0) return;
-                setViewerCache((prev) => (prev[gen.id] ? prev : { ...prev, [gen.id]: items }));
-            });
-        }
-    }, [viewerOpen, viewerIndex, locateViewerIndex, viewerGens, viewerCache, fetchViewerGeneration]);
 
     // Focus the modal when it opens so keyboard navigation works. (Done in an
     // effect — a ref callback would re-steal focus on every render, e.g. away
@@ -2059,31 +1914,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
     React.useEffect(() => {
         if (viewerOpen) viewerRef.current?.focus();
     }, [viewerOpen]);
-
-    // Add/remove the blob for the current item as the index or open state
-    // changes. Runs before paint (useLayoutEffect) so the swap is flicker-free;
-    // the previous blob is revoked before the new one is created.
-    React.useLayoutEffect(() => {
-        if (!viewerOpen) {
-            revokeCurrentViewerBlob();
-            setViewerBlobUrl(null);
-            return;
-        }
-        if (!viewerCurrent) return; // generation payload still loading
-        revokeCurrentViewerBlob();
-        let resolved = viewerCurrent.url;
-        if (viewerCurrent.url.startsWith('data:')) {
-            const blobUrl = dataUrlToBlobUrl(viewerCurrent.url);
-            if (blobUrl) {
-                viewerBlobUrlRef.current = blobUrl;
-                resolved = blobUrl;
-            }
-        }
-        setViewerBlobUrl(resolved);
-    }, [viewerOpen, viewerCurrent, revokeCurrentViewerBlob]);
-
-    // Revoke any outstanding viewer blob when the component unmounts.
-    React.useEffect(() => revokeCurrentViewerBlob, [revokeCurrentViewerBlob]);
 
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
     const searchDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2865,7 +2695,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             <EmptyHint>No generations yet.</EmptyHint>
                         )}
                         {store.generations.map((gen) => {
-                            const hasResults = gen.resultCount > 0;
+                            const hasResults = (gen.resultItems?.length ?? 0) > 0;
                             const genStatusColor =
                                 gen.status === 'completed'
                                     ? theme.success
@@ -3626,31 +3456,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 </div>
             )}
 
-            {/* ── Image/Video Viewer loading overlay ─────────────────── */}
-            {/* Only while opening — navigation fetches show an in-modal      */}
-            {/* spinner instead, so the current image stays visible.          */}
-            {viewerLoading && !viewerOpen && (
-                <div
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        zIndex: 2000,
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        backgroundColor: 'rgba(0,0,0,0.85)',
-                        color: 'rgba(255,255,255,0.85)',
-                        gap: 12,
-                        fontSize: theme.fontSize.sm
-                    }}
-                >
-                    <SpinnerEl style={{ width: 28, height: 28, borderWidth: 3 }} />
-                    <span>Loading generation…</span>
-                </div>
-            )}
-
             {/* ── Image/Video Viewer Modal ──────────────────────────── */}
-            {viewerOpen && viewerOffsets.total > 0 && (
+            {viewerOpen && viewerEntries.length > 0 && (
                 <div
                     ref={viewerRef}
                     style={{
@@ -3706,7 +3513,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     tabIndex={0}
                 >
                     {/* Left arrow */}
-                    {viewerOffsets.total > 1 && (
+                    {viewerEntries.length > 1 && (
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -3759,9 +3566,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                   }
                         }
                     >
-                        {viewerBlobUrl && viewerCurrent?.type === 'image' ? (
+                        {viewerMediaUrl && viewerCurrent?.type === 'image' ? (
                             <img
-                                src={viewerBlobUrl}
+                                // Remount per item so the new media loads cleanly.
+                                key={`${viewerCurrent.generationId}:${viewerCurrent.resultIndex}`}
+                                src={viewerMediaUrl}
                                 alt={`Result ${viewerIndex + 1}`}
                                 draggable={false}
                                 style={{
@@ -3776,9 +3585,11 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     boxShadow: viewerIsMobile ? 'none' : '0 4px 24px rgba(0,0,0,0.5)'
                                 }}
                             />
-                        ) : viewerBlobUrl && viewerCurrent?.type === 'video' ? (
+                        ) : viewerMediaUrl && viewerCurrent?.type === 'video' ? (
                             <video
-                                src={viewerBlobUrl}
+                                // Remount per item so the new media loads cleanly.
+                                key={`${viewerCurrent.generationId}:${viewerCurrent.resultIndex}`}
+                                src={viewerMediaUrl}
                                 controls
                                 autoPlay
                                 style={{
@@ -3816,7 +3627,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             }}
                         >
                             <span>
-                                {viewerIndex + 1} / {viewerOffsets.total}
+                                {viewerIndex + 1} / {viewerEntries.length}
                             </span>
                             {viewerCurrent && (
                                 <>
@@ -3834,7 +3645,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     </div>
 
                     {/* Right arrow */}
-                    {viewerOffsets.total > 1 && (
+                    {viewerEntries.length > 1 && (
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -3863,23 +3674,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         >
                             ›
                         </button>
-                    )}
-
-                    {/* In-modal spinner while a generation payload is being
-                        fetched mid-navigation (non-blocking: pointerEvents off
-                        so swipes/arrows keep working). */}
-                    {viewerLoading && (
-                        <div
-                            style={{
-                                position: 'absolute',
-                                top: '50%',
-                                left: '50%',
-                                transform: 'translate(-50%, -50%)',
-                                pointerEvents: 'none'
-                            }}
-                        >
-                            <SpinnerEl style={{ width: 28, height: 28, borderWidth: 3 }} />
-                        </div>
                     )}
 
                     {/* Close affordance: explicit ✕ button on mobile (there's
