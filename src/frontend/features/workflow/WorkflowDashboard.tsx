@@ -33,7 +33,7 @@ import {
     useSpawnAgent,
     useWorkflowActions,
     useWorkflowEditor,
-    workflowToApiPrompt,
+    type GenerationSnapshot,
     type OutputViewMode,
     type PodEntry
 } from './components';
@@ -80,6 +80,10 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             editingWorkflowId,
             workflowName: store.selectedWorkflow?.name ?? null,
             generations: store.generations,
+            // Every generation snapshots the live editor json as its
+            // stored prompt — the lossless original the server converts
+            // to an API prompt at submission and "Create Workflow" copies.
+            getCurrentRaw: editor.serializeCurrentRaw,
             generateWorkflow
         });
 
@@ -104,30 +108,32 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
 
         // ── Viewer rerun / create-workflow actions ────────────────────
         // The OUTPUT list carries lightweight generation summaries — the
-        // snapshotted API prompt (what Generate + pod buttons re-submit,
-        // and what "Create Workflow" turns into a new workflow) is fetched
-        // on demand and cached per generation id while the workflow stays
-        // selected, so navigating back and forth never refetches.
+        // generation's stored original workflow json (reruns resubmit it,
+        // "Create Workflow" copies it) is fetched on demand and cached
+        // per generation id while the workflow stays selected, so
+        // navigating back and forth never refetches.
 
-        const viewerPromptCacheRef = React.useRef<Map<string, Record<string, unknown>>>(new Map());
+        const viewerSnapshotCacheRef = React.useRef<Map<string, GenerationSnapshot>>(new Map());
         const [viewerActionBusy, setViewerActionBusy] = React.useState(false);
 
-        // Cached prompts belong to the currently loaded workflow.
+        // Cached snapshots belong to the currently loaded workflow.
         React.useEffect(() => {
-            viewerPromptCacheRef.current.clear();
+            viewerSnapshotCacheRef.current.clear();
         }, [editingWorkflowId]);
 
-        const getViewerGenerationPrompt = React.useCallback(
-            async (generationId: string): Promise<Record<string, unknown> | null> => {
-                const cached = viewerPromptCacheRef.current.get(generationId);
+        const getViewerGenerationSnapshot = React.useCallback(
+            async (generationId: string): Promise<GenerationSnapshot | null> => {
+                const cached = viewerSnapshotCacheRef.current.get(generationId);
                 if (cached) return cached;
                 if (!editingWorkflowId) return null;
                 const full = await fetchGeneration(editingWorkflowId, generationId);
-                // Generation prompts are stored as API prompts already;
-                // workflowToApiPrompt is idempotent for dict-shaped input.
-                const prompt = workflowToApiPrompt(full.prompt);
-                viewerPromptCacheRef.current.set(generationId, prompt);
-                return prompt;
+                // The stored prompt IS the original workflow json — a
+                // lossless document, used verbatim for both reruns
+                // (the server converts it to an API prompt at submission)
+                // and workflow creation (a byte-for-byte copy).
+                const snapshot: GenerationSnapshot = full.prompt;
+                viewerSnapshotCacheRef.current.set(generationId, snapshot);
+                return snapshot;
             },
             [editingWorkflowId, fetchGeneration]
         );
@@ -137,15 +143,15 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             if (!generationId || viewerActionBusy) return;
             setViewerActionBusy(true);
             try {
-                const prompt = await getViewerGenerationPrompt(generationId);
+                const snapshot = await getViewerGenerationSnapshot(generationId);
                 // Fire and forget — the spawned "#N" button reports state.
-                if (prompt) void handleGenerate(prompt);
+                if (snapshot) void handleGenerate(snapshot);
             } catch (err: any) {
                 alert(`Failed to regenerate: ${err.message ?? String(err)}`);
             } finally {
                 setViewerActionBusy(false);
             }
-        }, [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationPrompt, handleGenerate]);
+        }, [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationSnapshot, handleGenerate]);
 
         const handleViewerPodGenerate = React.useCallback(
             async (pod: PodEntry) => {
@@ -153,16 +159,16 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                 if (!generationId || viewerActionBusy) return;
                 setViewerActionBusy(true);
                 try {
-                    const prompt = await getViewerGenerationPrompt(generationId);
+                    const snapshot = await getViewerGenerationSnapshot(generationId);
                     // Fire and forget — the pod button reports state.
-                    if (prompt) void handlePodGenerate(pod, prompt);
+                    if (snapshot) void handlePodGenerate(pod, snapshot);
                 } catch (err: any) {
                     alert(`Failed to regenerate: ${err.message ?? String(err)}`);
                 } finally {
                     setViewerActionBusy(false);
                 }
             },
-            [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationPrompt, handlePodGenerate]
+            [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationSnapshot, handlePodGenerate]
         );
 
         const handleViewerCreateWorkflow = React.useCallback(async () => {
@@ -170,14 +176,17 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             if (!generationId || viewerActionBusy) return;
             setViewerActionBusy(true);
             try {
-                const prompt = await getViewerGenerationPrompt(generationId);
-                if (!prompt) return;
+                const snapshot = await getViewerGenerationSnapshot(generationId);
+                if (!snapshot) return;
+                // Copy the stored original workflow json VERBATIM — no
+                // parse → re-serialize round trip, so widgets/links/groups
+                // arrive exactly as stored.
                 const created = await createWorkflow({
                     name: generationId,
                     description: store.selectedWorkflow
                         ? `Created from generation "${generationId}" of workflow "${store.selectedWorkflow.name}".`
                         : `Created from generation "${generationId}".`,
-                    raw: prompt
+                    raw: snapshot
                 });
                 // Load the new workflow the same way the sidebar does.
                 viewer.closeViewer();
@@ -187,7 +196,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             } finally {
                 setViewerActionBusy(false);
             }
-        }, [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationPrompt, createWorkflow, store.selectedWorkflow, viewer, selectWorkflow]);
+        }, [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationSnapshot, createWorkflow, store.selectedWorkflow, viewer, selectWorkflow]);
 
         // ── OUTPUT tab view mode (list vs thumbnail masonry grid) ──────
 

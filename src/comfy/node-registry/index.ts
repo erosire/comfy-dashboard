@@ -81,11 +81,34 @@ import { SetLatentNoiseMask } from './SetLatentNoiseMask';
 
 import { ConditioningCombine } from './ConditioningCombine';
 import { ConditioningSetTimestepRange } from './ConditioningSetTimestepRange';
+import { LTXVConditioning } from './LTXVConditioning';
 
 import { MaskToImage } from './MaskToImage';
 import { ImageToMask } from './ImageToMask';
 
 import { ModelSamplingFlux } from './ModelSamplingFlux';
+
+// Custom sampling / noise / sigmas / guiders
+import { RandomNoise } from './RandomNoise';
+import { KSamplerSelect } from './KSamplerSelect';
+import { ManualSigmas } from './ManualSigmas';
+import { CFGGuider } from './CFGGuider';
+import { SamplerCustomAdvanced } from './SamplerCustomAdvanced';
+
+// Math
+import { ComfyMathExpression } from './ComfyMathExpression';
+
+// LTXV nodes
+import { LTXVPreprocess } from './LTXVPreprocess';
+import { LTXVEmptyLatentAudio } from './LTXVEmptyLatentAudio';
+import { EmptyLTXVLatentVideo } from './EmptyLTXVLatentVideo';
+import { LTXVConcatAVLatent } from './LTXVConcatAVLatent';
+import { LTXVSeparateAVLatent } from './LTXVSeparateAVLatent';
+import { LTXVLatentUpsampler } from './LTXVLatentUpsampler';
+import { LTXVAudioVAEDecode } from './LTXVAudioVAEDecode';
+
+// Image batch
+import { ImageFromBatch } from './ImageFromBatch';
 
 // Built-in ComfyUI nodes (additional)
 import { ConditioningZeroOut } from './ConditioningZeroOut';
@@ -94,6 +117,7 @@ import { GetImageSize } from './GetImageSize';
 
 // Built-in ComfyUI primitives & text nodes
 import { PrimitiveBoolean } from './PrimitiveBoolean';
+import { PrimitiveFloat } from './PrimitiveFloat';
 import { PrimitiveStringMultiline } from './PrimitiveStringMultiline';
 import { StringConcatenate } from './StringConcatenate';
 import { LoraLoaderModelOnly } from './LoraLoaderModelOnly';
@@ -201,6 +225,7 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     // Conditioning operations
     ConditioningCombine,
     ConditioningSetTimestepRange,
+    LTXVConditioning,
 
     // Mask
     MaskToImage,
@@ -209,6 +234,28 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     // Model / Flux
     ModelSamplingFlux,
 
+    // Custom sampling / noise / sigmas / guiders
+    RandomNoise,
+    KSamplerSelect,
+    ManualSigmas,
+    CFGGuider,
+    SamplerCustomAdvanced,
+
+    // Math
+    ComfyMathExpression,
+
+    // LTXV nodes
+    LTXVPreprocess,
+    LTXVEmptyLatentAudio,
+    EmptyLTXVLatentVideo,
+    LTXVConcatAVLatent,
+    LTXVSeparateAVLatent,
+    LTXVLatentUpsampler,
+    LTXVAudioVAEDecode,
+
+    // Image batch
+    ImageFromBatch,
+
     // Additional built-in ComfyUI nodes
     ConditioningZeroOut,
     ReferenceLatent,
@@ -216,6 +263,7 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
 
     // Built-in ComfyUI primitives & text nodes
     PrimitiveBoolean,
+    PrimitiveFloat,
     PrimitiveStringMultiline,
     StringConcatenate,
     LoraLoaderModelOnly,

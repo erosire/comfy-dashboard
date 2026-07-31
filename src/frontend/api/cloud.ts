@@ -60,6 +60,12 @@ export type CloudRequest =
  */
 export type CloudPromptBody = {
     pod_url: string;
+    /**
+     * The workflow document to execute — the ORIGINAL workflow json
+     * (v0.4/v1 editor format, as stored on generations). The server
+     * converts it to the flat API prompt before forwarding to the pod;
+     * documents already in API prompt format pass through unchanged.
+     */
     prompt: Record<string, unknown>;
     client_id?: string;
     extra_data?: Record<string, unknown>;

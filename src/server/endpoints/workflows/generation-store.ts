@@ -44,6 +44,14 @@ export type GenerationEntry = {
     completedDate: string | null;
     generatedTime: string | null;
     error: string | null;
+    /**
+     * The ORIGINAL workflow json snapshot (v0.4/v1 editor format — the
+     * lossless document: positions, links, widget names, groups). It is
+     * converted to the flat API prompt server-side when submitted to a
+     * Comfy Cloud pod (POST /v1/comfy/cloud/prompt), so it also doubles
+     * as the verbatim copy source for "create a workflow from this
+     * generation".
+     */
     prompt: Record<string, unknown>;
     result: GenerationResultItem[];
 };

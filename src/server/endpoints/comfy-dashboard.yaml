@@ -226,10 +226,12 @@ paths:
         metadata (status, createdDate, etc.). The event progression of the
         subsequent run lives in the sibling .log file, not in the json.
         The snapshotted `prompt` is the optional request body's prompt
-        when provided — the UI sends the API prompt built from its live
-        (possibly edited) node tree, so the generation captures exactly
-        the values visible at click time. Without a body, the workflow's
-        stored workflow.json is snapshotted instead.
+        when provided — the UI sends its serialized ORIGINAL workflow json
+        (v0.4/v1 editor format, with every edit), so the generation
+        captures exactly the document visible at click time, lossless.
+        Without a body, the workflow's stored workflow.json is snapshotted
+        instead. Submissions to a Comfy Cloud pod convert the stored
+        document to the flat API prompt server-side at submission time.
         The generation's id (the file base name) comes from the optional
         request body `name`, sanitized to a safe file name; when omitted,
         a timestamped default (YYYYMMDD-HHMMSS) is used.
@@ -252,10 +254,12 @@ paths:
                   type: object
                   additionalProperties: true
                   description: >-
-                    Optional. The prompt to snapshot instead of the stored
-                    workflow.json — typically the flat API prompt
-                    ({"<nodeId>": {"class_type": ..., "inputs": {...}}})
-                    built from the caller's current edited state.
+                    Optional. The ORIGINAL workflow json to snapshot instead
+                    of the stored workflow.json — the v0.4/v1 editor-format
+                    document ({"version", "nodes", "links", ...}) built from
+                    the caller's current edited state, kept lossless.
+                    Consumers submitting to a Comfy Cloud pod convert it to
+                    the flat API prompt server-side at submission time.
                 name:
                   type: string
                   description: >-
@@ -267,27 +271,31 @@ paths:
                     timestamp>". Collisions get a -01, -02, ... suffix.
             examples:
               editor_snapshot:
-                summary: Snapshot the caller's edited prompt
+                summary: Snapshot the caller's edited workflow json
                 value:
                   name: SDXL Poster_20260731-143022
                   prompt:
-                    "3":
-                      class_type: KSampler
-                      inputs:
-                        seed: 123456789012345
-                        steps: 20
-                        cfg: 8
-                        sampler_name: euler
-                        scheduler: normal
-                        denoise: 1
-                        model: ["4", 0]
-                        positive: ["6", 0]
-                        negative: ["7", 0]
-                        latent_image: ["5", 0]
-                    "4":
-                      class_type: CheckpointLoaderSimple
-                      inputs:
-                        ckpt_name: sd_xl_base_1.0.safetensors
+                    version: 1
+                    nodes:
+                      - id: 4
+                        type: CheckpointLoaderSimple
+                        pos: [0, 0]
+                        widgets_values: [sd_xl_base_1.0.safetensors]
+                      - id: 3
+                        type: KSampler
+                        pos: [300, 0]
+                        widgets_values: [123456789012345, randomize, 20, 8, euler, normal, 1]
+                        inputs:
+                          - name: model
+                            type: MODEL
+                            link: 1
+                    links:
+                      - id: 1
+                        origin_id: 4
+                        origin_slot: 0
+                        target_id: 3
+                        target_slot: 0
+                        type: MODEL
       responses:
         '200':
           description: Generation file created
@@ -1088,7 +1096,12 @@ components:
           description: Error message if the generation failed
         prompt:
           type: object
-          description: The ComfyUI workflow JSON snapshot at generation time
+          description: >-
+            The ORIGINAL workflow json snapshot (v0.4/v1 editor format — the
+            lossless document: positions, links, widget values, groups).
+            Converted to the flat API prompt server-side when submitted to
+            a Comfy Cloud pod, and the verbatim copy source for
+            "create a workflow from this generation".
         result:
           type: array
           description: Array of generated outputs (images, videos, etc.)
@@ -1350,16 +1363,11 @@ components:
           type: object
           additionalProperties: true
           description: >-
-            The ComfyUI workflow graph, keyed by node id (string).
-            Each value is {"class_type": "<NodeClassName>", "inputs": {...}}.
-            Same shape as ComfyUI's native POST /prompt API prompt field.
-          example:
-            "3":
-              class_type: KSampler
-              inputs:
-                seed: 123456789012345
-                steps: 20
-                cfg: 8
+            The workflow document to execute — the ORIGINAL workflow json
+            (v0.4/v1 editor format, what generations store). The server
+            converts it to the flat API prompt ({"<nodeId>": {"class_type",
+            "inputs"}}) before forwarding to the pod; documents already in
+            API prompt format are passed through unchanged.
         client_id:
           type: string
           description: >-

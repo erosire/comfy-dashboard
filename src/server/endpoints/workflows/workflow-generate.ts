@@ -12,8 +12,11 @@
 //                                        log (not the json) is the event trail.
 //
 //   The snapshotted prompt is the request's optional { prompt } body when
-//   provided (the UI sends the API prompt built from its live edited node
-//   tree), falling back to the stored workflow.json otherwise.
+//   provided — the UI sends its serialized ORIGINAL workflow json (v0.4/v1
+//   editor format, with every widget edit) — falling back to the stored
+//   workflow.json otherwise. It stays lossless: consumers submitting to a
+//   Comfy Cloud pod (POST /v1/comfy/cloud/prompt) convert it to the flat
+//   API prompt server-side at submission time.
 //
 //   The request's optional { name } body names the generation — it becomes
 //   the generation id (the json/log file's base name) after sanitization.
@@ -161,9 +164,10 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
 
     // Optional request body:
     //   { prompt } — snapshot THIS instead of the stored workflow.json.
-    //     The UI builds the prompt from its live editor tree (including
-    //     any widget edits), so the generation captures what the user
-    //     actually sees. Omitting it keeps the original behavior.
+    //     The UI sends its serialized ORIGINAL workflow json (v0.4/v1
+    //     editor format — widget edits and prompt-field selection included),
+    //     so the generation captures exactly what the user sees, lossless.
+    //     Omitting it keeps the original behavior.
     //   { name } — names the generation: the sanitized name becomes the
     //     generation id (the json/log files' base name). When omitted, or
     //     nothing filename-safe survives, the timestamp stays the default.

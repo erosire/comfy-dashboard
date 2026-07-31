@@ -18,13 +18,18 @@
 //
 // Common request fields (mirrors beam_comfy_service PromptRequest schema):
 //   - pod_url:  the Tier 2 proxy URL (e.g. "https://...beam.cloud:8188")
-//   - prompt:   the ComfyUI workflow graph object
+//   - prompt:   the ORIGINAL workflow json snapshot (v0.4/v1 editor format
+//               — what the dashboard stores on every generation). Converted
+//               to the flat API prompt HERE, server-side, right before it
+//               goes out to the Comfy Cloud pod — the one place conversion
+//               happens, so stored documents stay lossless.
 //   - client_id: optional client identifier (32-char hex)
 //   - extra_data: passed through to ComfyUI's POST /prompt extra_data
 //   - front / number: forwarded to ComfyUI POST /prompt
 
 import { randomUUID } from 'node:crypto';
 import { asHandlerMethod } from '@underload/service';
+import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
 import {
     appendGenerationLog,
     patchGenerationFile,
@@ -69,9 +74,14 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         return { status: 400, response: { error: `Invalid pod_url: ${body.pod_url}` } };
     }
 
+    // Convert the stored/original workflow json into the flat API prompt
+    // ComfyUI's POST /prompt expects. Idempotent for documents already in
+    // API prompt format — one conversion point, whatever the caller stored.
+    const apiPrompt = workflowToApiPrompt(body.prompt);
+
     // Build the prompt payload per beam_comfy_service PromptRequest schema
     const promptPayload: Record<string, unknown> = {
-        prompt: body.prompt,
+        prompt: apiPrompt,
     };
     if (body.client_id) {
         promptPayload.client_id = body.client_id;

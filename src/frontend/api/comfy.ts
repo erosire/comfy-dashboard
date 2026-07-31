@@ -100,6 +100,12 @@ export type GenerationEntry = {
     completedDate: string | null;
     generatedTime: string | null;
     error: string | null;
+    /**
+     * The ORIGINAL workflow json snapshot (v0.4/v1 editor format — the
+     * lossless document). The server converts it to the flat API prompt
+     * when submitting to a Comfy Cloud pod, so it also doubles as the
+     * verbatim copy source for "create a workflow from this generation".
+     */
     prompt: Record<string, unknown>;
     result: GenerationResultItem[];
 };
@@ -296,9 +302,10 @@ export async function fetchStatus(baseUrl: string): Promise<ServerStatus> {
 
 // Generate a workflow — creates a generation file on the server.
 // When `prompt` is provided it is snapshotted instead of the stored
-// workflow.json — the UI passes the API prompt built from its current
-// (possibly edited) node tree, so the generation captures exactly the
-// values visible at click time.
+// workflow.json — the UI passes its serialized ORIGINAL workflow json
+// (v0.4/v1 editor format with every edit), so the generation captures
+// exactly the document visible at click time, lossless. The server
+// converts it to the flat API prompt when submitting to a pod.
 // When `name` is provided it names the generation (the server uses it as
 // the generation id after sanitizing it to a safe file base name); when
 // omitted, the server falls back to its timestamped default.

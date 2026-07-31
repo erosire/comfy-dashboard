@@ -17,7 +17,6 @@ import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
 import { MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
 import { podLetter } from './pod-utils';
-import { editorTreeToApiPrompt } from './workflow-prompt';
 
 /**
  * Local-timestamp suffix for default generation names: YYYYMMDD-HHMMSS
@@ -39,7 +38,7 @@ function localTimestampFile(date: Date): string {
 
 export type UsePodsParams = {
     baseUrl: string;
-    /** The live editor tree — the prompt is built from it on every run. */
+    /** The live editor tree — guards editor-driven runs (need a workflow). */
     nodes: UINode[];
     /** Id of the workflow being edited (store.selectedId). */
     editingWorkflowId: string | null;
@@ -47,10 +46,25 @@ export type UsePodsParams = {
     workflowName: string | null;
     /** Polled generations (store.generations) — settles pod run state. */
     generations: GenerationSummary[];
+    /**
+     * Serialize the CURRENT editor page (same snapshot Clone takes:
+     * raw json + widget edits + PROMPT field selection). This ORIGINAL
+     * workflow json is what gets snapshotted as the generation's stored
+     * `prompt` — kept lossless; the server converts it to the flat API
+     * prompt when submitting to a pod (POST /v1/comfy/cloud/prompt).
+     */
+    getCurrentRaw?: () => Record<string, unknown> | null;
     generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>, name?: string) => Promise<GenerationEntry>;
 };
 
-export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, generations, generateWorkflow }: UsePodsParams) {
+/**
+ * Snapshot override for the result viewer's rerun buttons: the source
+ * generation's stored original workflow json — resubmitted as-is, so
+ * chained reruns always carry the same lossless document.
+ */
+export type GenerationSnapshot = Record<string, unknown>;
+
+export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, generations, getCurrentRaw, generateWorkflow }: UsePodsParams) {
     const [pods, setPods] = React.useState<PodEntry[]>([]);
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
@@ -101,33 +115,33 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // Shared by "Generate" (spawns a fresh pod), "#N" (reuses a pod) and
     // the result viewer's rerun buttons.
     //
-    // 1. Builds the API prompt from the CURRENT editor tree — every
-    //    widget edit is included (the stored workflow json is NOT read).
-    //    A promptOverride (the result viewer reruns a generation with the
-    //    prompt snapshotted for that image) is submitted as-is instead.
-    // 2. Snapshots that prompt via the workflow generation API (same
-    //    place as before: POST /v1/comfy/workflows/:id/generate, with the
-    //    prompt in the request body) — edited == stored == executed.
+    // 1. Takes the snapshot document: the CURRENT editor serialization
+    //    (every widget edit included) by default, or a stored generation's
+    //    own original workflow json for viewer reruns. Either way the
+    //    ORIGINAL workflow json — lossless.
+    // 2. Snapshots it via the workflow generation API (same place as
+    //    before: POST /v1/comfy/workflows/:id/generate, with the document
+    //    in the request body) — edited == stored == executed.
     // 3. Submits the snapshot to POST /v1/comfy/cloud/prompt with the
-    //    pod_url + workflow/generation ids. The SERVER consumes the pod's
-    //    NDJSON stream and updates the generation json by itself — this
-    //    call returns immediately (202).
+    //    pod_url + workflow/generation ids. THE SERVER converts the
+    //    workflow json to the flat API prompt (workflowToApiPrompt),
+    //    consumes the pod's NDJSON stream and updates the generation
+    //    json by itself — this call returns immediately (202).
     // 4. Client-side we are done: the continuous generations polling
     //    updates the sidebar with progress, and settles the pod button's
     //    running → done/error state (see the sync effect below).
 
     const runGenerationOnPod = React.useCallback(
-        async (podUrl: string, podId?: string, promptOverride?: Record<string, unknown>) => {
-            if (!editingWorkflowId || (!promptOverride && nodes.length === 0)) return;
+        async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot) => {
+            const snapshot = generationOverride ?? getCurrentRaw?.() ?? null;
+            if (!editingWorkflowId || !snapshot) return;
 
-            // Step 1+2 — build the prompt from the live editor tree (or take
-            // the rerun override) and snapshot it into a generation json.
-            // The generation is named after the workflow + current local
-            // timestamp by default (the server falls back to its own
-            // timestamp id when no name is passed).
-            const apiPrompt = promptOverride ?? editorTreeToApiPrompt(nodes);
+            // Step 1+2 — snapshot the original workflow json into a
+            // generation file. The generation is named after the workflow +
+            // current local timestamp by default (the server falls back to
+            // its own timestamp id when no name is passed).
             const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
-            const generation = await generateWorkflow(editingWorkflowId, apiPrompt, generationName);
+            const generation = await generateWorkflow(editingWorkflowId, snapshot, generationName);
             console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
 
             try {
@@ -176,7 +190,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                 throw err;
             }
         },
-        [baseUrl, nodes, editingWorkflowId, workflowName, generateWorkflow]
+        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow]
     );
 
     // ── Generate workflow ──────────────────────────────────────────
@@ -190,11 +204,11 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // as the user can click. Per-pod status (spawning, running, done/error)
     // lives on the individual "#N" button, not on Generate.
     //
-    // promptOverride: rerun with a stored generation prompt (result viewer)
-    // instead of building from the editor tree.
+    // generationOverride: rerun with a stored generation snapshot (result
+    // viewer) instead of building from the editor tree.
 
-    const handleGenerate = React.useCallback(async (promptOverride?: Record<string, unknown>) => {
-        if (!editingWorkflowId || (!promptOverride && nodes.length === 0)) return;
+    const handleGenerate = React.useCallback(async (generationOverride?: GenerationSnapshot) => {
+        if (!editingWorkflowId || (!generationOverride && nodes.length === 0)) return;
 
         // Step 1 — register the pod entry immediately so the "#N"
         // button shows up while the pod_url is still being resolved.
@@ -238,7 +252,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         // A failure here keeps the pod — its button shows the run error
         // and stays reusable.
         try {
-            await runGenerationOnPod(podUrl, podEntry.id, promptOverride);
+            await runGenerationOnPod(podUrl, podEntry.id, generationOverride);
         } catch (err: any) {
             alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
@@ -250,16 +264,16 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // filters the shared pod stream by prompt_id, so every generation
     // json only receives its own job's events.
     //
-    // promptOverride: rerun with a stored generation prompt (result viewer)
-    // instead of building from the editor tree.
+    // generationOverride: rerun with a stored generation snapshot (result
+    // viewer) instead of building from the editor tree.
 
     const handlePodGenerate = React.useCallback(
-        async (pod: PodEntry, promptOverride?: Record<string, unknown>) => {
-            if (!editingWorkflowId || (!promptOverride && nodes.length === 0)) return;
+        async (pod: PodEntry, generationOverride?: GenerationSnapshot) => {
+            if (!editingWorkflowId || (!generationOverride && nodes.length === 0)) return;
             if (!pod.pod_url || pod.status !== 'ready') return;
             try {
                 console.log(`[Pod#${pod.podNumber}] Queueing job on ${pod.pod_url}`);
-                await runGenerationOnPod(pod.pod_url, pod.id, promptOverride);
+                await runGenerationOnPod(pod.pod_url, pod.id, generationOverride);
             } catch (err: any) {
                 alert(`Failed to generate: ${err.message ?? String(err)}`);
             }
