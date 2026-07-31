@@ -9,8 +9,8 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { parseWorkflowJson, sortNodesDeep } from './CloudTab';
-import type { UINode } from '../nodes/node-type';
+import { parseWorkflowJson, sortNodesDeep } from './components/utils';
+import type { UINode } from '../../nodes/node-type';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

@@ -1,0 +1,30 @@
+// Pod naming & payload helpers for the workflow dashboard.
+
+/** Approximate byte size of a base64 payload (accounts for padding). */
+export function base64ByteSize(b64: string): number {
+    const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
+}
+
+/**
+ * Spreadsheet-style pod letter for the pod button: 1 → A, 2 → B, …
+ * 26 → Z, 27 → AA. Derived from the monotonic podNumber.
+ */
+export function podLetter(podNumber: number): string {
+    let n = Math.max(1, podNumber);
+    let letters = '';
+    while (n > 0) {
+        letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+        n = Math.floor((n - 1) / 26);
+    }
+    return letters;
+}
+
+/**
+ * Pod button label — pod letter followed by the two-digit in-flight
+ * queue count: A00 when idle, A03 with three jobs queued. Counts past
+ * 99 simply widen the label (never clamped).
+ */
+export function podButtonLabel(podNumber: number, inFlight: number): string {
+    return `${podLetter(podNumber)}${String(inFlight).padStart(2, '0')}`;
+}

@@ -4,7 +4,8 @@
 // Bridges the structure.ts canonical types with the dashboard UI.
 // The `UINode` is a flattened, display-friendly view that the React
 // components consume. It is produced by `parseWorkflowJson()` in
-// CloudTab.tsx from either WorkflowJSON, WorkflowJSON04, or ApiPrompt.
+// features/workflow (components/utils) from either WorkflowJSON,
+// WorkflowJSON04, or ApiPrompt.
 // =============================================================================
 
 import type {

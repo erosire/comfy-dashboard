@@ -17,7 +17,7 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { workflowToApiPrompt, parseWorkflowJson } from './CloudTab';
+import { workflowToApiPrompt, parseWorkflowJson } from './components/utils';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
