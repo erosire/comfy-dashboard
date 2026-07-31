@@ -8,10 +8,10 @@
 //      an existing pod and return { health, models_dir, models }.
 
 import { asHandlerMethod } from '@underload/service';
-import { beamComfyCloud } from '@runtime/secret/private';
+import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
 
 // This is the spawner URL
-const DEFAULT_SPAWNER_URL = beamComfyCloud.debraHouseton;
+const DEFAULT_SPAWNER_URL = comfyCloudServiceEndpoint.standard;
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
     const spawnerUrl: string = _variables?.spawnerUrl ?? DEFAULT_SPAWNER_URL;
