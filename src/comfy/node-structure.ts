@@ -217,6 +217,11 @@ export interface WorkflowNode {
     inputs?: NodeInput[];
     /** Output slots (right side) — connection points that send data. */
     outputs?: NodeOutput[];
+    /**
+     * Optional user-facing title — overrides the node type as the display
+     * name (ComfyUI canvas header). Absent when never renamed.
+     */
+    title?: string;
     /** Node metadata (S&R name, CNR id, version, required models). */
     properties: NodeProperties;
     /**
@@ -515,7 +520,7 @@ export interface ApiPromptNode {
     /** Node class type (e.g. "KSampler", "CheckpointLoaderSimple"). */
     class_type: string;
     /** Display metadata — only `title` is used. */
-    _meta: {
+    _meta?: {
         title: string;
     };
 }

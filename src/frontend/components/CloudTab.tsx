@@ -504,15 +504,19 @@ const NodeClassType = styled('span')({
 const ModeToggle = styled('button', {
     shouldForwardProp: (prop) => prop !== 'bypassed'
 })<{ bypassed: boolean }>(({ bypassed }) => ({
-    fontSize: theme.fontSize.xs,
-    fontStyle: 'italic' as const,
+    fontSize: theme.fontSize.sm,
     fontFamily: 'inherit',
-    lineHeight: 1.3,
+    lineHeight: 1,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 20,
+    height: 18,
     color: bypassed ? '#fbbf24' : theme.textFaint,
     backgroundColor: bypassed ? '#fbbf2422' : 'transparent',
     border: `1px solid ${bypassed ? '#fbbf2466' : theme.border}`,
     borderRadius: theme.radiusSm,
-    padding: '0 5px',
+    padding: '0 3px',
     cursor: 'pointer',
     opacity: bypassed ? 1 : 0.55,
     '&:hover': {
@@ -668,10 +672,10 @@ const LinkBadge = styled('span')({
 
 // ── SubgraphNodeCard — renders a UINode with the same card as regular nodes ─
 
-/** Label for the header mode toggle: "Active" for the normal case, else the mode name. */
-function modeToggleLabel(mode: number): string {
-    if (mode === 4) return 'Bypassed';
-    if (mode === 0) return 'Active';
+/** Icon for the header mode toggle: a dot for active, a no-entry glyph for bypassed. */
+function modeToggleIcon(mode: number): string {
+    if (mode === 4) return '⊘';
+    if (mode === 0) return '●';
     return MODE_LABELS[mode] ?? `mode ${mode}`;
 }
 
@@ -680,6 +684,20 @@ function modeToggleTitle(mode: number): string {
     return mode === 4
         ? 'Bypassed — excluded from the prompt. Click to activate.'
         : 'Active — included in the prompt. Click to bypass (excluded from execution).';
+}
+
+/**
+ * The displayed node name: the node's own `title` when the workflow gives
+ * it one (user-renamed in ComfyUI), else the registry display name, else
+ * the raw class type.
+ */
+function nodeDisplayName(node: UINode, registryEntry?: { displayName?: string }): string {
+    return node.title ?? registryEntry?.displayName ?? node.classType;
+}
+
+/** Header tooltip — keeps the real node type discoverable when a custom title is shown. */
+function nodeDisplayNameTitle(node: UINode): string | undefined {
+    return node.title != null ? `${node.classType} #${node.id}` : undefined;
 }
 
 const SubgraphNodeCard: React.FC<{
@@ -694,10 +712,11 @@ const SubgraphNodeCard: React.FC<{
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
     const isExecuting = node.id === executingNodeId;
+    const isBypassed = node.mode === 4;
     return (
         <NodeCard
-            style={
-                isExecuting
+            style={{
+                ...(isExecuting
                     ? {
                           marginLeft: 8,
                           border: `2px solid ${theme.accent}`,
@@ -706,8 +725,10 @@ const SubgraphNodeCard: React.FC<{
                       }
                     : isUnregistered
                       ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
-                      : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }
-            }
+                      : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }),
+                // Bypassed nodes render half-transparent as a "not in the prompt" indicator.
+                opacity: isBypassed ? 0.25 : undefined
+            }}
         >
             <NodeHeader
                 style={
@@ -732,11 +753,12 @@ const SubgraphNodeCard: React.FC<{
                         </span>
                     )}
                     <NodeClassType
+                        title={nodeDisplayNameTitle(node)}
                         style={
                             isExecuting ? { color: theme.accent } : isUnregistered ? { color: theme.danger } : undefined
                         }
                     >
-                        {registryEntry?.displayName ?? node.classType}
+                        {nodeDisplayName(node, registryEntry)}
                     </NodeClassType>
                     {isUnregistered && (
                         <span
@@ -752,16 +774,18 @@ const SubgraphNodeCard: React.FC<{
                             not registered
                         </span>
                     )}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <NodeId>#{node.id}</NodeId>
                     <ModeToggle
                         type="button"
                         bypassed={node.mode === 4}
                         onClick={() => toggleNodeBypass(node.id)}
                         title={modeToggleTitle(node.mode)}
                     >
-                        [{modeToggleLabel(node.mode)}]
+                        {modeToggleIcon(node.mode)}
                     </ModeToggle>
                 </div>
-                <NodeId>#{node.id}</NodeId>
             </NodeHeader>
             <NodeInputs>
                 {node.connections.map((conn) => (
@@ -1263,6 +1287,7 @@ function workflowNodeToUINode(
     return {
         id: String(node.id),
         classType: node.type ?? 'Unknown',
+        title: typeof node.title === 'string' && node.title.length > 0 ? node.title : undefined,
         connections,
         outputs,
         widgets,
@@ -1311,6 +1336,10 @@ function apiPromptNodeToUINode(id: string, node: ApiPromptNode): UINode {
     return {
         id,
         classType: node.class_type ?? 'Unknown',
+        title:
+            typeof node._meta?.title === 'string' && node._meta.title.length > 0
+                ? node._meta.title
+                : undefined,
         connections,
         outputs: [], // API prompt doesn't carry output info
         widgets,
@@ -3129,8 +3158,8 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             </EditorAreaEmpty>
                         )}
 
-                        {/* Content tabs — JSON shows the workflow layout, PROMPT
-                            shows the selected prompt fields, RESULTS lists the
+                        {/* Content tabs — PROMPT shows the selected prompt fields,
+                            JSON shows the workflow layout, OUTPUT lists the
                             workflow's generations. Copy/Clone sit on the right
                             of the tab strip. */}
                         <div
@@ -3144,20 +3173,6 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             }}
                         >
                             <div style={{ display: 'flex', gap: 4 }} role="tablist">
-                                <TabBtn
-                                    className="sg-hover"
-                                    role="tab"
-                                    aria-selected={contentTab === 'json'}
-                                    data-testid="tab-json"
-                                    onClick={() => setContentTab('json')}
-                                    style={
-                                        contentTab === 'json'
-                                            ? { color: theme.accent, borderBottomColor: theme.accent }
-                                            : undefined
-                                    }
-                                >
-                                    JSON
-                                </TabBtn>
                                 <TabBtn
                                     className="sg-hover"
                                     role="tab"
@@ -3187,6 +3202,20 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 <TabBtn
                                     className="sg-hover"
                                     role="tab"
+                                    aria-selected={contentTab === 'json'}
+                                    data-testid="tab-json"
+                                    onClick={() => setContentTab('json')}
+                                    style={
+                                        contentTab === 'json'
+                                            ? { color: theme.accent, borderBottomColor: theme.accent }
+                                            : undefined
+                                    }
+                                >
+                                    JSON
+                                </TabBtn>
+                                <TabBtn
+                                    className="sg-hover"
+                                    role="tab"
                                     aria-selected={contentTab === 'results'}
                                     data-testid="tab-results"
                                     onClick={() => setContentTab('results')}
@@ -3196,7 +3225,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                             : undefined
                                     }
                                 >
-                                    RESULTS
+                                    OUTPUT
                                 </TabBtn>
                             </div>
                             <div style={{ display: 'flex', gap: 6, flexShrink: 0, paddingBottom: 4 }}>
@@ -3227,12 +3256,13 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     const registryEntry = comfyNodeRegistry[node.classType];
                                     const isUnregistered = !isSubgraph && !registryEntry;
                                     const isExecuting = node.id === executingNodeId;
+                                    const isBypassed = node.mode === 4;
                                     return (
                                         <NodeCard
                                             key={node.id}
                                             data-testid={`cloud-node-${node.id}`}
-                                            style={
-                                                isExecuting
+                                            style={{
+                                                ...(isExecuting
                                                     ? {
                                                           border: `2px solid ${theme.accent}`,
                                                           backgroundColor: theme.accentSoft,
@@ -3245,8 +3275,10 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                         }
                                                       : isSubgraph
                                                         ? { border: `1px solid ${theme.accent}40` }
-                                                        : undefined
-                                            }
+                                                        : undefined),
+                                                // Bypassed nodes render half-transparent as a "not in the prompt" indicator.
+                                                opacity: isBypassed ? 0.25 : undefined
+                                            }}
                                         >
                                             <NodeHeader
                                                 style={{
@@ -3294,6 +3326,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                         </span>
                                                     )}
                                                     <NodeClassType
+                                                        title={nodeDisplayNameTitle(node)}
                                                         style={
                                                             isSubgraph
                                                                 ? { color: theme.accent }
@@ -3302,7 +3335,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                                   : undefined
                                                         }
                                                     >
-                                                        {registryEntry?.displayName ?? node.classType}
+                                                        {nodeDisplayName(node, registryEntry)}
                                                     </NodeClassType>
                                                     {isUnregistered && (
                                                         <span
@@ -3329,16 +3362,18 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                             {registryEntry.category}
                                                         </span>
                                                     )}
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                                    <NodeId>#{node.id}</NodeId>
                                                     <ModeToggle
                                                         type="button"
                                                         bypassed={node.mode === 4}
                                                         onClick={() => toggleNodeBypass(node.id)}
                                                         title={modeToggleTitle(node.mode)}
                                                     >
-                                                        [{modeToggleLabel(node.mode)}]
+                                                        {modeToggleIcon(node.mode)}
                                                     </ModeToggle>
                                                 </div>
-                                                <NodeId>#{node.id}</NodeId>
                                             </NodeHeader>
                                             <NodeInputs>
                                                 {/* Input connections */}
@@ -3587,7 +3622,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                         <InputRow key={key} style={{ alignItems: 'flex-start', marginBottom: 6 }}>
                                             <InputLabel
                                                 onClick={() => togglePromptField(node, widget.index)}
-                                                title={`Remove from the PROMPT tab (${node.classType} #${node.id})`}
+                                                title={`Remove from the PROMPT tab (${node.title ?? node.classType} #${node.id})`}
                                                 style={{
                                                     cursor: 'pointer',
                                                     userSelect: 'none',
@@ -3606,7 +3641,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                         fontSize: '0.9em'
                                                     }}
                                                 >
-                                                    {node.classType} #{node.id}
+                                                    {nodeDisplayName(node, comfyNodeRegistry[node.classType])} #{node.id}
                                                 </span>
                                             </InputLabel>
                                             <AutoGrowTextarea
@@ -3623,7 +3658,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             </div>
                         )}
 
-                        {/* RESULTS tab — the workflow's generations (moved out
+                        {/* OUTPUT tab — the workflow's generations (moved out
                             of the sidebar). The editor area scrolls, so no
                             height cap is needed here. */}
                         {contentTab === 'results' && (
@@ -3719,7 +3754,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
                     {/* Workflow action bar — sits at the bottom of the node
                         list, below the JSON/PROMPT tabs. Delete on the left,
-                        Save on the right. Hidden on the RESULTS tab, where
+                        Save on the right. Hidden on the OUTPUT tab, where
                         neither action applies. The pod run controls (#N)
                         live in the footer, immediately left of Generate. */}
                     {isEditingSaved && contentTab !== 'results' && (

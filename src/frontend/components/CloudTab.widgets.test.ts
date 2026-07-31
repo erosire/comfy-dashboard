@@ -17,7 +17,7 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { workflowToApiPrompt } from './CloudTab';
+import { workflowToApiPrompt, parseWorkflowJson } from './CloudTab';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -795,5 +795,79 @@ describe('workflowToApiPrompt — disabled/bypassed nodes are excluded', () => {
         expect(seedInput).toBe(99999);
         // Unrelated active links are untouched.
         expect(ksampler!.inputs.latent_image).toEqual([expect.any(String), 0]);
+    });
+});
+
+describe('parseWorkflowJson — node titles', () => {
+    it('carries the workflow node title onto the UINode', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'UniversalDataToImage',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    title: 'Source Image',
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: ['https://example.com/x.png'],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'IMAGE')]
+        );
+
+        const nodes = parseWorkflowJson(raw);
+        const source = nodes.find((n) => n.classType === 'UniversalDataToImage');
+        expect(source).toBeDefined();
+        expect(source!.title).toBe('Source Image');
+    });
+
+    it('leaves title undefined when the workflow node has none', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'PrimitiveBoolean',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'BOOLEAN', type: 'BOOLEAN', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [false],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'BOOLEAN')]
+        );
+
+        const nodes = parseWorkflowJson(raw);
+        const boolNode = nodes.find((n) => n.classType === 'PrimitiveBoolean');
+        expect(boolNode).toBeDefined();
+        expect(boolNode!.title).toBeUndefined();
+    });
+
+    it('reads the title from _meta.title in API prompt format', () => {
+        const raw = {
+            '1': {
+                class_type: 'UniversalDataToImage',
+                inputs: { data_uri: 'data:image/png;base64,AAAA' },
+                _meta: { title: 'negative (leave empty)' },
+            },
+            '2': { class_type: 'PreviewImage', inputs: { images: ['1', 0] } },
+        } as unknown as Record<string, unknown>;
+
+        const nodes = parseWorkflowJson(raw);
+        const source = nodes.find((n) => n.classType === 'UniversalDataToImage');
+        expect(source!.title).toBe('negative (leave empty)');
+        const sink = nodes.find((n) => n.classType === 'PreviewImage');
+        expect(sink!.title).toBeUndefined();
     });
 });

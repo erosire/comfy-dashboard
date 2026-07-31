@@ -134,6 +134,13 @@ export type UINode = {
     /** Node class type (e.g. "KSampler", "CheckpointLoaderSimple", "CLIPTextEncode"). */
     classType: string;
 
+    /**
+     * Optional user-facing title from the workflow JSON (`title` on
+     * workflow nodes, `_meta.title` on API prompt nodes). When present it
+     * overrides the class type as the displayed node name.
+     */
+    title?: string;
+
     /** Resolved input connections — only slots that have a wire connected. */
     connections: UIInputConnection[];
 
