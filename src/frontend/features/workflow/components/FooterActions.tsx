@@ -134,10 +134,12 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
 
             {/* Generate: spawns a fresh cloud pod, snapshots the workflow,
                 and streams the run back via POST /v1/comfy/cloud/prompt.
-                Never blocked — every click spawns another pod. */}
+                Never blocked — every click spawns another pod.
+                Wrapped in an arrow — the handler's optional first param is
+                a rerun prompt override, NOT the click event. */}
             <BtnPrimary
                 className="sg-primary"
-                onClick={onGenerate}
+                onClick={() => onGenerate()}
                 disabled={nodeCount === 0}
                 title={nodeCount === 0 ? 'Load a workflow first' : 'Spawn a new cloud pod and generate'}
             >

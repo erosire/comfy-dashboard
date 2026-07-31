@@ -10,11 +10,29 @@
 // effect, not a ref callback, so later re-renders don't re-steal focus
 // from the ‹ › buttons after clicking them.
 //
-// Extracted verbatim from the original CloudTab.tsx viewer modal.
+// Viewer actions (optional, dashboard-wired):
+//   - "Create Workflow" (top-left): turns the viewed image's snapshotted
+//     prompt into a new workflow.
+//   - Generate + "#N" pod buttons (bottom bar): rerun the viewed image's
+//     prompt — Generate spawns a fresh pod, each pod button queues the
+//     job on an existing pod. They mirror the footer's generation
+//     controls but feed on the generation's stored prompt instead of
+//     the live editor tree.
+//
+// Extracted from the original CloudTab.tsx viewer modal.
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { VIEWER_SWIPE_THRESHOLD_PX, type ViewerEntry } from './utils';
+import { Btn, BtnPrimary } from './ui';
+import {
+    MAX_POD_FAILURES,
+    POD_RING_TRACK,
+    VIEWER_SWIPE_THRESHOLD_PX,
+    podButtonLabel,
+    podLetter,
+    type PodEntry,
+    type ViewerEntry
+} from './utils';
 
 export type ResultViewerProps = {
     isMobile: boolean;
@@ -28,6 +46,16 @@ export type ResultViewerProps = {
     mediaUrl: string | null;
     onClose: () => void;
     onNavigate: (delta: 1 | -1) => void;
+    /** Spawned cloud pods — each renders as a "#N" rerun button. */
+    pods?: PodEntry[];
+    /** Rerun the viewed image's prompt on a freshly spawned pod. */
+    onGenerate?: () => void;
+    /** Rerun the viewed image's prompt on an existing pod. */
+    onPodGenerate?: (pod: PodEntry) => void;
+    /** Create a workflow from the viewed image's prompt. */
+    onCreateWorkflow?: () => void;
+    /** True while an action resolves (disables the action buttons). */
+    actionBusy?: boolean;
 };
 
 export const ResultViewer: React.FC<ResultViewerProps> = ({
@@ -37,7 +65,12 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
     currentIndex,
     mediaUrl,
     onClose,
-    onNavigate
+    onNavigate,
+    pods = [],
+    onGenerate,
+    onPodGenerate,
+    onCreateWorkflow,
+    actionBusy = false
 }) => {
     const rootRef = React.useRef<HTMLDivElement>(null);
     // Touch-start point for swipe navigation (null while no gesture is live).
@@ -263,6 +296,119 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                     }}
                 >
                     ESC to close · arrows to navigate
+                </div>
+            )}
+
+            {/* Create Workflow — left side; saves the viewed image's
+                snapshotted prompt as a brand-new workflow and loads it. */}
+            {onCreateWorkflow && (
+                <button
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onCreateWorkflow();
+                    }}
+                    disabled={actionBusy}
+                    title="Create a workflow from this image's prompt"
+                    data-testid="viewer-create-workflow"
+                    style={{
+                        position: 'absolute',
+                        top: 12,
+                        left: 12,
+                        padding: '6px 14px',
+                        borderRadius: theme.radiusMd,
+                        border: '1px solid rgba(255,255,255,0.3)',
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                        color: '#fff',
+                        fontSize: theme.fontSize.sm,
+                        fontWeight: 600,
+                        cursor: actionBusy ? 'not-allowed' : 'pointer',
+                        opacity: actionBusy ? 0.55 : 1,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        zIndex: 1
+                    }}
+                >
+                    ＋ Create Workflow
+                </button>
+            )}
+
+            {/* Rerun controls — bottom bar: one "#N" button per spawned pod
+                (queues the viewed image's prompt on that pod) plus Generate
+                (spawns a fresh pod). Mirrors the footer's pod/Generate
+                styling: loading ring while spawning / jobs in flight,
+                settled-state border colors. */}
+            {onGenerate && (
+                <div
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                        position: 'absolute',
+                        bottom: 20,
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        display: 'flex',
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 8,
+                        flexWrap: 'wrap',
+                        maxWidth: '90vw',
+                        padding: '8px 14px',
+                        borderRadius: theme.radiusMd,
+                        border: '1px solid rgba(255,255,255,0.25)',
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                        zIndex: 1
+                    }}
+                >
+                    {pods.map((p) => {
+                        const isSpawning = p.status === 'spawning';
+                        const inFlight = p.activeGenerationIds.length;
+                        const isLoading = isSpawning || inFlight > 0;
+                        const letter = podLetter(p.podNumber);
+                        const isDisabled =
+                            actionBusy || isSpawning || !p.pod_url || p.status !== 'ready';
+                        return (
+                            <Btn
+                                key={p.id}
+                                className={isLoading ? 'sg-hover sg-ring-loading' : 'sg-hover'}
+                                onClick={() => onPodGenerate?.(p)}
+                                disabled={isDisabled}
+                                title={
+                                    isSpawning
+                                        ? `Pod ${letter} — starting up…`
+                                        : p.status !== 'ready'
+                                          ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
+                                            `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
+                                          : inFlight > 0
+                                            ? `Pod ${letter} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                              `in flight on ${p.pod_url} — click to queue this image's prompt`
+                                            : `Queue this image's prompt on ${p.pod_url}`
+                                }
+                                style={{
+                                    fontFamily: theme.fontMono,
+                                    borderColor: isLoading
+                                        ? POD_RING_TRACK
+                                        : p.run.status === 'error'
+                                          ? theme.dangerBorder
+                                          : p.run.status === 'done'
+                                            ? theme.success
+                                            : theme.border
+                                }}
+                                data-testid={`viewer-pod-generate-${p.podNumber}`}
+                            >
+                                {podButtonLabel(p.podNumber, inFlight)}
+                            </Btn>
+                        );
+                    })}
+                    <BtnPrimary
+                        className="sg-primary"
+                        onClick={onGenerate}
+                        disabled={actionBusy}
+                        title="Spawn a new cloud pod and regenerate with this image's prompt"
+                        data-testid="viewer-generate"
+                    >
+                        Generate
+                    </BtnPrimary>
                 </div>
             )}
         </div>
