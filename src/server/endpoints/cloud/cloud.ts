@@ -11,7 +11,7 @@ import { asHandlerMethod } from '@underload/service';
 import { beamComfyCloud } from '@runtime/secret/private';
 
 // This is the spawner URL
-const DEFAULT_SPAWNER_URL = beamComfyCloud.lancerDiffusion;
+const DEFAULT_SPAWNER_URL = beamComfyCloud.debraHouseton;
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
     const spawnerUrl: string = _variables?.spawnerUrl ?? DEFAULT_SPAWNER_URL;

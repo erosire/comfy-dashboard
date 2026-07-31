@@ -11,7 +11,14 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../styles';
 import { ComfyDashboard } from './ComfyDashboard';
-import type { CloudStreamEvent, CloudPodStatusResult, WorkflowMeta, GenerationResultItem, GenerationResultMeta, GenerationSummary } from '../api';
+import type {
+    CloudPodStatusResult,
+    CloudStreamEvent,
+    GenerationResultItem,
+    GenerationResultMeta,
+    GenerationSummary,
+    WorkflowMeta
+} from '../api';
 import { cloud, cloudPrompt, cloudReadNdjson, generationResultUrl } from '../api';
 import { useDashboardStore } from '../context';
 import type {
@@ -607,9 +614,9 @@ const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAreaElemen
                         reader.onload = (ev) => {
                             const dataUri = ev.target?.result;
                             if (typeof dataUri === 'string') {
-                                onChangeRef.current?.(
-                                    { target: { value: dataUri } } as React.ChangeEvent<HTMLTextAreaElement>
-                                );
+                                onChangeRef.current?.({
+                                    target: { value: dataUri }
+                                } as React.ChangeEvent<HTMLTextAreaElement>);
                             }
                         };
                         reader.readAsDataURL(blob);
@@ -688,11 +695,7 @@ const SubgraphNodeCard: React.FC<{
                     )}
                     <NodeClassType
                         style={
-                            isExecuting
-                                ? { color: theme.accent }
-                                : isUnregistered
-                                  ? { color: theme.danger }
-                                  : undefined
+                            isExecuting ? { color: theme.accent } : isUnregistered ? { color: theme.danger } : undefined
                         }
                     >
                         {registryEntry?.displayName ?? node.classType}
@@ -1024,7 +1027,7 @@ function parseNodesRecursive(
                         targetNodeId: String(link.target_id),
                         targetSlot: Number(link.target_slot),
                         sourceNodeId: rewritten ? rewritten.sourceNodeId : String(link.origin_id),
-                        sourceSlot: rewritten ? rewritten.sourceSlot : Number(link.origin_slot),
+                        sourceSlot: rewritten ? rewritten.sourceSlot : Number(link.origin_slot)
                     };
                 });
 
@@ -1470,9 +1473,7 @@ function sortNodes(nodes: UINode[]): UINode[] {
  */
 export function sortNodesDeep(nodes: UINode[]): UINode[] {
     return sortNodes(nodes).map((n) =>
-        n.subgraphNodes && n.subgraphNodes.length > 0
-            ? { ...n, subgraphNodes: sortNodesDeep(n.subgraphNodes) }
-            : n
+        n.subgraphNodes && n.subgraphNodes.length > 0 ? { ...n, subgraphNodes: sortNodesDeep(n.subgraphNodes) } : n
     );
 }
 
@@ -1534,10 +1535,7 @@ function renumberSubgraphNodes(
         // internal siblings (internalIdMap) AND any out-of-subgraph references
         // the parent already knew about (externalIdMap) — including top-level IDs.
         const myNewId = internalIdMap.get(n.id)!;
-        const combinedExternalMap = new Map<string, string>([
-            ...externalIdMap.entries(),
-            ...internalIdMap.entries(),
-        ]);
+        const combinedExternalMap = new Map<string, string>([...externalIdMap.entries(), ...internalIdMap.entries()]);
         const subgraphNodes =
             n.subgraphNodes && n.subgraphNodes.length > 0
                 ? renumberSubgraphNodes(n.subgraphNodes, myNewId, combinedExternalMap)
@@ -1791,16 +1789,14 @@ function flattenSubgraphNodes(nodes: UINode[]): UINode[] {
             for (const sgOutput of sgDef.outputs ?? []) {
                 for (const linkId of sgOutput.linkIds ?? []) {
                     // Find the internal link that goes TO the -20 outputNode
-                    const link = subgraphLinks.find(
-                        (l) => l.id === linkId && String(l.target_id) === '-20'
-                    );
+                    const link = subgraphLinks.find((l) => l.id === linkId && String(l.target_id) === '-20');
                     if (link) {
                         const origSourceId = String(link.origin_id);
                         const renumberedSourceId = origToRenumbered.get(origSourceId);
                         if (renumberedSourceId) {
                             outputMap.set(Number(link.target_slot), {
                                 nodeId: renumberedSourceId,
-                                slot: Number(link.origin_slot),
+                                slot: Number(link.origin_slot)
                             });
                         }
                     }
@@ -2110,9 +2106,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             const startPos = gens.findIndex((g) => g.id === startGenerationId);
             if (startPos === -1) return;
             // Global index of the clicked generation's first result item.
-            const startIndex = gens
-                .slice(0, startPos)
-                .reduce((sum, g) => sum + (g.resultItems?.length ?? 0), 0);
+            const startIndex = gens.slice(0, startPos).reduce((sum, g) => sum + (g.resultItems?.length ?? 0), 0);
             setViewerGens(gens);
             setViewerIndex(startIndex);
             setViewerOpen(true);
@@ -2598,16 +2592,16 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         // button shows up while the pod_url is still being resolved.
         podCounterRef.current += 1;
         const podNumber = podCounterRef.current;
-            const podEntry: PodEntry = {
-                id: `gen-pod-${Date.now()}-${podNumber}`,
-                podNumber,
-                name: podLetter(podNumber),
-                pod_url: '',
-                status: 'spawning',
-                failCount: 0,
-                activeGenerationIds: [],
-                run: { status: 'idle' }
-            };
+        const podEntry: PodEntry = {
+            id: `gen-pod-${Date.now()}-${podNumber}`,
+            podNumber,
+            name: podLetter(podNumber),
+            pod_url: '',
+            status: 'spawning',
+            failCount: 0,
+            activeGenerationIds: [],
+            run: { status: 'idle' }
+        };
         setPods((prev) => [...prev, podEntry]);
 
         // Step 2 — create the cloud pod
@@ -2629,9 +2623,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
 
         // Step 3 — pod_url exists: the pod is now usable
         setPods((prev) =>
-            prev.map((p) =>
-                p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p
-            )
+            prev.map((p) => (p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p))
         );
 
         // Step 4 — snapshot + submit for server-side processing.
@@ -2795,7 +2787,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             const execStr = execMs != null ? `, execution: ${(execMs / 1000).toFixed(1)}s` : '';
                             console.log(
                                 `[Agent] Generation ${gen.id} finished (${event.type}) — ` +
-                                `total: ${(genMs / 1000).toFixed(1)}s${execStr}`
+                                    `total: ${(genMs / 1000).toFixed(1)}s${execStr}`
                             );
                             break;
                         }
@@ -2814,14 +2806,19 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 generatedTime: `${(genTotalMs / 1000).toFixed(1)}s`,
                                 completedDate: genFinishTime
                             });
-                            console.log(`[Agent] PUT generation ${gen.id}: completed with ${collectedResults.length} result(s)`);
+                            console.log(
+                                `[Agent] PUT generation ${gen.id}: completed with ${collectedResults.length} result(s)`
+                            );
                         } catch (err: any) {
                             console.error(`[Agent] Failed to PUT generation ${gen.id}:`, err.message);
                         }
                     }
                 } catch (err: any) {
                     const genMs = performance.now() - genStart;
-                    console.error(`[Agent] Failed to submit generation ${gen.id} after ${(genMs / 1000).toFixed(1)}s:`, err.message ?? String(err));
+                    console.error(
+                        `[Agent] Failed to submit generation ${gen.id} after ${(genMs / 1000).toFixed(1)}s:`,
+                        err.message ?? String(err)
+                    );
                     // Mark as failed
                     if (editingWorkflowId) {
                         try {
@@ -2829,7 +2826,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                 status: 'failed',
                                 error: err.message ?? String(err)
                             });
-                        } catch { /* ignore */ }
+                        } catch {
+                            /* ignore */
+                        }
                     }
                 }
             }
@@ -2846,7 +2845,15 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 refreshGenerations(editingWorkflowId);
             }
         }
-    }, [agentRunning, baseUrl, store.generations, editingWorkflowId, updateGeneration, refreshGenerations, fetchGeneration]);
+    }, [
+        agentRunning,
+        baseUrl,
+        store.generations,
+        editingWorkflowId,
+        updateGeneration,
+        refreshGenerations,
+        fetchGeneration
+    ]);
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
     // Pods scale to zero ~120s after the last active connection, so probing
@@ -2874,16 +2881,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
             if (failCount >= MAX_POD_FAILURES) {
                 console.warn(
                     `[Heartbeat] Pod#${current.podNumber} removed — pod_url stopped working ` +
-                    `(${failCount} consecutive probe failures, last: ${message})`
+                        `(${failCount} consecutive probe failures, last: ${message})`
                 );
                 return prev.filter((ep) => ep.id !== podId);
             }
             console.warn(
                 `[Heartbeat] Pod#${current.podNumber} probe failed (${failCount}/${MAX_POD_FAILURES}): ${message}`
             );
-            return prev.map((ep) =>
-                ep.id === podId ? { ...ep, status: 'error', failCount, error: message } : ep
-            );
+            return prev.map((ep) => (ep.id === podId ? { ...ep, status: 'error', failCount, error: message } : ep));
         });
     }, []);
 
@@ -2901,8 +2906,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                     try {
                         const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
                         const statusResult = result as CloudPodStatusResult;
-                        const healthy =
-                            'health' in result ? statusResult.health?.healthy !== false : true;
+                        const healthy = 'health' in result ? statusResult.health?.healthy !== false : true;
                         if (healthy) {
                             // Alive — clear strikes, refresh health, mark ready
                             setPods((prev) =>
@@ -3138,309 +3142,350 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         {contentTab === 'json' && (
                             <>
                                 {nodes.map((node) => {
-                            const isSubgraph = !!node.subgraphDef;
-                            const registryEntry = comfyNodeRegistry[node.classType];
-                            const isUnregistered = !isSubgraph && !registryEntry;
-                            const isExecuting = node.id === executingNodeId;
-                            return (
-                                <NodeCard
-                                    key={node.id}
-                                    data-testid={`cloud-node-${node.id}`}
-                                    style={
-                                        isExecuting
-                                            ? {
-                                                  border: `2px solid ${theme.accent}`,
-                                                  backgroundColor: theme.accentSoft,
-                                                  boxShadow: `0 0 12px rgba(129, 140, 248, 0.35)`
-                                              }
-                                            : isUnregistered
-                                              ? {
-                                                    border: `1px solid ${theme.dangerBorder}`,
-                                                    backgroundColor: theme.dangerSoft
-                                                }
-                                              : isSubgraph
-                                                ? { border: `1px solid ${theme.accent}40` }
-                                                : undefined
-                                    }
-                                >
-                                    <NodeHeader
-                                        style={{
-                                            backgroundColor: isExecuting
-                                                ? 'rgba(129, 140, 248, 0.25)'
-                                                : node.color
-                                                  ? node.color
-                                                  : isUnregistered
-                                                    ? 'rgba(248, 113, 113, 0.20)'
-                                                    : isSubgraph
-                                                      ? 'rgba(129, 140, 248, 0.15)'
-                                                      : undefined
-                                        }}
-                                    >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                                            {isExecuting && (
-                                                <span
-                                                    style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: theme.accent,
-                                                        marginRight: 2
-                                                    }}
-                                                    title="Currently executing"
-                                                >
-                                                    ▶
-                                                </span>
-                                            )}
-                                            {isSubgraph && (
-                                                <span
-                                                    style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: theme.accent,
-                                                        marginRight: 2
-                                                    }}
-                                                    title="Subgraph"
-                                                >
-                                                    ◈
-                                                </span>
-                                            )}
-                                            <NodeClassType
-                                                style={
-                                                    isSubgraph
-                                                        ? { color: theme.accent }
-                                                        : isUnregistered
-                                                          ? { color: theme.danger }
-                                                          : undefined
-                                                }
-                                            >
-                                                {registryEntry?.displayName ?? node.classType}
-                                            </NodeClassType>
-                                            {isUnregistered && (
-                                                <span
-                                                    style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: theme.danger,
-                                                        border: `1px solid ${theme.dangerBorder}`,
-                                                        borderRadius: theme.radiusSm,
-                                                        padding: '0 4px',
-                                                        backgroundColor: theme.dangerSoft
-                                                    }}
-                                                >
-                                                    not registered
-                                                </span>
-                                            )}
-                                            {registryEntry?.category && (
-                                                <span
-                                                    style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: theme.textFaint,
-                                                        fontFamily: theme.fontMono
-                                                    }}
-                                                >
-                                                    {registryEntry.category}
-                                                </span>
-                                            )}
-                                            {node.mode !== 0 && (
-                                                <span
-                                                    style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
-                                                        opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
-                                                        fontStyle: 'italic'
-                                                    }}
-                                                >
-                                                    [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
-                                                </span>
-                                            )}
-                                        </div>
-                                        <NodeId>#{node.id}</NodeId>
-                                    </NodeHeader>
-                                    <NodeInputs>
-                                        {/* Input connections */}
-                                        {node.connections.map((conn) => (
-                                            <InputRow key={`conn-${conn.name}`}>
-                                                <InputLabel style={{ color: dataTypeColor(conn.type) }}>
-                                                    {conn.name}
-                                                </InputLabel>
-                                                <LinkBadge
-                                                    style={{
-                                                        color: dataTypeColor(conn.type),
-                                                        borderColor: `${dataTypeColor(conn.type)}40`,
-                                                        backgroundColor: `${dataTypeColor(conn.type)}12`
-                                                    }}
-                                                >
-                                                    → {conn.sourceNodeId}[{conn.sourceSlot}]
-                                                    {conn.type !== '*' && (
-                                                        <span
-                                                            style={{ marginLeft: 4, opacity: 0.7, fontSize: '0.9em' }}
-                                                        >
-                                                            {dataTypeLabel(conn.type)}
-                                                        </span>
-                                                    )}
-                                                </LinkBadge>
-                                            </InputRow>
-                                        ))}
-
-                                        {/* Widget values — labels are clickable
-                                            toggles: a toggled field also appears
-                                            in the PROMPT quick-edit tab. */}
-                                        {node.widgets.map((widget) => {
-                                            const fieldKey = promptWidgetKey(node, widget);
-                                            const isPromptField = promptFields.has(fieldKey);
-                                            return (
-                                                <InputRow key={`w${widget.index}`}>
-                                                    <InputLabel
-                                                        onClick={() => togglePromptField(node, widget.index)}
-                                                        title={
-                                                            isPromptField
-                                                                ? 'Remove from the PROMPT tab'
-                                                                : 'Add to the PROMPT tab'
+                                    const isSubgraph = !!node.subgraphDef;
+                                    const registryEntry = comfyNodeRegistry[node.classType];
+                                    const isUnregistered = !isSubgraph && !registryEntry;
+                                    const isExecuting = node.id === executingNodeId;
+                                    return (
+                                        <NodeCard
+                                            key={node.id}
+                                            data-testid={`cloud-node-${node.id}`}
+                                            style={
+                                                isExecuting
+                                                    ? {
+                                                          border: `2px solid ${theme.accent}`,
+                                                          backgroundColor: theme.accentSoft,
+                                                          boxShadow: `0 0 12px rgba(129, 140, 248, 0.35)`
+                                                      }
+                                                    : isUnregistered
+                                                      ? {
+                                                            border: `1px solid ${theme.dangerBorder}`,
+                                                            backgroundColor: theme.dangerSoft
                                                         }
-                                                        style={{
-                                                            cursor: 'pointer',
-                                                            userSelect: 'none',
-                                                            color: isPromptField ? theme.accent : undefined,
-                                                            fontWeight: isPromptField ? 600 : undefined
-                                                        }}
-                                                        data-testid={`cloud-widget-label-${node.id}-${widget.index}`}
-                                                    >
-                                                        {getWidgetLabel(node.classType, widget.index)}
-                                                    </InputLabel>
-                                                    <AutoGrowTextarea
-                                                        value={displayValue(widget.value)}
-                                                        onChange={(e) =>
-                                                            updateNodeWidget(node.id, widget.index, e.target.value)
-                                                        }
-                                                        readOnly={false}
-                                                        data-testid={`cloud-widget-${node.id}-${widget.index}`}
-                                                    />
-                                                </InputRow>
-                                            );
-                                        })}
-
-                                        {/* Output slots */}
-                                        {node.outputs.length > 0 && (
-                                            <div
+                                                      : isSubgraph
+                                                        ? { border: `1px solid ${theme.accent}40` }
+                                                        : undefined
+                                            }
+                                        >
+                                            <NodeHeader
                                                 style={{
-                                                    display: 'flex',
-                                                    flexWrap: 'wrap' as const,
-                                                    gap: 4,
-                                                    marginTop: 4,
-                                                    paddingTop: 4,
-                                                    borderTop: `1px solid ${theme.border}`
-                                                }}
-                                            >
-                                                <span
-                                                    style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: theme.textFaint,
-                                                        marginRight: 2
-                                                    }}
-                                                >
-                                                    outputs:
-                                                </span>
-                                                {node.outputs.map((out) => (
-                                                    <span
-                                                        key={`out-${out.slotIndex}`}
-                                                        style={{
-                                                            fontSize: theme.fontSize.xs,
-                                                            color: dataTypeColor(out.type),
-                                                            fontFamily: theme.fontMono,
-                                                            padding: '0 4px',
-                                                            borderRadius: theme.radiusSm,
-                                                            backgroundColor: `${dataTypeColor(out.type)}12`,
-                                                            border: `1px solid ${dataTypeColor(out.type)}25`
-                                                        }}
-                                                    >
-                                                        {out.name}
-                                                        {out.connectionCount > 0 && (
-                                                            <span style={{ opacity: 0.6 }}>
-                                                                {' '}
-                                                                ({out.connectionCount})
-                                                            </span>
-                                                        )}
-                                                        {out.isList && <span style={{ opacity: 0.6 }}> []</span>}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        )}
-
-                                        {/* Node properties — show S&R name and version if present */}
-                                        {(node.properties['Node name for S&R'] || node.properties.ver) && (
-                                            <div
-                                                style={{
-                                                    display: 'flex',
-                                                    flexWrap: 'wrap' as const,
-                                                    gap: 6,
-                                                    marginTop: 4,
-                                                    paddingTop: 4,
-                                                    borderTop: `1px solid ${theme.border}`
-                                                }}
-                                            >
-                                                {node.properties['Node name for S&R'] && (
-                                                    <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
-                                                        S&amp;R: {node.properties['Node name for S&R']}
-                                                    </span>
-                                                )}
-                                                {node.properties.ver && (
-                                                    <span style={{ fontSize: theme.fontSize.xs, color: theme.textDim }}>
-                                                        v{node.properties.ver}
-                                                    </span>
-                                                )}
-                                                {node.properties.cnr_id && (
-                                                    <span
-                                                        style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}
-                                                    >
-                                                        CNR: {node.properties.cnr_id}
-                                                    </span>
-                                                )}
-                                            </div>
-                                        )}
-
-                                        {/* Empty state */}
-                                        {node.connections.length === 0 &&
-                                            node.widgets.length === 0 &&
-                                            node.outputs.length === 0 && (
-                                                <div style={{ fontSize: theme.fontSize.xs, color: theme.textFaint }}>
-                                                    No inputs
-                                                </div>
-                                            )}
-
-                                        {/* ── Nested subgraph internal nodes ────────── */}
-                                        {isSubgraph && node.subgraphNodes && node.subgraphNodes.length > 0 && (
-                                            <div
-                                                style={{
-                                                    marginTop: 6,
-                                                    paddingTop: 6,
-                                                    borderTop: `1px dashed ${theme.accent}30`
+                                                    backgroundColor: isExecuting
+                                                        ? 'rgba(129, 140, 248, 0.25)'
+                                                        : node.color
+                                                          ? node.color
+                                                          : isUnregistered
+                                                            ? 'rgba(248, 113, 113, 0.20)'
+                                                            : isSubgraph
+                                                              ? 'rgba(129, 140, 248, 0.15)'
+                                                              : undefined
                                                 }}
                                             >
                                                 <div
                                                     style={{
-                                                        fontSize: theme.fontSize.xs,
-                                                        color: theme.accent,
-                                                        fontWeight: 600,
-                                                        marginBottom: 4
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: 8,
+                                                        minWidth: 0
                                                     }}
                                                 >
-                                                    ◈ {node.subgraphNodes.length} internal node
-                                                    {node.subgraphNodes.length !== 1 ? 's' : ''}
+                                                    {isExecuting && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.accent,
+                                                                marginRight: 2
+                                                            }}
+                                                            title="Currently executing"
+                                                        >
+                                                            ▶
+                                                        </span>
+                                                    )}
+                                                    {isSubgraph && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.accent,
+                                                                marginRight: 2
+                                                            }}
+                                                            title="Subgraph"
+                                                        >
+                                                            ◈
+                                                        </span>
+                                                    )}
+                                                    <NodeClassType
+                                                        style={
+                                                            isSubgraph
+                                                                ? { color: theme.accent }
+                                                                : isUnregistered
+                                                                  ? { color: theme.danger }
+                                                                  : undefined
+                                                        }
+                                                    >
+                                                        {registryEntry?.displayName ?? node.classType}
+                                                    </NodeClassType>
+                                                    {isUnregistered && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.danger,
+                                                                border: `1px solid ${theme.dangerBorder}`,
+                                                                borderRadius: theme.radiusSm,
+                                                                padding: '0 4px',
+                                                                backgroundColor: theme.dangerSoft
+                                                            }}
+                                                        >
+                                                            not registered
+                                                        </span>
+                                                    )}
+                                                    {registryEntry?.category && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.textFaint,
+                                                                fontFamily: theme.fontMono
+                                                            }}
+                                                        >
+                                                            {registryEntry.category}
+                                                        </span>
+                                                    )}
+                                                    {node.mode !== 0 && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
+                                                                opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
+                                                                fontStyle: 'italic'
+                                                            }}
+                                                        >
+                                                            [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
+                                                        </span>
+                                                    )}
                                                 </div>
-                                                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                                    {node.subgraphNodes.map((inner) => (
-                                                        <SubgraphNodeCard
-                                                            key={inner.id}
-                                                            node={inner}
-                                                            updateNodeWidget={updateNodeWidget}
-                                                            executingNodeId={executingNodeId}
-                                                            promptFields={promptFields}
-                                                            togglePromptField={togglePromptField}
-                                                        />
-                                                    ))}
-                                                </div>
-                                            </div>
-                                        )}
-                                    </NodeInputs>
-                                </NodeCard>
-                            );
-                        })}
+                                                <NodeId>#{node.id}</NodeId>
+                                            </NodeHeader>
+                                            <NodeInputs>
+                                                {/* Input connections */}
+                                                {node.connections.map((conn) => (
+                                                    <InputRow key={`conn-${conn.name}`}>
+                                                        <InputLabel style={{ color: dataTypeColor(conn.type) }}>
+                                                            {conn.name}
+                                                        </InputLabel>
+                                                        <LinkBadge
+                                                            style={{
+                                                                color: dataTypeColor(conn.type),
+                                                                borderColor: `${dataTypeColor(conn.type)}40`,
+                                                                backgroundColor: `${dataTypeColor(conn.type)}12`
+                                                            }}
+                                                        >
+                                                            → {conn.sourceNodeId}[{conn.sourceSlot}]
+                                                            {conn.type !== '*' && (
+                                                                <span
+                                                                    style={{
+                                                                        marginLeft: 4,
+                                                                        opacity: 0.7,
+                                                                        fontSize: '0.9em'
+                                                                    }}
+                                                                >
+                                                                    {dataTypeLabel(conn.type)}
+                                                                </span>
+                                                            )}
+                                                        </LinkBadge>
+                                                    </InputRow>
+                                                ))}
+
+                                                {/* Widget values — labels are clickable
+                                            toggles: a toggled field also appears
+                                            in the PROMPT quick-edit tab. */}
+                                                {node.widgets.map((widget) => {
+                                                    const fieldKey = promptWidgetKey(node, widget);
+                                                    const isPromptField = promptFields.has(fieldKey);
+                                                    return (
+                                                        <InputRow key={`w${widget.index}`}>
+                                                            <InputLabel
+                                                                onClick={() => togglePromptField(node, widget.index)}
+                                                                title={
+                                                                    isPromptField
+                                                                        ? 'Remove from the PROMPT tab'
+                                                                        : 'Add to the PROMPT tab'
+                                                                }
+                                                                style={{
+                                                                    cursor: 'pointer',
+                                                                    userSelect: 'none',
+                                                                    color: isPromptField ? theme.accent : undefined,
+                                                                    fontWeight: isPromptField ? 600 : undefined
+                                                                }}
+                                                                data-testid={`cloud-widget-label-${node.id}-${widget.index}`}
+                                                            >
+                                                                {getWidgetLabel(node.classType, widget.index)}
+                                                            </InputLabel>
+                                                            <AutoGrowTextarea
+                                                                value={displayValue(widget.value)}
+                                                                onChange={(e) =>
+                                                                    updateNodeWidget(
+                                                                        node.id,
+                                                                        widget.index,
+                                                                        e.target.value
+                                                                    )
+                                                                }
+                                                                readOnly={false}
+                                                                data-testid={`cloud-widget-${node.id}-${widget.index}`}
+                                                            />
+                                                        </InputRow>
+                                                    );
+                                                })}
+
+                                                {/* Output slots */}
+                                                {node.outputs.length > 0 && (
+                                                    <div
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexWrap: 'wrap' as const,
+                                                            gap: 4,
+                                                            marginTop: 4,
+                                                            paddingTop: 4,
+                                                            borderTop: `1px solid ${theme.border}`
+                                                        }}
+                                                    >
+                                                        <span
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.textFaint,
+                                                                marginRight: 2
+                                                            }}
+                                                        >
+                                                            outputs:
+                                                        </span>
+                                                        {node.outputs.map((out) => (
+                                                            <span
+                                                                key={`out-${out.slotIndex}`}
+                                                                style={{
+                                                                    fontSize: theme.fontSize.xs,
+                                                                    color: dataTypeColor(out.type),
+                                                                    fontFamily: theme.fontMono,
+                                                                    padding: '0 4px',
+                                                                    borderRadius: theme.radiusSm,
+                                                                    backgroundColor: `${dataTypeColor(out.type)}12`,
+                                                                    border: `1px solid ${dataTypeColor(out.type)}25`
+                                                                }}
+                                                            >
+                                                                {out.name}
+                                                                {out.connectionCount > 0 && (
+                                                                    <span style={{ opacity: 0.6 }}>
+                                                                        {' '}
+                                                                        ({out.connectionCount})
+                                                                    </span>
+                                                                )}
+                                                                {out.isList && (
+                                                                    <span style={{ opacity: 0.6 }}> []</span>
+                                                                )}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                {/* Node properties — show S&R name and version if present */}
+                                                {(node.properties['Node name for S&R'] || node.properties.ver) && (
+                                                    <div
+                                                        style={{
+                                                            display: 'flex',
+                                                            flexWrap: 'wrap' as const,
+                                                            gap: 6,
+                                                            marginTop: 4,
+                                                            paddingTop: 4,
+                                                            borderTop: `1px solid ${theme.border}`
+                                                        }}
+                                                    >
+                                                        {node.properties['Node name for S&R'] && (
+                                                            <span
+                                                                style={{
+                                                                    fontSize: theme.fontSize.xs,
+                                                                    color: theme.textDim
+                                                                }}
+                                                            >
+                                                                S&amp;R: {node.properties['Node name for S&R']}
+                                                            </span>
+                                                        )}
+                                                        {node.properties.ver && (
+                                                            <span
+                                                                style={{
+                                                                    fontSize: theme.fontSize.xs,
+                                                                    color: theme.textDim
+                                                                }}
+                                                            >
+                                                                v{node.properties.ver}
+                                                            </span>
+                                                        )}
+                                                        {node.properties.cnr_id && (
+                                                            <span
+                                                                style={{
+                                                                    fontSize: theme.fontSize.xs,
+                                                                    color: theme.textFaint
+                                                                }}
+                                                            >
+                                                                CNR: {node.properties.cnr_id}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* Empty state */}
+                                                {node.connections.length === 0 &&
+                                                    node.widgets.length === 0 &&
+                                                    node.outputs.length === 0 && (
+                                                        <div
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.textFaint
+                                                            }}
+                                                        >
+                                                            No inputs
+                                                        </div>
+                                                    )}
+
+                                                {/* ── Nested subgraph internal nodes ────────── */}
+                                                {isSubgraph && node.subgraphNodes && node.subgraphNodes.length > 0 && (
+                                                    <div
+                                                        style={{
+                                                            marginTop: 6,
+                                                            paddingTop: 6,
+                                                            borderTop: `1px dashed ${theme.accent}30`
+                                                        }}
+                                                    >
+                                                        <div
+                                                            style={{
+                                                                fontSize: theme.fontSize.xs,
+                                                                color: theme.accent,
+                                                                fontWeight: 600,
+                                                                marginBottom: 4
+                                                            }}
+                                                        >
+                                                            ◈ {node.subgraphNodes.length} internal node
+                                                            {node.subgraphNodes.length !== 1 ? 's' : ''}
+                                                        </div>
+                                                        <div
+                                                            style={{
+                                                                display: 'flex',
+                                                                flexDirection: 'column',
+                                                                gap: 6
+                                                            }}
+                                                        >
+                                                            {node.subgraphNodes.map((inner) => (
+                                                                <SubgraphNodeCard
+                                                                    key={inner.id}
+                                                                    node={inner}
+                                                                    updateNodeWidget={updateNodeWidget}
+                                                                    executingNodeId={executingNodeId}
+                                                                    promptFields={promptFields}
+                                                                    togglePromptField={togglePromptField}
+                                                                />
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </NodeInputs>
+                                        </NodeCard>
+                                    );
+                                })}
                             </>
                         )}
 
@@ -3461,10 +3506,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                     </div>
                                 ) : (
                                     promptEntries.map(({ key, node, widget }) => (
-                                        <InputRow
-                                            key={key}
-                                            style={{ alignItems: 'flex-start', marginBottom: 6 }}
-                                        >
+                                        <InputRow key={key} style={{ alignItems: 'flex-start', marginBottom: 6 }}>
                                             <InputLabel
                                                 onClick={() => togglePromptField(node, widget.index)}
                                                 title={`Remove from the PROMPT tab (${node.classType} #${node.id})`}
@@ -3491,7 +3533,9 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                             </InputLabel>
                                             <AutoGrowTextarea
                                                 value={displayValue(widget.value)}
-                                                onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
+                                                onChange={(e) =>
+                                                    updateNodeWidget(node.id, widget.index, e.target.value)
+                                                }
                                                 readOnly={false}
                                                 data-testid={`prompt-widget-${key}`}
                                             />
@@ -3506,42 +3550,41 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             height cap is needed here. */}
                         {contentTab === 'results' && (
                             <div data-testid="results-tab-pane">
-                                {store.generations.length === 0 && (
-                                    <EmptyHint>No generations yet.</EmptyHint>
-                                )}
+                                {store.generations.length === 0 && <EmptyHint>No generations yet.</EmptyHint>}
                                 {store.generations.map((gen) => {
                                     const hasResults = (gen.resultItems?.length ?? 0) > 0;
                                     const genStatusColor =
                                         gen.status === 'completed'
                                             ? theme.success
                                             : gen.status === 'failed'
-                                                ? theme.danger
-                                                : gen.status === 'processing'
-                                                    ? theme.accent
-                                                    : theme.textDim;
+                                              ? theme.danger
+                                              : gen.status === 'processing'
+                                                ? theme.accent
+                                                : theme.textDim;
                                     const genStatusBg =
                                         gen.status === 'completed'
                                             ? theme.successSoft
                                             : gen.status === 'failed'
-                                                ? theme.dangerSoft
-                                                : gen.status === 'processing'
-                                                    ? theme.accentSoft
-                                                    : theme.surface2;
+                                              ? theme.dangerSoft
+                                              : gen.status === 'processing'
+                                                ? theme.accentSoft
+                                                : theme.surface2;
                                     return (
                                         <QueueItemEl
                                             key={gen.id}
                                             data-testid={`gen-item-${gen.id}`}
                                             style={
                                                 hasResults
-                                                    ? { cursor: 'pointer', transition: `border-color ${theme.transition}` }
+                                                    ? {
+                                                          cursor: 'pointer',
+                                                          transition: `border-color ${theme.transition}`
+                                                      }
                                                     : undefined
                                             }
                                             onClick={hasResults ? () => openViewer(gen.id) : undefined}
                                         >
                                             <QueueItemHeader>
-                                                <QueueItemName title={gen.id}>
-                                                    {gen.id}
-                                                </QueueItemName>
+                                                <QueueItemName title={gen.id}>{gen.id}</QueueItemName>
                                                 {hasResults && (
                                                     <span
                                                         style={{
@@ -3556,10 +3599,12 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                 )}
                                             </QueueItemHeader>
                                             <QueueItemMeta>
-                                                <QueueStatusBadge style={{
-                                                    color: genStatusColor,
-                                                    backgroundColor: genStatusBg
-                                                }}>
+                                                <QueueStatusBadge
+                                                    style={{
+                                                        color: genStatusColor,
+                                                        backgroundColor: genStatusBg
+                                                    }}
+                                                >
                                                     {gen.status === 'processing' && <SpinnerEl />}
                                                     {gen.status}
                                                 </QueueStatusBadge>
@@ -3573,14 +3618,17 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                 </span>
                                             </QueueItemMeta>
                                             {gen.error && (
-                                                <div style={{
-                                                    fontSize: theme.fontSize.xs,
-                                                    color: theme.danger,
-                                                    marginTop: 4,
-                                                    overflow: 'hidden',
-                                                    textOverflow: 'ellipsis',
-                                                    whiteSpace: 'nowrap' as const
-                                                }} title={gen.error}>
+                                                <div
+                                                    style={{
+                                                        fontSize: theme.fontSize.xs,
+                                                        color: theme.danger,
+                                                        marginTop: 4,
+                                                        overflow: 'hidden',
+                                                        textOverflow: 'ellipsis',
+                                                        whiteSpace: 'nowrap' as const
+                                                    }}
+                                                    title={gen.error}
+                                                >
                                                     {gen.error}
                                                 </div>
                                             )}
@@ -3655,8 +3703,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 const inFlight = p.activeGenerationIds.length;
                 const isLoading = isSpawning || inFlight > 0;
                 const letter = podLetter(p.podNumber);
-                const isDisabled =
-                    isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
+                const isDisabled = isSpawning || nodes.length === 0 || !p.pod_url || p.status !== 'ready';
                 return (
                     <Btn
                         key={p.id}
@@ -3698,11 +3745,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                 className="sg-primary"
                 onClick={handleGenerate}
                 disabled={nodes.length === 0}
-                title={
-                    nodes.length === 0
-                        ? 'Load a workflow first'
-                        : 'Spawn a new cloud pod and generate'
-                }
+                title={nodes.length === 0 ? 'Load a workflow first' : 'Spawn a new cloud pod and generate'}
             >
                 Generate
             </BtnPrimary>
@@ -3801,14 +3844,23 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
                         }}
                     >
-                        <div style={{ fontSize: theme.fontSize.sm, fontWeight: 600, color: theme.text, marginBottom: 12 }}>
+                        <div
+                            style={{
+                                fontSize: theme.fontSize.sm,
+                                fontWeight: 600,
+                                color: theme.text,
+                                marginBottom: 12
+                            }}
+                        >
                             Rename Workflow
                         </div>
                         <input
                             type="text"
                             value={renameValue}
                             onChange={(e) => setRenameValue(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === 'Enter') submitRename(); }}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') submitRename();
+                            }}
                             autoFocus
                             style={{
                                 width: '100%',
@@ -3858,16 +3910,27 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                             boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
                         }}
                     >
-                        <div style={{ fontSize: theme.fontSize.sm, fontWeight: 600, color: theme.text, marginBottom: 8 }}>
+                        <div
+                            style={{
+                                fontSize: theme.fontSize.sm,
+                                fontWeight: 600,
+                                color: theme.text,
+                                marginBottom: 8
+                            }}
+                        >
                             Delete Workflow
                         </div>
                         <div style={{ fontSize: theme.fontSize.sm, color: theme.textMuted, lineHeight: 1.5 }}>
-                            Delete {store.selectedWorkflow?.name ? `"${store.selectedWorkflow.name}"` : 'this workflow'} permanently?
-                            This cannot be undone.
+                            Delete {store.selectedWorkflow?.name ? `"${store.selectedWorkflow.name}"` : 'this workflow'}{' '}
+                            permanently? This cannot be undone.
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
-                            <Btn onClick={() => setDeleteConfirmOpen(false)} autoFocus>Cancel</Btn>
-                            <BtnDanger className="sg-danger" onClick={confirmDelete}>Delete</BtnDanger>
+                            <Btn onClick={() => setDeleteConfirmOpen(false)} autoFocus>
+                                Cancel
+                            </Btn>
+                            <BtnDanger className="sg-danger" onClick={confirmDelete}>
+                                Delete
+                            </BtnDanger>
                         </div>
                     </div>
                 </div>
@@ -4096,4 +4159,3 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
         </>
     );
 });
-
