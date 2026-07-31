@@ -1033,3 +1033,85 @@ describe('workflowToApiPrompt — nested subgraph whose internals only feed outp
     });
 });
 
+describe('workflowToApiPrompt — LTXVImgToVideoInplaceKJ dynamic-combo widget order', () => {
+    // Regression: the registry used to map the per-image widget slots as
+    // [num_images, index_i, strength_i], but ComfyUI's frontend serializes
+    // them STRENGTH-FIRST: a workflow saved with untouched defaults stores
+    // widgets_values ["1", 1, 0], and the matching API prompt reads
+    // { num_images: "1", "num_images.strength_1": 1, "num_images.index_1": 0 }.
+    // The swapped mapping emitted strength_1=0 — silently disabling the
+    // first-frame image conditioning (the generated video ignored the
+    // reference image entirely).
+    it('maps widgets_values ["1", 1, 0] to strength_1=1, index_1=0 — not the reverse', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'LTXVImgToVideoInplaceKJ',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [
+                        { name: 'vae', type: 'VAE', link: null },
+                        { name: 'latent', type: 'LATENT', link: null },
+                        { name: 'num_images.image_1', type: 'IMAGE', link: null },
+                    ],
+                    outputs: [{ name: 'latent', type: 'LATENT', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: ['1', 1, 0],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'LATENT')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'LTXVImgToVideoInplaceKJ');
+        expect(node).toBeDefined();
+        expect(node!.inputs.num_images).toBe('1');
+        expect(node!.inputs['num_images.strength_1']).toBe(1);
+        expect(node!.inputs['num_images.index_1']).toBe(0);
+    });
+
+    it('keeps per-group strength/index pairing for multi-image selections', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'LTXVImgToVideoInplaceKJ',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [
+                        { name: 'vae', type: 'VAE', link: null },
+                        { name: 'latent', type: 'LATENT', link: null },
+                        { name: 'num_images.image_1', type: 'IMAGE', link: null },
+                        { name: 'num_images.image_2', type: 'IMAGE', link: null },
+                    ],
+                    outputs: [{ name: 'latent', type: 'LATENT', links: [SINK_LINK_ID], slot_index: 0 }],
+                    // num_images=2 → [combo, strength_1, index_1, strength_2, index_2]
+                    widgets_values: ['2', 0.5, 20, 0.8, 40],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'LATENT')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'LTXVImgToVideoInplaceKJ');
+        expect(node).toBeDefined();
+        expect(node!.inputs.num_images).toBe('2');
+        expect(node!.inputs['num_images.strength_1']).toBe(0.5);
+        expect(node!.inputs['num_images.index_1']).toBe(20);
+        expect(node!.inputs['num_images.strength_2']).toBe(0.8);
+        expect(node!.inputs['num_images.index_2']).toBe(40);
+    });
+});
+
