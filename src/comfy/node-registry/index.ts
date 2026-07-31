@@ -128,6 +128,9 @@ import { cloudClientNodes } from './ComfyUI-CloudClient';
 // 10S-Comfy-nodes
 import { tensNodes } from './10S-Comfy-nodes';
 
+// comfyui-krea2edit
+import { krea2editNodes } from './comfyui-krea2edit';
+
 /**
  * The primary node widget registry.
  *
@@ -233,6 +236,7 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     ...ggufNodes,
     ...cloudClientNodes,
     ...tensNodes,
+    ...krea2editNodes,
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
