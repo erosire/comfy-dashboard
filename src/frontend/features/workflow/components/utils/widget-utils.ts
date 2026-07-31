@@ -7,12 +7,44 @@
 import type { DataType, WidgetDef } from '../../../../../comfy';
 import type { UINode } from '../../../../nodes/node-type';
 import { MODE_LABELS } from '../../../../nodes/node-type';
+import { base64ByteSize } from './pod-utils';
 
 /** Format a widget value for display in an editable field. */
 export function displayValue(val: unknown): string {
     if (val === null || val === undefined) return '';
     if (typeof val === 'boolean') return val ? 'true' : 'false';
     return String(val);
+}
+
+/** Base64 `data:` URI breakdown: mime type, raw payload and its decoded size. */
+export type Base64DataUri = {
+    /** MIME type from the URI header (e.g. "image/png"), or '' when absent. */
+    mime: string;
+    /** The base64 payload after the comma. */
+    payload: string;
+    /** Approximate decoded byte size of the payload. */
+    byteSize: number;
+};
+
+/**
+ * Parse a widget value as a base64 `data:` URI (data:<mime>;base64,<payload>).
+ * Returns null for anything else — plain text, URLs, non-base64 data URIs.
+ *
+ * Widgets like UniversalDataToImage's `data_uri` accept pasted images as
+ * multi-megabyte base64 data URIs; the editor recognizes them so it can
+ * render a compact summary instead of the raw payload (a full payload in a
+ * textarea makes the browser's layout/paint crawl).
+ */
+export function parseBase64DataUri(val: unknown): Base64DataUri | null {
+    if (typeof val !== 'string' || !val.startsWith('data:')) return null;
+    const commaIdx = val.indexOf(',');
+    if (commaIdx === -1) return null;
+    const meta = val.substring(0, commaIdx);
+    if (!/;base64/i.test(meta)) return null; // only base64 payloads are heavy
+    const payload = val.substring(commaIdx + 1);
+    if (payload.length === 0) return null;
+    const mime = /^data:([^;,]*)/.exec(meta)?.[1] ?? '';
+    return { mime, payload, byteSize: base64ByteSize(payload) };
 }
 
 /**

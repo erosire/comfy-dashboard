@@ -30,6 +30,7 @@
 import { randomUUID } from 'node:crypto';
 import { asHandlerMethod } from '@underload/service';
 import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
+import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
     appendGenerationLog,
     patchGenerationFile,
@@ -363,6 +364,17 @@ async function consumeNdjsonStream(
             log(`Captured preview image from node ${preview.nodeId} (${preview.mimeType}, ${preview.size} bytes)`);
         }
 
+        // Capture server_client_data file payloads — the ComfyUI-CloudClient
+        // save nodes (ClientImageSaveNode / ClientVideoSaveNode) ship their
+        // PNG/GIF/MP4/WEBM output over the stream as base64 files.
+        for (const file of extractServerClientDataResults(event)) {
+            results.push(file.result);
+            log(
+                `Captured server_client_data file '${file.filename || '(unnamed)'}' ` +
+                    `(${file.result.mimeType}, ${file.result.size} bytes)`
+            );
+        }
+
         if (event.type === 'execution_error' || event.type === 'proxy_error') {
             const data = event.data as Record<string, unknown>;
             failureMessage =
@@ -427,7 +439,8 @@ async function consumeNdjsonStream(
  *
  * Large payloads are reduced to a length placeholder so the log stays
  * readable and small — notably the base64 `image` data URL carried by
- * `imagepreview.update` events, which can be megabytes per line.
+ * `imagepreview.update` events and the base64 file payloads carried by
+ * `server_client_data` events, which can be megabytes per line.
  */
 function summarizeEventData(data: Record<string, unknown>): string {
     const parts: string[] = [];
@@ -435,6 +448,16 @@ function summarizeEventData(data: Record<string, unknown>): string {
         if (key === 'image' && typeof val === 'string') {
             // base64 data URL — never dump the payload, just its size
             parts.push(`${key}=<${val.length} chars>`);
+        } else if (key === 'files' && Array.isArray(val)) {
+            // server_client_data payloads — name + base64 size per file,
+            // never the payload itself.
+            const summaries = val.map((f) => {
+                const file = (f ?? {}) as Record<string, unknown>;
+                const name = typeof file.filename === 'string' && file.filename ? file.filename : '(unnamed)';
+                const size = typeof file.data === 'string' ? ` <${file.data.length} chars>` : '';
+                return `${name}${size}`;
+            });
+            parts.push(`${key}=[${summaries.join(', ')}]`);
         } else if (typeof val === 'string') {
             parts.push(`${key}=${val.length > 80 ? val.slice(0, 80) + '…' : val}`);
         } else if (typeof val === 'number' || typeof val === 'boolean') {

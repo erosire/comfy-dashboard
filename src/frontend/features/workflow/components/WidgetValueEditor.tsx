@@ -17,7 +17,14 @@ import type { WidgetDef } from '../../../../comfy';
 import { comfyNodeRegistry } from '../../../../comfy';
 import type { UINode, UIWidget } from '../../../nodes/node-type';
 import { AutoGrowTextarea } from './AutoGrowTextarea';
-import { clampWidgetNumber, displayValue, widgetControlTitle } from './utils';
+import { Badge } from './ui';
+import {
+    clampWidgetNumber,
+    displayValue,
+    formatByteSize,
+    parseBase64DataUri,
+    widgetControlTitle
+} from './utils';
 
 // WidgetSelect — dropdown for COMBO widgets whose registry definition
 // carries a fixed options list (e.g. ResolutionSelector's aspect ratios, or
@@ -88,6 +95,133 @@ export const WidgetBoolToggle = styled('button', {
     border: `1px solid ${active ? theme.success : theme.border}`,
     transition: `background-color ${theme.transition}, color ${theme.transition}, border-color ${theme.transition}`
 }));
+
+// DataUriPreview — the single-line, ellipsized stand-in for a base64 data:
+// URI value. Styled like the free-text field so the row lines up with the
+// other controls, but read-only and never holding the payload text.
+const DataUriPreview = styled('span')({
+    flex: '1 1 auto',
+    padding: '3px 6px',
+    fontSize: theme.fontSize.xs,
+    fontFamily: theme.fontMono,
+    color: theme.textDim,
+    backgroundColor: theme.surface3,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm,
+    minWidth: 0,
+    boxSizing: 'border-box' as const,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    userSelect: 'none' as const
+});
+
+// DataUriAction — compact ghost button for the base64 row (raw toggle / ✕
+// clear). Mirrors the ModeToggle ghost look used on node headers.
+const DataUriAction = styled('button')({
+    flex: '0 0 auto',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 20,
+    padding: '0 6px',
+    fontSize: theme.fontSize.xs,
+    fontFamily: theme.fontMono,
+    lineHeight: 1,
+    color: theme.textDim,
+    backgroundColor: theme.surface3,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm,
+    cursor: 'pointer',
+    '&:hover': {
+        color: theme.text,
+        borderColor: theme.textFaint
+    }
+});
+
+/**
+ * Compact editor for a widget value that IS a base64 `data:` URI (e.g. an
+ * image pasted into UniversalDataToImage's data_uri field).
+ *
+ * Rendering the raw payload into the editable textarea stalls the browser
+ * (multi-megabyte single-line text → layout/paint crawl) and carries no
+ * usable information, so the default view is a one-line ellipsized header
+ * stating it is base64 (`data:<mime>;base64,` + payload preview), plus a
+ * badge with the mime type and decoded size. "raw" swaps in the full
+ * editable textarea on explicit demand; ✕ clears the value (turning the
+ * field back into the plain free-text editor, ready for a fresh paste).
+ */
+const Base64DataUriValue: React.FC<{
+    text: string;
+    node: UINode;
+    widget: UIWidget;
+    updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+    placeholder?: string;
+    testId?: string;
+}> = ({ text, node, widget, updateNodeWidget, placeholder, testId }) => {
+    const [showRaw, setShowRaw] = React.useState(false);
+    const parsed = parseBase64DataUri(text);
+
+    // Value changed away from a base64 URI (cleared / replaced) — fall back
+    // out of raw mode so the compact view comes back for the next payload.
+    React.useEffect(() => {
+        if (!parsed) setShowRaw(false);
+    }, [parsed]);
+
+    if (!parsed) return null;
+
+    if (showRaw) {
+        return (
+            <>
+                <AutoGrowTextarea
+                    value={text}
+                    onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
+                    readOnly={false}
+                    placeholder={placeholder}
+                    title="Full base64 payload — large values make this field slow to render"
+                    data-testid={testId}
+                />
+                <DataUriAction
+                    type="button"
+                    onClick={() => setShowRaw(false)}
+                    title="Back to the compact base64 summary"
+                    data-testid={testId ? `${testId}-collapse` : undefined}
+                >
+                    ▾
+                </DataUriAction>
+            </>
+        );
+    }
+
+    const summary = `base64 ${parsed.mime || 'data'} · ≈${formatByteSize(parsed.byteSize)}`;
+    return (
+        <>
+            <DataUriPreview
+                title={`${summary} — compact display; "raw" shows the full payload, ✕ clears it`}
+                data-testid={testId ? `${testId}-datauri` : undefined}
+            >
+                {text.length > 64 ? `${text.substring(0, 64)}…` : text}
+            </DataUriPreview>
+            <Badge title="base64-encoded payload (mime · decoded size)">{summary}</Badge>
+            <DataUriAction
+                type="button"
+                onClick={() => setShowRaw(true)}
+                title="Show the full base64 payload (may be slow for large payloads)"
+                data-testid={testId ? `${testId}-raw` : undefined}
+            >
+                raw
+            </DataUriAction>
+            <DataUriAction
+                type="button"
+                onClick={() => updateNodeWidget(node.id, widget.index, '')}
+                title="Clear the base64 payload"
+                data-testid={testId ? `${testId}-clear` : undefined}
+            >
+                ✕
+            </DataUriAction>
+        </>
+    );
+};
 
 /** Number (and slider) editor for INT/FLOAT widgets. */
 export const NumberWidgetEditor: React.FC<{
@@ -244,9 +378,28 @@ export const WidgetValueEditor: React.FC<{
 
     // STRING, IMAGEUPLOAD, dynamic COMBO (empty options) and anything
     // without a registry definition → free-text field (multi-line capable).
+    const text = displayValue(widget.value);
+
+    // A base64 data: URI (pasted image/video payloads) gets a compact
+    // summary instead of the raw payload in the textarea — multi-megabyte
+    // single-line values stall the browser's layout and carry no usable
+    // information at a glance.
+    if (parseBase64DataUri(text)) {
+        return (
+            <Base64DataUriValue
+                text={text}
+                node={node}
+                widget={widget}
+                updateNodeWidget={updateNodeWidget}
+                placeholder={def?.placeholder}
+                testId={testId}
+            />
+        );
+    }
+
     return (
         <AutoGrowTextarea
-            value={displayValue(widget.value)}
+            value={text}
             onChange={(e) => updateNodeWidget(node.id, widget.index, e.target.value)}
             readOnly={false}
             placeholder={def?.placeholder}

@@ -12,6 +12,7 @@ import React from 'react';
 import type { GenerationEntry, GenerationResultItem, GenerationSummary } from '../../../../api';
 import { cloud, cloudPrompt, cloudReadNdjson } from '../../../../api';
 import { base64ByteSize } from './pod-utils';
+import { extractServerClientDataResults } from './stream-results';
 import { workflowToApiPrompt } from './workflow-prompt';
 
 export type UseSpawnAgentParams = {
@@ -153,6 +154,19 @@ export function useSpawnAgent({
                                     });
                                 }
                             }
+                        }
+
+                        // Capture server_client_data file payloads — the
+                        // ComfyUI-CloudClient save nodes (ClientImageSaveNode /
+                        // ClientVideoSaveNode) ship their PNG/GIF/MP4/WEBM output
+                        // over the stream as base64 files.
+                        for (const file of extractServerClientDataResults(event)) {
+                            console.log(
+                                `[Agent] File '${file.filename || '(unnamed)'}':`,
+                                `MIME: ${file.result.mimeType}`,
+                                `Size: ${file.result.size} bytes`
+                            );
+                            collectedResults.push(file.result);
                         }
 
                         // Terminal events — stop reading this stream

@@ -298,3 +298,100 @@ describe('WidgetValueEditor — STRING & fallbacks', () => {
         expect(update).toHaveBeenCalledWith('7', 0, 'new');
     });
 });
+
+// ── base64 data: URI values ─────────────────────────────────────────────────
+//
+// A pasted image lands in a STRING widget as a multi-megabyte base64 data:
+// URI — rendering the raw payload in the textarea stalls the browser, so the
+// editor shows a compact read-only summary instead, with an on-demand raw
+// view and a clear action (clear → empty field → fresh paste works again).
+
+describe('WidgetValueEditor — base64 data: URI values', () => {
+    // 'QUJD' decodes to 'ABC' → 3 bytes.
+    const dataUri = 'data:image/png;base64,QUJD';
+    // 4000-char payload → exactly 3000 bytes → "2.9 KB".
+    const bigUri = `data:video/mp4;base64,${'AAAA'.repeat(1000)}`;
+
+    it('renders a compact summary instead of the raw payload', () => {
+        const { node, widget } = makeNode('UniversalDataToImage', bigUri, 0);
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={() => {}} />);
+
+        // No editable textarea holding megabytes of base64.
+        expect(container.querySelector<HTMLTextAreaElement>('textarea')).toBeNull();
+        // The compact summary states it is base64, with mime + decoded size.
+        expect(container.textContent).toContain('base64');
+        expect(container.textContent).toContain('video/mp4');
+        expect(container.textContent).toContain('≈2.9 KB');
+    });
+
+    it('keeps the full payload out of the DOM (no megabyte text nodes)', () => {
+        const { node, widget } = makeNode('UniversalDataToImage', bigUri, 0);
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={() => {}} />);
+
+        expect(container.textContent!.length).toBeLessThan(200);
+        expect(container.textContent).not.toContain(bigUri);
+        expect(container.textContent).toContain('data:video/mp4;base64,AAAA');
+    });
+
+    it('clear (✕) commits an empty value', () => {
+        const update = vi.fn();
+        const { node, widget } = makeNode('UniversalDataToImage', dataUri, 0);
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} />);
+
+        const clear = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+            (b) => b.textContent === '✕'
+        )!;
+        expect(clear).toBeDefined();
+        act(() => clear.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(update).toHaveBeenCalledWith('7', 0, '');
+    });
+
+    it('"raw" reveals the full payload in the editable field; "▾" collapses back', () => {
+        const spy = vi.fn();
+        render(<Harness classType="UniversalDataToImage" widgetIndex={0} initial={dataUri} spy={spy} />);
+
+        // Compact first: no textarea.
+        expect(container.querySelector<HTMLTextAreaElement>('textarea')).toBeNull();
+
+        const rawBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+            (b) => b.textContent === 'raw'
+        )!;
+        act(() => rawBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+        const textarea = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        expect(textarea).not.toBeNull();
+        expect(textarea.value).toBe(dataUri);
+
+        // Edits in raw mode still commit through the same channel.
+        act(() => fireValueChange(textarea, HTMLTextAreaElement, 'plain text now'));
+        expect(spy).toHaveBeenCalledWith('7', 0, 'plain text now');
+
+        // After committing a non-base64 value the editor is back to plain
+        // free-text (harness re-renders with the stored value).
+        expect(container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe('plain text now');
+    });
+
+    it('a cleared value returns to the plain free-text field (paste-ready)', () => {
+        const spy = vi.fn();
+        render(<Harness classType="UniversalDataToImage" widgetIndex={0} initial={dataUri} spy={spy} />);
+
+        const clear = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+            (b) => b.textContent === '✕'
+        )!;
+        act(() => clear.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(spy).toHaveBeenCalledWith('7', 0, '');
+
+        // Harness re-rendered with '' → plain free-text textarea again.
+        const textarea = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        expect(textarea).not.toBeNull();
+        expect(textarea.value).toBe('');
+    });
+
+    it('does not trigger the compact view for non-base64 data URIs or URLs', () => {
+        const plain = makeNode('UniversalDataToImage', 'data:image/svg+xml,<svg/>', 0);
+        render(<WidgetValueEditor node={plain.node} widget={plain.widget} updateNodeWidget={() => {}} />);
+        expect(container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe(
+            'data:image/svg+xml,<svg/>'
+        );
+    });
+});

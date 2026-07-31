@@ -6,6 +6,18 @@ export function base64ByteSize(b64: string): number {
     return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
 }
 
+/** Human-readable byte size (e.g. "512 B", "1.2 KB", "3.4 MB"). */
+export function formatByteSize(bytes: number): string {
+    if (!Number.isFinite(bytes) || bytes < 0) return '?';
+    if (bytes < 1024) return `${Math.round(bytes)} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb >= 100 ? Math.round(kb) : kb.toFixed(1)} KB`;
+    const mb = kb / 1024;
+    if (mb < 1024) return `${mb >= 100 ? Math.round(mb) : mb.toFixed(1)} MB`;
+    const gb = mb / 1024;
+    return `${gb >= 100 ? Math.round(gb) : gb.toFixed(1)} GB`;
+}
+
 /**
  * Spreadsheet-style pod letter for the pod button: 1 → A, 2 → B, …
  * 26 → Z, 27 → AA. Derived from the monotonic podNumber.
