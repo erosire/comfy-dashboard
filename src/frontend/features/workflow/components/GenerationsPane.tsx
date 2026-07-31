@@ -7,8 +7,9 @@
 //           grip, divider, id+time, divider, delete.
 //   THUMBS — a masonry grid (4 columns, 2 on mobile) with one card per
 //           generation: the first result item's media streams straight
-//           from the server (no base64 payloads through React), with a
-//           caption row underneath (colored id + time + ✕).
+//           from the server (no base64 payloads through React), with an
+//           overlay bar on top of the image (colored label on the left,
+//           ✕ delete at the top-right corner).
 //
 // Shared conventions:
 //   - The id text carries the status purely by color (green = completed
@@ -146,6 +147,8 @@ const ThumbGrid = styled('div', {
 }));
 
 const ThumbCard = styled('div')({
+    // relative — the overlay label/delete bar is positioned over the media.
+    position: 'relative',
     breakInside: 'avoid',
     marginBottom: 8,
     borderRadius: theme.radiusMd,
@@ -165,18 +168,33 @@ const ThumbMedia = styled('div')({
     fontSize: theme.fontSize.xs
 });
 
-const ThumbCaption = styled('div')({
+// ThumbOverlay — the card's top bar, laid over the media itself: label on
+// the left, ✕ delete at the top-right corner. The dark top-down gradient
+// keeps the text and button readable over any image while fading out
+// before it covers much of the media. It's part of the card, so clicks on
+// the bar bubble up to the card's open-viewer handler (the ✕ button
+// stops propagation).
+const ThumbOverlay = styled('div')({
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 6,
-    padding: '4px 6px 4px 8px'
+    padding: '4px 6px 4px 8px',
+    boxSizing: 'border-box' as const,
+    background: 'linear-gradient(to bottom, rgba(0, 0, 0, 0.65), rgba(0, 0, 0, 0))'
 });
 
 const ThumbName = styled('span')({
     fontSize: theme.fontSize.xs,
     fontWeight: 600,
     color: theme.text,
+    // Overlays the media — a slight shadow keeps the label readable where
+    // the overlay gradient has already faded out.
+    textShadow: '0 1px 2px rgba(0, 0, 0, 0.8)',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap' as const,
@@ -247,7 +265,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                         {gen.status === 'processing' || gen.status === 'pending' ? 'running…' : 'no output'}
                                     </ThumbMedia>
                                 )}
-                                <ThumbCaption>
+                                <ThumbOverlay>
                                     <ThumbName title={tooltip} style={{ color: statusColor }}>
                                         {gen.id}
                                         {gen.generatedTime && (
@@ -265,7 +283,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                     >
                                         ✕
                                     </GenDeleteBtn>
-                                </ThumbCaption>
+                                </ThumbOverlay>
                             </ThumbCard>
                         );
                     })}

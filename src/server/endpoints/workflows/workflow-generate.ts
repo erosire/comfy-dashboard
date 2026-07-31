@@ -15,6 +15,11 @@
 //   provided (the UI sends the API prompt built from its live edited node
 //   tree), falling back to the stored workflow.json otherwise.
 //
+//   The request's optional { name } body names the generation — it becomes
+//   the generation id (the json/log file's base name) after sanitization.
+//   When omitted, the timestamp (YYYYMMDD-HHMMSS) is used, as before. The
+//   UI defaults to "<workflow name>_<local timestamp>".
+//
 // GET (list) — Lists all generation files for the workflow as lightweight
 //   GenerationSummary entries (id, status, timestamps, resultCount,
 //   resultItems). The heavy prompt / result payloads are omitted so the
@@ -52,6 +57,23 @@ function timestampFile(date: Date): string {
         pad(date.getMinutes()) +
         pad(date.getSeconds())
     );
+}
+
+/**
+ * Make a caller-provided generation name safe as a file/id base: strips
+ * characters that are invalid on Windows/POSIX filesystems, collapses
+ * whitespace runs to a single underscore, and caps the length. Returns ''
+ * when nothing usable survives — the caller then falls back to the
+ * timestamped default id.
+ */
+function sanitizeGenerationName(name: string): string {
+    return name
+        .trim()
+        .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-') // filesystem-forbidden + control chars
+        .replace(/\s+/g, '_') // whitespace runs → single underscore
+        .replace(/^\.+/, '') // no leading dots (hidden on POSIX)
+        .replace(/\.+$/, '') // no trailing dots (invalid on Windows)
+        .slice(0, 150);
 }
 
 /** GET — List all generations for a workflow as lightweight summaries. */
@@ -137,11 +159,15 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         // Tolerated when the request supplies its own prompt below
     }
 
-    // Optional request body: { prompt } — snapshot THIS instead of the
-    // stored workflow.json. The UI builds the prompt from its live editor
-    // tree (including any widget edits), so the generation captures what
-    // the user actually sees. Omitting it keeps the original behavior.
-    const body = (parameters.body ?? {}) as { prompt?: Record<string, unknown> };
+    // Optional request body:
+    //   { prompt } — snapshot THIS instead of the stored workflow.json.
+    //     The UI builds the prompt from its live editor tree (including
+    //     any widget edits), so the generation captures what the user
+    //     actually sees. Omitting it keeps the original behavior.
+    //   { name } — names the generation: the sanitized name becomes the
+    //     generation id (the json/log files' base name). When omitted, or
+    //     nothing filename-safe survives, the timestamp stays the default.
+    const body = (parameters.body ?? {}) as { prompt?: Record<string, unknown>; name?: string };
     const promptData =
         body.prompt && typeof body.prompt === 'object' && !Array.isArray(body.prompt)
             ? body.prompt
@@ -151,10 +177,11 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         return { status: 500, response: { error: 'Failed to read workflow.json' } };
     }
 
-    // Generate timestamped ID
+    // Generate the ID — caller-provided name when given, timestamp otherwise.
     const now = new Date();
     const nowIso = now.toISOString();
-    const genId = timestampFile(now);
+    const requestedName = typeof body.name === 'string' ? sanitizeGenerationName(body.name) : '';
+    const genId = requestedName || timestampFile(now);
 
     // Ensure the generation subfolder exists
     const generationDir = path.join(workflowDir, 'generation');

@@ -222,15 +222,17 @@ paths:
       summary: Generate a workflow snapshot
       description: >-
         Creates a generation snapshot and stores it in a "generation"
-        subfolder inside the workflow's directory as a timestamped JSON
-        file with metadata (status, createdDate, etc.). The event
-        progression of the subsequent run lives in the sibling .log file,
-        not in the json.
+        subfolder inside the workflow's directory as a JSON file with
+        metadata (status, createdDate, etc.). The event progression of the
+        subsequent run lives in the sibling .log file, not in the json.
         The snapshotted `prompt` is the optional request body's prompt
         when provided — the UI sends the API prompt built from its live
         (possibly edited) node tree, so the generation captures exactly
         the values visible at click time. Without a body, the workflow's
         stored workflow.json is snapshotted instead.
+        The generation's id (the file base name) comes from the optional
+        request body `name`, sanitized to a safe file name; when omitted,
+        a timestamped default (YYYYMMDD-HHMMSS) is used.
       tags:
         - Workflows
       parameters:
@@ -254,10 +256,20 @@ paths:
                     workflow.json — typically the flat API prompt
                     ({"<nodeId>": {"class_type": ..., "inputs": {...}}})
                     built from the caller's current edited state.
+                name:
+                  type: string
+                  description: >-
+                    Optional. Name for the new generation — used as its id
+                    (the generation json/log file base name) after
+                    sanitizing filename-unsafe characters. When omitted,
+                    the timestamped default (YYYYMMDD-HHMMSS) is used.
+                    The dashboard UI defaults to "<workflow name>_<local
+                    timestamp>". Collisions get a -01, -02, ... suffix.
             examples:
               editor_snapshot:
                 summary: Snapshot the caller's edited prompt
                 value:
+                  name: SDXL Poster_20260731-143022
                   prompt:
                     "3":
                       class_type: KSampler

@@ -299,19 +299,27 @@ export async function fetchStatus(baseUrl: string): Promise<ServerStatus> {
 // workflow.json — the UI passes the API prompt built from its current
 // (possibly edited) node tree, so the generation captures exactly the
 // values visible at click time.
+// When `name` is provided it names the generation (the server uses it as
+// the generation id after sanitizing it to a safe file base name); when
+// omitted, the server falls back to its timestamped default.
 export async function generateWorkflow(
     baseUrl: string,
     workflowId: string,
-    prompt?: Record<string, unknown>
+    prompt?: Record<string, unknown>,
+    name?: string
 ): Promise<{ generation: GenerationEntry }> {
     const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate`;
+    // Only attach a JSON body when at least one optional field is provided.
+    const payload: { prompt?: Record<string, unknown>; name?: string } = {};
+    if (prompt) payload.prompt = prompt;
+    if (name) payload.name = name;
     const response = await fetch(
         url,
-        prompt
+        Object.keys(payload).length > 0
             ? {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ prompt })
+                  body: JSON.stringify(payload)
               }
             : { method: 'POST' }
     );

@@ -76,6 +76,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             baseUrl,
             nodes: editor.nodes,
             editingWorkflowId,
+            workflowName: store.selectedWorkflow?.name ?? null,
             generations: store.generations,
             generateWorkflow
         });

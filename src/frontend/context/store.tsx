@@ -109,7 +109,7 @@ type DashboardStoreContextValue = {
     refreshStatus: () => Promise<void>;
     refreshGenerations: (workflowId: string) => Promise<void>;
     fetchGeneration: (workflowId: string, generateId: string) => Promise<GenerationEntry>;
-    generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>) => Promise<GenerationEntry>;
+    generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>, name?: string) => Promise<GenerationEntry>;
     updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>) => Promise<void>;
     deleteGeneration: (workflowId: string, generateId: string) => Promise<void>;
 };
@@ -289,8 +289,8 @@ export const DashboardStoreProvider: React.FC<{
     );
 
     const generateWorkflow = useCallback(
-        async (workflowId: string, prompt?: Record<string, unknown>) => {
-            const { generation } = await generateWorkflowApi(`${store.config.baseUrl}`, workflowId, prompt);
+        async (workflowId: string, prompt?: Record<string, unknown>, name?: string) => {
+            const { generation } = await generateWorkflowApi(`${store.config.baseUrl}`, workflowId, prompt, name);
             // Refresh generations after creating one
             try {
                 const { generations } = await fetchGenerationsApi(`${store.config.baseUrl}`, workflowId);

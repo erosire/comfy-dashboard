@@ -19,18 +19,38 @@ import { MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
 import { podLetter } from './pod-utils';
 import { editorTreeToApiPrompt } from './workflow-prompt';
 
+/**
+ * Local-timestamp suffix for default generation names: YYYYMMDD-HHMMSS
+ * (browser-local time — the same shape the server uses for its own
+ * timestamped ids).
+ */
+function localTimestampFile(date: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+        date.getFullYear().toString() +
+        pad(date.getMonth() + 1) +
+        pad(date.getDate()) +
+        '-' +
+        pad(date.getHours()) +
+        pad(date.getMinutes()) +
+        pad(date.getSeconds())
+    );
+}
+
 export type UsePodsParams = {
     baseUrl: string;
     /** The live editor tree — the prompt is built from it on every run. */
     nodes: UINode[];
     /** Id of the workflow being edited (store.selectedId). */
     editingWorkflowId: string | null;
+    /** Name of the workflow being edited — names new generations by default. */
+    workflowName: string | null;
     /** Polled generations (store.generations) — settles pod run state. */
     generations: GenerationSummary[];
-    generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>) => Promise<GenerationEntry>;
+    generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>, name?: string) => Promise<GenerationEntry>;
 };
 
-export function usePods({ baseUrl, nodes, editingWorkflowId, generations, generateWorkflow }: UsePodsParams) {
+export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, generations, generateWorkflow }: UsePodsParams) {
     const [pods, setPods] = React.useState<PodEntry[]>([]);
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
@@ -98,9 +118,13 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, generations, genera
             if (nodes.length === 0 || !editingWorkflowId) return;
 
             // Step 1+2 — build the prompt from the live editor tree and
-            // snapshot it into a generation json.
+            // snapshot it into a generation json. The generation is named
+            // after the workflow + current local timestamp by default (the
+            // server falls back to its own timestamp id when no name is
+            // passed).
             const apiPrompt = editorTreeToApiPrompt(nodes);
-            const generation = await generateWorkflow(editingWorkflowId, apiPrompt);
+            const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
+            const generation = await generateWorkflow(editingWorkflowId, apiPrompt, generationName);
             console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
 
             try {
@@ -149,7 +173,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, generations, genera
                 throw err;
             }
         },
-        [baseUrl, nodes, editingWorkflowId, generateWorkflow]
+        [baseUrl, nodes, editingWorkflowId, workflowName, generateWorkflow]
     );
 
     // ── Generate workflow ──────────────────────────────────────────
