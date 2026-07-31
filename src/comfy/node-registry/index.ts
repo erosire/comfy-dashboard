@@ -100,6 +100,7 @@ import { LoraLoaderModelOnly } from './LoraLoaderModelOnly';
 import { ComfySwitchNode } from './ComfySwitchNode';
 import { PreviewAny } from './PreviewAny';
 import { TextGenerate } from './TextGenerate';
+import { ResolutionSelector } from './ResolutionSelector';
 
 // ── Custom node pack imports ────────────────────────────────────────────────
 
@@ -221,6 +222,7 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     ComfySwitchNode,
     PreviewAny,
     TextGenerate,
+    ResolutionSelector,
 
     // ── Third-party / Custom node packs ─────────────────────────────────────
 
