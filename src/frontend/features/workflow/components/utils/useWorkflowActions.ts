@@ -1,4 +1,5 @@
-// Workflow action flows — Clone, Rename, Delete (with confirmation).
+// Workflow action flows — Clone, Rename, Delete, and per-generation Delete
+// (all destructive ones with confirmation).
 //
 // Delete is destructive, so the button only opens a confirmation dialog —
 // an accidental click can never wipe a workflow. Custom modals are used
@@ -22,6 +23,8 @@ export type UseWorkflowActionsParams = {
         loaded; the clone then falls back to the stored json. */
     getCurrentRaw: () => Record<string, unknown> | null;
     deleteWorkflow: (id: string) => Promise<void>;
+    /** Deletes a generation snapshot of the workflow being edited. */
+    deleteGeneration: (workflowId: string, generateId: string) => Promise<void>;
     updateWorkflow: (
         id: string,
         body: { name?: string; description?: string; raw?: Record<string, unknown>; tags?: string[] }
@@ -37,6 +40,7 @@ export function useWorkflowActions({
     cloneWorkflow,
     getCurrentRaw,
     deleteWorkflow,
+    deleteGeneration,
     updateWorkflow,
     selectWorkflow,
     resetEditor
@@ -44,6 +48,9 @@ export function useWorkflowActions({
     const [renameOpen, setRenameOpen] = React.useState(false);
     const [renameValue, setRenameValue] = React.useState('');
     const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
+    // Id of the generation awaiting delete confirmation (OUTPUT tab) —
+    // null when no per-generation delete dialog is open.
+    const [deleteGenerationTarget, setDeleteGenerationTarget] = React.useState<string | null>(null);
 
     // ── Clone workflow ───────────────────────────────────────────────
     // The clone is built from the current page state (unsaved edits
@@ -84,6 +91,27 @@ export function useWorkflowActions({
 
     const cancelDelete = React.useCallback(() => setDeleteConfirmOpen(false), []);
 
+    // ── Delete generation ────────────────────────────────────────────
+    // The ✕ on an OUTPUT-tab generation asks first (confirmation dialog);
+    // only confirm calls the server. A still-processing generation stops
+    // being recorded but keeps running on its pod — see the API docs.
+
+    const handleDeleteGeneration = React.useCallback((generateId: string) => {
+        setDeleteGenerationTarget(generateId);
+    }, []);
+
+    const confirmDeleteGeneration = React.useCallback(async () => {
+        if (!editingWorkflowId || !deleteGenerationTarget) return;
+        setDeleteGenerationTarget(null);
+        try {
+            await deleteGeneration(editingWorkflowId, deleteGenerationTarget);
+        } catch (err: any) {
+            alert(`Failed to delete generation: ${err.message ?? String(err)}`);
+        }
+    }, [editingWorkflowId, deleteGenerationTarget, deleteGeneration]);
+
+    const cancelDeleteGeneration = React.useCallback(() => setDeleteGenerationTarget(null), []);
+
     // ── Rename workflow ────────────────────────────────────────────
 
     const openRename = React.useCallback(() => {
@@ -117,6 +145,10 @@ export function useWorkflowActions({
         deleteConfirmOpen,
         handleDelete,
         confirmDelete,
-        cancelDelete
+        cancelDelete,
+        deleteGenerationTarget,
+        handleDeleteGeneration,
+        confirmDeleteGeneration,
+        cancelDeleteGeneration
     };
 }

@@ -1,6 +1,29 @@
 // GenerationsPane — the OUTPUT tab: the workflow's generations list.
 // Clicking an item with results opens the full-screen result viewer.
 //
+// Two presentation modes (toggled from the footer while on this tab):
+//
+//   LIST  — one SINGLE row per generation: [ ||| | id (time) | ✕ ] — menu
+//           grip, divider, id+time, divider, delete.
+//   THUMBS — a masonry grid (4 columns, 2 on mobile) with one card per
+//           generation: the first result item's media streams straight
+//           from the server (no base64 payloads through React), with a
+//           caption row underneath (colored id + time + ✕).
+//
+// Shared conventions:
+//   - The id text carries the status purely by color (green = completed
+//     with output, red = failed OR completed but produced no items,
+//     grey = pending/processing), with the generation time in brackets
+//     next to the id when known.
+//   - The ||| grip on the left of a LIST row is a PLACEHOLDER for a
+//     per-generation actions menu: clickable (sg-hover affordance) but
+//     performs no action for now.
+//   - The ✕ delete button asks for confirmation (handled by the caller).
+// No relative timestamps, no status badges, no result counts (almost
+// every generation is 1 item) — detail lives in tooltips instead (a
+// failed run's error message, or an output-less "completion", shows on
+// hover).
+//
 // The editor area scrolls, so no height cap is needed here.
 //
 // Extracted verbatim from the original CloudTab.tsx OUTPUT tab body.
@@ -9,25 +32,74 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
-import { formatRelativeTime } from './utils';
-import { EmptyHint, SpinnerEl } from './ui';
+import type { OutputViewMode } from './utils';
+import { EmptyHint } from './ui';
 
+// ── List view ─────────────────────────────────────────────────────────
+
+// Taller row — the extra vertical padding gives the ||| grip and the ✕
+// room to breathe, and alignItems: center keeps all three segments
+// vertically centered.
 const QueueItemEl = styled('div')({
     display: 'flex',
-    flexDirection: 'column',
-    padding: '8px 10px',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    padding: '10px 10px',
+    minHeight: 38,
+    boxSizing: 'border-box' as const,
     borderRadius: theme.radiusMd,
     border: `1px solid ${theme.border}`,
     marginBottom: 4,
     backgroundColor: theme.surface2
 });
 
-const QueueItemHeader = styled('div')({
-    display: 'flex',
-    flexDirection: 'row',
+// GenMenuGrip — the ||| menu button at the left of a generation row.
+// PLACEHOLDER: the per-generation actions menu will hang off this button
+// later; for now it is clickable but performs no action. It carries the
+// shared sg-hover hook so it reads as interactive. The three bars are
+// CSS-drawn so they stay crisp at any UI scale — no font glyph to
+// misalign.
+const GenMenuGrip = styled('button')({
+    display: 'inline-flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4
+    justifyContent: 'center',
+    width: 20,
+    height: 20,
+    padding: 0,
+    border: `1px solid transparent`,
+    borderRadius: theme.radiusSm,
+    backgroundColor: 'transparent',
+    color: theme.textFaint,
+    cursor: 'pointer',
+    flex: '0 0 auto',
+    transition: `background-color ${theme.transition}, border-color ${theme.transition}`
+});
+
+const GenMenuBars = styled('span')({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 2,
+    // Fixed inner height so the bars sit centered mid-row regardless of
+    // the surrounding line-height.
+    height: 14
+});
+
+const GenMenuBar = styled('span')({
+    width: 3,
+    height: '100%',
+    borderRadius: 1,
+    backgroundColor: 'currentColor'
+});
+
+// GenDivider — thin vertical divider separating the row's segments
+// (grip | id | ✕). alignSelf: stretch fills the row's full content height.
+const GenDivider = styled('span')({
+    width: 1,
+    alignSelf: 'stretch',
+    backgroundColor: theme.border,
+    flex: '0 0 auto'
 });
 
 const QueueItemName = styled('div')({
@@ -41,117 +113,243 @@ const QueueItemName = styled('div')({
     minWidth: 0
 });
 
-const QueueItemMeta = styled('div')({
-    fontSize: theme.fontSize.xs,
-    color: theme.textFaint,
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6
-});
-
-const QueueStatusBadge = styled('span')({
+// GenDeleteBtn — compact ✕ at the far right of a generation's row.
+// Ghost styling (faint, borderless) until hovered, when the global
+// .sg-danger class paints it like every other destructive control.
+const GenDeleteBtn = styled('button')({
     display: 'inline-flex',
     alignItems: 'center',
-    fontSize: theme.fontSize.xs,
-    padding: '1px 6px',
+    justifyContent: 'center',
+    width: 20,
+    height: 20,
+    padding: 0,
+    border: `1px solid transparent`,
     borderRadius: theme.radiusSm,
-    fontWeight: 600,
-    flex: '0 0 auto'
+    backgroundColor: 'transparent',
+    color: theme.textFaint,
+    cursor: 'pointer',
+    fontSize: theme.fontSize.sm,
+    lineHeight: 1,
+    flex: '0 0 auto',
+    transition: `background-color ${theme.transition}, color ${theme.transition}, border-color ${theme.transition}`
 });
+
+// ── Thumbnail (masonry) view ──────────────────────────────────────────
+
+// ThumbGrid — CSS-column masonry: items keep their natural aspect ratio
+// and pack top-to-bottom, left-to-right across `cols` columns.
+const ThumbGrid = styled('div', {
+    shouldForwardProp: (prop) => prop !== 'cols'
+})<{ cols: number }>(({ cols }) => ({
+    columnCount: cols,
+    columnGap: 8
+}));
+
+const ThumbCard = styled('div')({
+    breakInside: 'avoid',
+    marginBottom: 8,
+    borderRadius: theme.radiusMd,
+    border: `1px solid ${theme.border}`,
+    backgroundColor: theme.surface2,
+    overflow: 'hidden',
+    transition: `border-color ${theme.transition}`
+});
+
+const ThumbMedia = styled('div')({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 72,
+    backgroundColor: theme.surface3,
+    color: theme.textFaint,
+    fontSize: theme.fontSize.xs
+});
+
+const ThumbCaption = styled('div')({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 6,
+    padding: '4px 6px 4px 8px'
+});
+
+const ThumbName = styled('span')({
+    fontSize: theme.fontSize.xs,
+    fontWeight: 600,
+    color: theme.text,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap' as const,
+    flex: '1 1 auto',
+    minWidth: 0
+});
+
+const MEDIA_STYLE: React.CSSProperties = { display: 'block', width: '100%' };
 
 export type GenerationsPaneProps = {
     generations: GenerationSummary[];
     /** Opens the result viewer positioned at the generation's first result. */
     onOpenViewer: (generationId: string) => void;
+    /** Asks to delete a generation (the caller confirms first — destructive). */
+    onDeleteGeneration: (generationId: string) => void;
+    /** Presentation mode — compact list rows or the thumbnail grid. */
+    view: OutputViewMode;
+    /** Narrow screens drop the masonry grid to 2 columns. */
+    isMobile: boolean;
+    /** Builds the streaming URL for a result item's raw bytes. */
+    getResultMediaUrl: (generationId: string, resultIndex: number) => string;
 };
 
-export const GenerationsPane: React.FC<GenerationsPaneProps> = ({ generations, onOpenViewer }) => (
-    <div data-testid="results-tab-pane">
-        {generations.length === 0 && <EmptyHint>No generations yet.</EmptyHint>}
-        {generations.map((gen) => {
-            const hasResults = (gen.resultItems?.length ?? 0) > 0;
-            const genStatusColor =
-                gen.status === 'completed'
-                    ? theme.success
-                    : gen.status === 'failed'
-                      ? theme.danger
-                      : gen.status === 'processing'
-                        ? theme.accent
-                        : theme.textDim;
-            const genStatusBg =
-                gen.status === 'completed'
-                    ? theme.successSoft
-                    : gen.status === 'failed'
-                      ? theme.dangerSoft
-                      : gen.status === 'processing'
-                        ? theme.accentSoft
-                        : theme.surface2;
-            return (
-                <QueueItemEl
-                    key={gen.id}
-                    data-testid={`gen-item-${gen.id}`}
-                    style={
-                        hasResults
-                            ? {
-                                  cursor: 'pointer',
-                                  transition: `border-color ${theme.transition}`
-                              }
-                            : undefined
-                    }
-                    onClick={hasResults ? () => onOpenViewer(gen.id) : undefined}
-                >
-                    <QueueItemHeader>
-                        <QueueItemName title={gen.id}>{gen.id}</QueueItemName>
-                        {hasResults && (
-                            <span
-                                style={{
-                                    fontSize: theme.fontSize.xs,
-                                    color: theme.accent,
-                                    flexShrink: 0,
-                                    marginLeft: 4
-                                }}
+export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
+    generations,
+    onOpenViewer,
+    onDeleteGeneration,
+    view,
+    isMobile,
+    getResultMediaUrl
+}) => {
+    if (generations.length === 0) {
+        return (
+            <div data-testid="results-tab-pane">
+                <EmptyHint>No generations yet.</EmptyHint>
+            </div>
+        );
+    }
+
+    if (view === 'thumbs') {
+        return (
+            <div data-testid="results-tab-pane">
+                <ThumbGrid cols={isMobile ? 2 : 4} data-testid="results-thumb-grid">
+                    {generations.map((gen) => {
+                        const first = gen.resultItems?.[0];
+                        const hasResults = !!first;
+                        const noOutput = gen.status === 'completed' && !hasResults;
+                        const failed = gen.status === 'failed' || noOutput;
+                        const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
+                        const tooltip = gen.error ?? (noOutput ? 'Completed with no output — treated as failed' : gen.id);
+                        return (
+                            <ThumbCard
+                                key={gen.id}
+                                data-testid={`gen-thumb-${gen.id}`}
+                                style={hasResults ? { cursor: 'pointer' } : undefined}
+                                onClick={hasResults ? () => onOpenViewer(gen.id) : undefined}
                             >
-                                {gen.resultCount} item{gen.resultCount !== 1 ? 's' : ''}
-                            </span>
-                        )}
-                    </QueueItemHeader>
-                    <QueueItemMeta>
-                        <QueueStatusBadge
-                            style={{
-                                color: genStatusColor,
-                                backgroundColor: genStatusBg
+                                {first ? (
+                                    first.type === 'video' ? (
+                                        // First frame as the poster — preload
+                                        // metadata only, never autoplay.
+                                        <video src={getResultMediaUrl(gen.id, 0)} muted playsInline preload="metadata" style={MEDIA_STYLE} />
+                                    ) : (
+                                        <img src={getResultMediaUrl(gen.id, 0)} alt={gen.id} loading="lazy" style={MEDIA_STYLE} />
+                                    )
+                                ) : (
+                                    <ThumbMedia>
+                                        {gen.status === 'processing' || gen.status === 'pending' ? 'running…' : 'no output'}
+                                    </ThumbMedia>
+                                )}
+                                <ThumbCaption>
+                                    <ThumbName title={tooltip} style={{ color: statusColor }}>
+                                        {gen.id}
+                                        {gen.generatedTime && (
+                                            <span style={{ color: theme.textFaint, fontWeight: 400 }}> ({gen.generatedTime})</span>
+                                        )}
+                                    </ThumbName>
+                                    <GenDeleteBtn
+                                        className="sg-danger"
+                                        title="Delete this generation"
+                                        data-testid={`gen-delete-${gen.id}`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onDeleteGeneration(gen.id);
+                                        }}
+                                    >
+                                        ✕
+                                    </GenDeleteBtn>
+                                </ThumbCaption>
+                            </ThumbCard>
+                        );
+                    })}
+                </ThumbGrid>
+            </div>
+        );
+    }
+
+    return (
+        <div data-testid="results-tab-pane">
+            {generations.map((gen) => {
+                const hasResults = (gen.resultItems?.length ?? 0) > 0;
+                // A run the server marks completed but that produced NO output
+                // items (image/video) is de facto failed — the pod finished
+                // cleanly yet the graph emitted nothing (bypassed node, bad
+                // output config, ...). Show it red, with the reason in the
+                // tooltip since there's no status text anymore.
+                const noOutput = gen.status === 'completed' && !hasResults;
+                const failed = gen.status === 'failed' || noOutput;
+                // Status by color alone: green = completed (with output),
+                // red = failed or output-less "completion", grey =
+                // pending/processing.
+                const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
+                const tooltip = gen.error ?? (noOutput ? 'Completed with no output — treated as failed' : gen.id);
+                return (
+                    <QueueItemEl
+                        key={gen.id}
+                        data-testid={`gen-item-${gen.id}`}
+                        style={
+                            hasResults
+                                ? {
+                                      cursor: 'pointer',
+                                      transition: `border-color ${theme.transition}`
+                                  }
+                                : undefined
+                        }
+                        onClick={hasResults ? () => onOpenViewer(gen.id) : undefined}
+                    >
+                        {/* Menu grip — placeholder for the per-generation
+                            actions menu (added later): clickable, but performs
+                            no action yet. The stopPropagation keeps its click
+                            from falling through to the row's open-viewer
+                            handler. */}
+                        <GenMenuGrip
+                            type="button"
+                            className="sg-hover"
+                            aria-label={`Generation ${gen.id} menu`}
+                            title="Menu (coming soon)"
+                            data-testid={`gen-menu-${gen.id}`}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <GenMenuBars aria-hidden>
+                                <GenMenuBar />
+                                <GenMenuBar />
+                                <GenMenuBar />
+                            </GenMenuBars>
+                        </GenMenuGrip>
+                        <GenDivider />
+                        <QueueItemName title={tooltip} style={{ color: statusColor }}>
+                            {gen.id}
+                            {gen.generatedTime && (
+                                <span style={{ color: theme.textFaint, fontWeight: 400 }}>
+                                    {' '}
+                                    ({gen.generatedTime})
+                                </span>
+                            )}
+                        </QueueItemName>
+                        <GenDivider />
+                        {/* Delete — stopPropagation so the click doesn't fall
+                            through to the row's open-viewer handler. */}
+                        <GenDeleteBtn
+                            className="sg-danger"
+                            title="Delete this generation"
+                            data-testid={`gen-delete-${gen.id}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onDeleteGeneration(gen.id);
                             }}
                         >
-                            {gen.status === 'processing' && <SpinnerEl />}
-                            {gen.status}
-                        </QueueStatusBadge>
-                        {gen.generatedTime && (
-                            <span style={{ color: theme.accent, fontWeight: 500 }}>
-                                {gen.generatedTime}
-                            </span>
-                        )}
-                        <span title={gen.createdDate}>
-                            {formatRelativeTime(gen.createdDate)}
-                        </span>
-                    </QueueItemMeta>
-                    {gen.error && (
-                        <div
-                            style={{
-                                fontSize: theme.fontSize.xs,
-                                color: theme.danger,
-                                marginTop: 4,
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap' as const
-                            }}
-                            title={gen.error}
-                        >
-                            {gen.error}
-                        </div>
-                    )}
-                </QueueItemEl>
-            );
-        })}
-    </div>
-);
+                            ✕
+                        </GenDeleteBtn>
+                    </QueueItemEl>
+                );
+            })}
+        </div>
+    );
+};

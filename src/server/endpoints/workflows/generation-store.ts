@@ -192,6 +192,29 @@ export function writeGenerationFile(
 }
 
 /**
+ * Delete a generation's files — the json record and, best-effort, the
+ * sibling .log trail. Returns false when the json doesn't exist (the
+ * caller's 404 case).
+ *
+ * Deleting a still-processing generation is safe on the json side:
+ * patchGenerationFile no-ops once the file is gone, so the cloud prompt
+ * endpoint's background consumer can't resurrect the record. A consumer
+ * mid-run may still append a fresh orphan .log afterwards — harmless, and
+ * unavoidable without an execution-cancel mechanism.
+ */
+export function deleteGenerationFiles(root: string, workflowId: string, generateId: string): boolean {
+    const jsonPath = generationFilePath(root, workflowId, generateId);
+    if (!fs.existsSync(jsonPath)) return false;
+    fs.rmSync(jsonPath, { force: true });
+    try {
+        fs.rmSync(generationLogPath(root, workflowId, generateId), { force: true });
+    } catch {
+        // Best-effort — a broken log removal never fails the delete.
+    }
+    return true;
+}
+
+/**
  * Merge a partial patch into an existing generation file.
  * Only provided fields are overwritten. Returns the updated entry,
  * or null when the file is missing/unreadable.

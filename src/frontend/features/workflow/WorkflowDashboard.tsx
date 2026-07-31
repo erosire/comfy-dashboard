@@ -13,10 +13,12 @@
 
 import React from 'react';
 import type { WorkflowMeta } from '../../api';
+import { generationResultUrl } from '../../api';
 import { ComfyDashboard } from '../../components';
 import { useDashboardStore } from '../../context';
 import {
     DashboardHeaderControls,
+    DeleteGenerationDialog,
     DeleteWorkflowDialog,
     FooterActions,
     RenameWorkflowDialog,
@@ -30,7 +32,8 @@ import {
     useResultViewer,
     useSpawnAgent,
     useWorkflowActions,
-    useWorkflowEditor
+    useWorkflowEditor,
+    type OutputViewMode
 } from './components';
 
 export type WorkflowDashboardProps = {
@@ -50,7 +53,8 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             refreshGenerations,
             fetchGeneration,
             generateWorkflow,
-            updateGeneration
+            updateGeneration,
+            deleteGeneration
         } = useDashboardStore();
 
         // ── Editor state (node tree, raw json, prompt fields, tabs) ──
@@ -95,7 +99,19 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             baseUrl: store.config.baseUrl
         });
 
-        // ── Workflow actions (clone / rename / delete) ────────────────
+        // ── OUTPUT tab view mode (list vs thumbnail masonry grid) ──────
+
+        const [outputView, setOutputView] = React.useState<OutputViewMode>('list');
+
+        // Streams a result item's raw bytes — the thumbnail grid points
+        // its <img>/<video> straight at the generation result endpoint.
+        const getResultMediaUrl = React.useCallback(
+            (generationId: string, resultIndex: number) =>
+                generationResultUrl(store.config.baseUrl, editingWorkflowId ?? '', generationId, resultIndex),
+            [store.config.baseUrl, editingWorkflowId]
+        );
+
+        // ── Workflow actions (clone / rename / delete / generation delete) ──
 
         const actions = useWorkflowActions({
             editingWorkflowId,
@@ -105,6 +121,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             // PROMPT field selection included.
             getCurrentRaw: editor.serializeCurrentRaw,
             deleteWorkflow,
+            deleteGeneration,
             updateWorkflow,
             selectWorkflow,
             resetEditor: editor.resetEditor
@@ -195,6 +212,9 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             onClone={actions.handleClone}
                             generations={store.generations}
                             onOpenViewer={viewer.openViewer}
+                            onDeleteGeneration={actions.handleDeleteGeneration}
+                            outputView={outputView}
+                            getResultMediaUrl={getResultMediaUrl}
                             saving={editor.saving}
                             onSave={editor.handleSave}
                             onDelete={actions.handleDelete}
@@ -206,6 +226,9 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             nodeCount={editor.nodes.length}
                             onPodGenerate={handlePodGenerate}
                             onGenerate={handleGenerate}
+                            contentTab={editor.contentTab}
+                            outputView={outputView}
+                            onOutputViewChange={setOutputView}
                         />
                     }
                 />
@@ -226,6 +249,15 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                         workflowName={store.selectedWorkflow?.name}
                         onConfirm={actions.confirmDelete}
                         onCancel={actions.cancelDelete}
+                    />
+                )}
+
+                {/* Per-generation delete confirmation (OUTPUT tab ✕ buttons) */}
+                {actions.deleteGenerationTarget && (
+                    <DeleteGenerationDialog
+                        generationId={actions.deleteGenerationTarget}
+                        onConfirm={actions.confirmDeleteGeneration}
+                        onCancel={actions.cancelDeleteGeneration}
                     />
                 )}
 

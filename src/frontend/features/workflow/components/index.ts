@@ -19,5 +19,6 @@ export * from './DashboardHeaderControls';
 export * from './FooterActions';
 export * from './RenameWorkflowDialog';
 export * from './DeleteWorkflowDialog';
+export * from './DeleteGenerationDialog';
 export * from './ResultViewer';
 export * from './utils';

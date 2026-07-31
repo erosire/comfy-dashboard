@@ -22,11 +22,17 @@
 //
 // GET (one)  — Returns the complete GenerationEntry (prompt + result) for a
 //   single generate_id. Used when the agent needs the snapshotted prompt.
+//
+// DELETE     — Removes a generation snapshot: the json record and its
+//   sibling .log event trail. Deleting a still-processing generation does
+//   not cancel its pod run — the background stream consumer simply no-ops
+//   on the missing file.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 import {
+    deleteGenerationFiles,
     patchGenerationFile,
     readGenerationFile,
     toGenerationSummary,
@@ -216,4 +222,24 @@ export const workflowGenerateUpdate = asHandlerMethod(async (_, parameters, vari
             generation: existing
         }
     };
+});
+
+/** DELETE — Remove a generation snapshot (json + sibling .log trail). */
+export const workflowGenerateDelete = asHandlerMethod(async (_, parameters, variables) => {
+    const projectRoot = variables.root;
+    const workflowId = parameters.path.id;
+    const generateId = parameters.path.generate_id;
+
+    if (!workflowId) {
+        return { status: 400, response: { error: 'id is required' } };
+    }
+    if (!generateId) {
+        return { status: 400, response: { error: 'generate_id is required' } };
+    }
+
+    if (!deleteGenerationFiles(projectRoot, workflowId, generateId)) {
+        return { status: 404, response: { error: `Generation '${generateId}' not found` } };
+    }
+
+    return { status: 200, response: { success: true, id: generateId } };
 });

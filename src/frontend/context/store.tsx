@@ -14,6 +14,7 @@ import {
     fetchGenerations as fetchGenerationsApi,
     fetchGeneration as fetchGenerationApi,
     updateGeneration as updateGenerationApi,
+    deleteGeneration as deleteGenerationApi,
     fetchQueue,
     fetchStatus
 } from '../api';
@@ -110,6 +111,7 @@ type DashboardStoreContextValue = {
     fetchGeneration: (workflowId: string, generateId: string) => Promise<GenerationEntry>;
     generateWorkflow: (workflowId: string, prompt?: Record<string, unknown>) => Promise<GenerationEntry>;
     updateGeneration: (workflowId: string, generateId: string, body: Partial<Pick<GenerationEntry, 'status' | 'result' | 'generatedTime' | 'completedDate' | 'error'>>) => Promise<void>;
+    deleteGeneration: (workflowId: string, generateId: string) => Promise<void>;
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
@@ -334,6 +336,21 @@ export const DashboardStoreProvider: React.FC<{
         }
     }, [store.config.baseUrl, setStore]);
 
+    // Delete a generation — drop it from the local list right away, then
+    // confirm with a refresh (the delete also removes the .log trail on
+    // the server; a still-processing run is NOT cancelled, it just stops
+    // updating the gone file).
+    const deleteGeneration = useCallback(async (workflowId: string, generateId: string) => {
+        await deleteGenerationApi(`${store.config.baseUrl}`, workflowId, generateId);
+        setStore((prev) => ({ ...prev, generations: prev.generations.filter((g) => g.id !== generateId) }));
+        try {
+            const { generations } = await fetchGenerationsApi(`${store.config.baseUrl}`, workflowId);
+            setStore((prev) => ({ ...prev, generations }));
+        } catch {
+            // Non-fatal — the local list already dropped the entry.
+        }
+    }, [store.config.baseUrl, setStore]);
+
     return (
         <DashboardStoreContext.Provider value={{
             store,
@@ -350,7 +367,8 @@ export const DashboardStoreProvider: React.FC<{
             refreshGenerations,
             fetchGeneration,
             generateWorkflow,
-            updateGeneration
+            updateGeneration,
+            deleteGeneration
         }}>
             {children}
         </DashboardStoreContext.Provider>

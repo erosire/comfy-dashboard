@@ -16,7 +16,7 @@ info:
     generations may be queued on the same pod
     concurrently; each submission is scoped by its own client_id so only
     its job's events land in its generation json.
-  version: 0.6.0
+  version: 0.7.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -362,6 +362,42 @@ paths:
             application/json:
                 schema:
                   $ref: '#/components/schemas/GenerateWorkflowResponse'
+        '404':
+          description: Generation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      operationId: deleteGeneration
+      summary: Delete a generation snapshot
+      description: >-
+        Permanently removes a generation snapshot: the json record and its
+        sibling .log event trail. Note that deleting a still-pending or
+        processing generation does NOT cancel its execution on the pod —
+        the server's background stream consumer simply stops updating the
+        (now missing) file. Result bytes are stored INSIDE the generation
+        json (or at remote URLs), so no extra media files need cleanup.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: generate_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Generation deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteGenerationResponse'
         '404':
           description: Generation not found
           content:
@@ -848,6 +884,15 @@ components:
           type: boolean
         id:
           type: string
+
+    DeleteGenerationResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        id:
+          type: string
+          description: Id of the deleted generation.
 
     UpdateWorkflowRequest:
       type: object

@@ -12,7 +12,7 @@ import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
 import type { UINode } from '../../../nodes/node-type';
-import type { EditorContentTab, PromptWidgetRef } from './utils';
+import type { EditorContentTab, OutputViewMode, PromptWidgetRef } from './utils';
 import { NodeList } from './ui';
 import { DropReplaceInset, EditorDropZone } from './EditorDropZone';
 import { ContentTabStrip } from './ContentTabStrip';
@@ -50,6 +50,12 @@ export type WorkflowEditorContentProps = {
     onClone: () => void;
     generations: GenerationSummary[];
     onOpenViewer: (generationId: string) => void;
+    /** Asks to delete a generation (confirmation dialog opened by the caller). */
+    onDeleteGeneration: (generationId: string) => void;
+    /** OUTPUT-tab presentation mode (list rows vs thumbnail grid). */
+    outputView: OutputViewMode;
+    /** Builds the streaming URL for a result item's raw bytes (thumbnails). */
+    getResultMediaUrl: (generationId: string, resultIndex: number) => string;
     saving: boolean;
     onSave: () => void;
     onDelete: () => void;
@@ -76,6 +82,9 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
     onClone,
     generations,
     onOpenViewer,
+    onDeleteGeneration,
+    outputView,
+    getResultMediaUrl,
     saving,
     onSave,
     onDelete
@@ -146,9 +155,19 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
 
                     {/* OUTPUT tab — the workflow's generations (moved out
                         of the sidebar). The editor area scrolls, so no
-                        height cap is needed here. */}
+                        height cap is needed here. List rows or the
+                        thumbnail grid depend on the footer's view toggle;
+                        each entry carries a delete button that asks for
+                        confirmation before removing the snapshot. */}
                     {contentTab === 'results' && (
-                        <GenerationsPane generations={generations} onOpenViewer={onOpenViewer} />
+                        <GenerationsPane
+                            generations={generations}
+                            onOpenViewer={onOpenViewer}
+                            onDeleteGeneration={onDeleteGeneration}
+                            view={outputView}
+                            isMobile={isMobile}
+                            getResultMediaUrl={getResultMediaUrl}
+                        />
                     )}
                 </NodeList>
 

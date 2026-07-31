@@ -1,6 +1,6 @@
 // API client for the ComfyUI dashboard endpoints.
 //
-// Routes (see src/server/endpoints/comfy-dashboard.yml):
+// Routes (see src/server/endpoints/comfy-dashboard.yaml):
 //
 // Workflow collection:
 //   GET    /v1/comfy/workflows       → { workflows: WorkflowMeta[] }
@@ -16,6 +16,7 @@
 //   POST   /v1/comfy/workflows/:id/generate                → { generation: GenerationEntry }
 //   GET    /v1/comfy/workflows/:id/generate/:generate_id   → { generation: GenerationEntry }
 //   PUT    /v1/comfy/workflows/:id/generate/:generate_id   → { generation: GenerationEntry }
+//   DELETE /v1/comfy/workflows/:id/generate/:generate_id   → { success: boolean, id: string }
 //
 // Generation result media (streamable binary — <img src> / <video src> ready):
 //   GET    /v1/comfy/workflows/:id/generate/:generate_id/result/:index → raw bytes (image/*, video/*)
@@ -403,6 +404,27 @@ export async function updateGeneration(
         throw new Error(message);
     }
     return (await response.json()) as { generation: GenerationEntry };
+}
+
+// Delete a generation snapshot (json + its sibling .log event trail).
+// Deleting a still-processing generation does not cancel its pod run —
+// the server's background stream consumer simply stops updating the file.
+export async function deleteGeneration(
+    baseUrl: string,
+    workflowId: string,
+    generateId: string
+): Promise<{ success: boolean; id: string }> {
+    const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}`;
+    const response = await fetch(url, { method: 'DELETE' });
+    if (!response.ok) {
+        let message = `Failed to delete generation (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    return (await response.json()) as { success: boolean; id: string };
 }
 
 // Poll a URL at intervals until a stop condition is met.

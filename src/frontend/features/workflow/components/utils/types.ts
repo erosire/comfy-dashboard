@@ -67,3 +67,10 @@ export type PromptWidgetRef = { key: string; node: UINode; widget: UIWidget };
  * workflow's generations.
  */
 export type EditorContentTab = 'json' | 'prompt' | 'results';
+
+/**
+ * OUTPUT-tab presentation mode — compact list rows ('list') or a masonry
+ * grid of result thumbnails ('thumbs'). The toggle lives in the footer,
+ * which swaps its Generate/pod controls for it on the results tab.
+ */
+export type OutputViewMode = 'list' | 'thumbs';
