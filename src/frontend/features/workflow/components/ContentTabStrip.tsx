@@ -1,31 +1,25 @@
 // ContentTabStrip — the PROMPT / JSON / OUTPUT tab switcher for the editor
-// content area, with Copy / Clone buttons on the right.
+// content area. The Copy and Clone buttons live in the workflow action bar
+// at the bottom (Copy on the JSON tab only), immediately left of Save.
 //
 // Extracted verbatim from the original CloudTab.tsx content fragment.
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { Btn, TabBtn } from './ui';
+import { TabBtn } from './ui';
 import type { EditorContentTab } from './utils';
 
 export type ContentTabStripProps = {
     activeTab: EditorContentTab;
     /** Number of fields promoted to the PROMPT tab (0 disables that tab). */
     promptFieldsCount: number;
-    /** Whether the Clone button is shown (editing a saved workflow). */
-    canClone: boolean;
     onSelectTab: (tab: EditorContentTab) => void;
-    onCopy: () => void;
-    onClone: () => void;
 };
 
 export const ContentTabStrip: React.FC<ContentTabStripProps> = ({
     activeTab,
     promptFieldsCount,
-    canClone,
-    onSelectTab,
-    onCopy,
-    onClone
+    onSelectTab
 }) => (
     <div
         style={{
@@ -92,24 +86,6 @@ export const ContentTabStrip: React.FC<ContentTabStripProps> = ({
             >
                 OUTPUT
             </TabBtn>
-        </div>
-        <div style={{ display: 'flex', gap: 6, flexShrink: 0, paddingBottom: 4 }}>
-            <Btn
-                className="sg-hover"
-                onClick={onCopy}
-                style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
-            >
-                Copy
-            </Btn>
-            {canClone && (
-                <Btn
-                    className="sg-hover"
-                    onClick={onClone}
-                    style={{ padding: '3px 10px', fontSize: theme.fontSize.xs }}
-                >
-                    Clone
-                </Btn>
-            )}
         </div>
     </div>
 );

@@ -15,7 +15,12 @@ export type UseWorkflowActionsParams = {
     editingWorkflowId: string | null;
     /** The loaded workflow (store.selectedWorkflow) — rename seeds its name. */
     selectedWorkflow: Workflow | null;
-    cloneWorkflow: (id: string) => Promise<WorkflowMeta>;
+    cloneWorkflow: (id: string, rawOverride?: Record<string, unknown>) => Promise<WorkflowMeta>;
+    /** Snapshots the editor's current page state (widget edits + PROMPT
+        field selection, saved or not) — the clone is built from it, so
+        Clone mirrors exactly what's on screen. Returns null with nothing
+        loaded; the clone then falls back to the stored json. */
+    getCurrentRaw: () => Record<string, unknown> | null;
     deleteWorkflow: (id: string) => Promise<void>;
     updateWorkflow: (
         id: string,
@@ -30,6 +35,7 @@ export function useWorkflowActions({
     editingWorkflowId,
     selectedWorkflow,
     cloneWorkflow,
+    getCurrentRaw,
     deleteWorkflow,
     updateWorkflow,
     selectWorkflow,
@@ -40,17 +46,20 @@ export function useWorkflowActions({
     const [deleteConfirmOpen, setDeleteConfirmOpen] = React.useState(false);
 
     // ── Clone workflow ───────────────────────────────────────────────
+    // The clone is built from the current page state (unsaved edits
+    // included), NOT from the stored json — cloning keeps every change
+    // made on this page even if it was never saved.
 
     const handleClone = React.useCallback(async () => {
         if (!editingWorkflowId) return;
         try {
-            const cloned = await cloneWorkflow(editingWorkflowId);
+            const cloned = await cloneWorkflow(editingWorkflowId, getCurrentRaw() ?? undefined);
             // Select the clone
             selectWorkflow(cloned.id);
         } catch (err: any) {
             alert(`Failed to clone: ${err.message ?? String(err)}`);
         }
-    }, [editingWorkflowId, cloneWorkflow, selectWorkflow]);
+    }, [editingWorkflowId, cloneWorkflow, getCurrentRaw, selectWorkflow]);
 
     // ── Delete workflow ──────────────────────────────────────────────
 

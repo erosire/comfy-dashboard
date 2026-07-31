@@ -113,15 +113,12 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
 
                     {/* Content tabs — PROMPT shows the selected prompt fields,
                         JSON shows the workflow layout, OUTPUT lists the
-                        workflow's generations. Copy/Clone sit on the right
-                        of the tab strip. */}
+                        workflow's generations. Copy/Clone live in the
+                        action bar below, left of Save. */}
                     <ContentTabStrip
                         activeTab={contentTab}
                         promptFieldsCount={promptFields.size}
-                        canClone={isEditingSaved}
                         onSelectTab={onSelectTab}
-                        onCopy={onCopyJson}
-                        onClone={onClone}
                     />
 
                     {/* JSON tab — the workflow node layout */}
@@ -156,12 +153,21 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
                 </NodeList>
 
                 {/* Workflow action bar — sits at the bottom of the node
-                    list, below the JSON/PROMPT tabs. Delete on the left,
-                    Save on the right. Hidden on the OUTPUT tab, where
-                    neither action applies. The pod run controls (#N)
-                    live in the footer, immediately left of Generate. */}
+                    list, below the JSON/PROMPT tabs. Delete on the left
+                    (JSON tab only — the PROMPT tab omits it); Copy (JSON
+                    tab only — it copies the workflow json for pasting
+                    into ComfyUI), Clone, then Save on the right. Hidden
+                    on the OUTPUT tab, where none of the actions apply.
+                    The pod run controls (#N) live in the footer,
+                    immediately left of Generate. */}
                 {isEditingSaved && contentTab !== 'results' && (
-                    <WorkflowActionBar saving={saving} onSave={onSave} onDelete={onDelete} />
+                    <WorkflowActionBar
+                        saving={saving}
+                        onSave={onSave}
+                        onDelete={contentTab === 'json' ? onDelete : undefined}
+                        onCopy={contentTab === 'json' ? onCopyJson : undefined}
+                        onClone={onClone}
+                    />
                 )}
             </EditorArea>
         )}

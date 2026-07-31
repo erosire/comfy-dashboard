@@ -100,7 +100,7 @@ type DashboardStoreContextValue = {
     createWorkflow: (body: { name: string; description?: string; raw: Record<string, unknown> }) => Promise<WorkflowMeta>;
     updateWorkflow: (id: string, body: { name?: string; description?: string; raw?: Record<string, unknown>; tags?: string[] }) => Promise<Workflow>;
     deleteWorkflow: (id: string) => Promise<void>;
-    cloneWorkflow: (id: string) => Promise<WorkflowMeta>;
+    cloneWorkflow: (id: string, rawOverride?: Record<string, unknown>) => Promise<WorkflowMeta>;
     selectWorkflow: (id: string | null) => Promise<void>;
     searchWorkflows: (query: string) => Promise<void>;
     refreshWorkflows: () => Promise<void>;
@@ -236,13 +236,16 @@ export const DashboardStoreProvider: React.FC<{
     );
 
     const cloneWorkflow = useCallback(
-        async (id: string) => {
-            // Fetch the full workflow, then create a new one with "(Copy)" suffix
+        async (id: string, rawOverride?: Record<string, unknown>) => {
+            // Fetch the source workflow for its name/description. The
+            // cloned raw comes from rawOverride when given — the editor
+            // passes its current page state (unsaved edits included) so the
+            // clone mirrors what's on screen; otherwise the stored json.
             const { workflow: full } = await fetchWorkflow(`${store.config.baseUrl}/workflows`, id);
             const { workflow: cloned } = await createWorkflowApi(`${store.config.baseUrl}/workflows`, {
                 name: `${full.name} (Copy)`,
                 description: full.description,
-                raw: full.raw
+                raw: rawOverride ?? full.raw
             });
             setStore((prev) => ({
                 ...prev,

@@ -216,18 +216,27 @@ export function useWorkflowEditor({
         }
     }, [rawJson]);
 
+    // ── Serialize the current page state ──────────────────────────────
+    // Widget edits AND the PROMPT field selection packed into a workflow
+    // json (widget values into widgets_values, the field selection into
+    // extra.promptFields). The tree — not rawJson — holds the user's
+    // edits, so this captures exactly what's on the page right now,
+    // including unsaved changes. Both Save and Clone build from it.
+
+    const serializeCurrentRaw = React.useCallback((): Record<string, unknown> | null => {
+        if (!rawJson) return null;
+        return writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields);
+    }, [rawJson, nodes, promptFields]);
+
     // ── Save workflow edits ────────────────────────────────────────────
     // Persist the editor tree's widget edits back into the stored workflow
     // json (the tree — not rawJson — holds the user's edits).
 
     const handleSave = React.useCallback(async () => {
-        if (!editingWorkflowId || !rawJson || saving) return;
+        const updatedRaw = serializeCurrentRaw();
+        if (!editingWorkflowId || !updatedRaw || saving) return;
         setSaving(true);
         try {
-            // Widget edits AND the PROMPT field selection both persist into
-            // the stored json (widget values into widgets_values, the field
-            // selection into extra.promptFields).
-            const updatedRaw = writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields);
             await updateWorkflow(editingWorkflowId, { raw: updatedRaw });
             // Keep the local copy in sync so a subsequent Save builds from it.
             setRawJson(updatedRaw);
@@ -236,7 +245,7 @@ export function useWorkflowEditor({
         } finally {
             setSaving(false);
         }
-    }, [editingWorkflowId, rawJson, nodes, promptFields, saving, updateWorkflow]);
+    }, [editingWorkflowId, serializeCurrentRaw, saving, updateWorkflow]);
 
     // ── Reset (after Delete) ─────────────────────────────────────────
     // Pods are independent Beam cloud instances — deleting a workflow must
@@ -268,6 +277,7 @@ export function useWorkflowEditor({
         handleDragOver,
         handleDragLeave,
         handleCopyJson,
+        serializeCurrentRaw,
         handleSave,
         resetEditor
     };

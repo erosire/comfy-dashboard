@@ -101,6 +101,9 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             editingWorkflowId,
             selectedWorkflow: store.selectedWorkflow,
             cloneWorkflow,
+            // Clone snapshots the page as-is — unsaved widget edits and
+            // PROMPT field selection included.
+            getCurrentRaw: editor.serializeCurrentRaw,
             deleteWorkflow,
             updateWorkflow,
             selectWorkflow,
