@@ -593,3 +593,207 @@ describe('workflowToApiPrompt — DynamicCombo sub-widget names are prefixed', (
         expect(textGen!.inputs['use_default_template']).toBe(true);
     });
 });
+
+describe('workflowToApiPrompt — disabled/bypassed nodes are excluded', () => {
+    it('excludes a bypassed (mode 4) node from the prompt entirely', () => {
+        // The API prompt has no mode concept — anything in it is executed
+        // by the server. A bypassed node must therefore never be emitted
+        // (mirrors ComfyUI's own frontend).
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'PrimitiveBoolean',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'BOOLEAN', type: 'BOOLEAN', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [false],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'BOOLEAN')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        expect(Object.values(prompt).find((n) => n.class_type === 'PrimitiveBoolean')).toBeUndefined();
+        // The sink survives, and its link to the excluded node is dropped
+        // rather than left dangling.
+        const sink = Object.values(prompt).find((n) => n.class_type === 'PreviewImage');
+        expect(sink).toBeDefined();
+        expect(sink!.inputs.images).toBeUndefined();
+    });
+
+    it('excludes a disabled (mode 2) node from the prompt entirely', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'PrimitiveBoolean',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 2, // NEVER / muted
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'BOOLEAN', type: 'BOOLEAN', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [true],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'BOOLEAN')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        expect(Object.values(prompt).find((n) => n.class_type === 'PrimitiveBoolean')).toBeUndefined();
+        const sink = Object.values(prompt).find((n) => n.class_type === 'PreviewImage');
+        expect(sink).toBeDefined();
+        expect(sink!.inputs.images).toBeUndefined();
+    });
+
+    it('excludes the bypassed optional-image node from the krea2-style workflow', () => {
+        // Regression test for the reported failure: a bypassed
+        // UniversalDataToImage whose data_uri widget is empty was submitted
+        // to the pod and crashed on `Image.open(b"")`. The node (and the
+        // links pointing at it) must simply not be in the prompt.
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'UniversalDataToImage',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 4, // bypassed optional second reference
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [11], slot_index: 0 }],
+                    widgets_values: [''],
+                },
+                {
+                    id: 2,
+                    type: 'VAEEncode',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 0,
+                    properties: {},
+                    inputs: [
+                        { name: 'pixels', type: 'IMAGE', link: 11 },
+                        { name: 'vae', type: 'VAE', link: null },
+                    ],
+                    outputs: [{ name: 'LATENT', type: 'LATENT', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [
+                { id: 11, origin_id: 1, origin_slot: 0, target_id: 2, target_slot: 0, type: 'IMAGE' },
+                makeSinkLink(2, 0, 'LATENT'),
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        expect(Object.values(prompt).find((n) => n.class_type === 'UniversalDataToImage')).toBeUndefined();
+        const vaeEncode = Object.values(prompt).find((n) => n.class_type === 'VAEEncode');
+        expect(vaeEncode).toBeDefined();
+        // No dangling [nodeId, slot] reference to the excluded node.
+        expect(vaeEncode!.inputs.pixels).toBeUndefined();
+    });
+
+    it('falls back to the widget value when a converted-widget link source is bypassed', () => {
+        // KSampler's seed widget is converted to an input and connected to a
+        // BYPASSED Seed node. ComfyUI severs the link and uses the widget
+        // value — so must we (the link ref is dropped, the widget emission
+        // from the first pass survives).
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'Seed (rgthree)',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'SEED', type: 'INT', links: [10], slot_index: 0 }],
+                    widgets_values: [12345, 'fixed'],
+                },
+                {
+                    id: 2,
+                    type: 'KSampler',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 0,
+                    properties: {},
+                    inputs: [
+                        { name: 'model', type: 'MODEL', link: null },
+                        { name: 'positive', type: 'CONDITIONING', link: null },
+                        { name: 'negative', type: 'CONDITIONING', link: null },
+                        { name: 'latent_image', type: 'LATENT', link: 30 },
+                        { name: 'seed', type: 'INT', widget: { name: 'seed' }, link: 10 },
+                    ],
+                    outputs: [{ name: 'LATENT', type: 'LATENT', links: [20], slot_index: 0 }],
+                    widgets_values: [99999, 'randomize', 8, 1, 'euler', 'normal', 1],
+                },
+                {
+                    id: 3,
+                    type: 'EmptyLatentImage',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 2,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'LATENT', type: 'LATENT', links: [30], slot_index: 0 }],
+                    widgets_values: [512, 512, 1],
+                },
+                {
+                    id: 4,
+                    type: 'PreviewImage',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 3,
+                    mode: 0,
+                    properties: {},
+                    inputs: [{ name: 'images', type: 'IMAGE', link: 20 }],
+                    outputs: [],
+                },
+            ],
+            [
+                { id: 10, origin_id: 1, origin_slot: 0, target_id: 2, target_slot: 4, type: 'INT' },
+                { id: 30, origin_id: 3, origin_slot: 0, target_id: 2, target_slot: 3, type: 'LATENT' },
+                { id: 20, origin_id: 2, origin_slot: 0, target_id: 4, target_slot: 0, type: 'LATENT' },
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        expect(Object.values(prompt).find((n) => n.class_type === 'Seed (rgthree)')).toBeUndefined();
+        const ksampler = Object.values(prompt).find((n) => n.class_type === 'KSampler');
+        expect(ksampler).toBeDefined();
+        // seed must be the widget value — NOT a [nodeId, slot] link to the
+        // excluded bypassed node.
+        const seedInput = ksampler!.inputs.seed;
+        expect(Array.isArray(seedInput)).toBe(false);
+        expect(seedInput).toBe(99999);
+        // Unrelated active links are untouched.
+        expect(ksampler!.inputs.latent_image).toEqual([expect.any(String), 0]);
+    });
+});

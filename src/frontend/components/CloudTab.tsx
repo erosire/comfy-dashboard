@@ -33,7 +33,7 @@ import type {
 } from '../../comfy';
 import { comfyNodeRegistry, getWidgetLabel, isApiLinkRef } from '../../comfy';
 import type { UIInputConnection, UINode, UIOutputSlot, UIWidget } from '../nodes/node-type';
-import { MODE_LABELS, MODE_STYLES } from '../nodes/node-type';
+import { MODE_LABELS } from '../nodes/node-type';
 
 type PodEntry = {
     id: string;
@@ -498,6 +498,29 @@ const NodeClassType = styled('span')({
     color: theme.accent
 });
 
+// Mode toggle — click to switch a node between active and bypassed. Every
+// node header shows one: the control is always visible so the affordance is
+// discoverable without a right-click menu (matching ComfyUI's Bypass).
+const ModeToggle = styled('button', {
+    shouldForwardProp: (prop) => prop !== 'bypassed'
+})<{ bypassed: boolean }>(({ bypassed }) => ({
+    fontSize: theme.fontSize.xs,
+    fontStyle: 'italic' as const,
+    fontFamily: 'inherit',
+    lineHeight: 1.3,
+    color: bypassed ? '#fbbf24' : theme.textFaint,
+    backgroundColor: bypassed ? '#fbbf2422' : 'transparent',
+    border: `1px solid ${bypassed ? '#fbbf2466' : theme.border}`,
+    borderRadius: theme.radiusSm,
+    padding: '0 5px',
+    cursor: 'pointer',
+    opacity: bypassed ? 1 : 0.55,
+    '&:hover': {
+        opacity: 1,
+        borderColor: bypassed ? '#fbbf24' : theme.textFaint
+    }
+}));
+
 const NodeInputs = styled('div')({
     padding: '8px 10px',
     display: 'flex',
@@ -645,13 +668,28 @@ const LinkBadge = styled('span')({
 
 // ── SubgraphNodeCard — renders a UINode with the same card as regular nodes ─
 
+/** Label for the header mode toggle: "Active" for the normal case, else the mode name. */
+function modeToggleLabel(mode: number): string {
+    if (mode === 4) return 'Bypassed';
+    if (mode === 0) return 'Active';
+    return MODE_LABELS[mode] ?? `mode ${mode}`;
+}
+
+/** Tooltip for the header mode toggle — what clicking it will do. */
+function modeToggleTitle(mode: number): string {
+    return mode === 4
+        ? 'Bypassed — excluded from the prompt. Click to activate.'
+        : 'Active — included in the prompt. Click to bypass (excluded from execution).';
+}
+
 const SubgraphNodeCard: React.FC<{
     node: UINode;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+    toggleNodeBypass: (nodeId: string) => void;
     executingNodeId?: string | null;
     promptFields: Set<string>;
     togglePromptField: (node: UINode, widgetIdx: number) => void;
-}> = React.memo(({ node, updateNodeWidget, executingNodeId, promptFields, togglePromptField }) => {
+}> = React.memo(({ node, updateNodeWidget, toggleNodeBypass, executingNodeId, promptFields, togglePromptField }) => {
     const isSubgraph = !!node.subgraphDef;
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
@@ -714,18 +752,14 @@ const SubgraphNodeCard: React.FC<{
                             not registered
                         </span>
                     )}
-                    {node.mode !== 0 && (
-                        <span
-                            style={{
-                                fontSize: theme.fontSize.xs,
-                                color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
-                                opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
-                                fontStyle: 'italic'
-                            }}
-                        >
-                            [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
-                        </span>
-                    )}
+                    <ModeToggle
+                        type="button"
+                        bypassed={node.mode === 4}
+                        onClick={() => toggleNodeBypass(node.id)}
+                        title={modeToggleTitle(node.mode)}
+                    >
+                        [{modeToggleLabel(node.mode)}]
+                    </ModeToggle>
                 </div>
                 <NodeId>#{node.id}</NodeId>
             </NodeHeader>
@@ -866,6 +900,7 @@ const SubgraphNodeCard: React.FC<{
                                     key={inner.id}
                                     node={inner}
                                     updateNodeWidget={updateNodeWidget}
+                                    toggleNodeBypass={toggleNodeBypass}
                                     executingNodeId={executingNodeId}
                                     promptFields={promptFields}
                                     togglePromptField={togglePromptField}
@@ -1668,10 +1703,21 @@ function eventSummary(event: CloudStreamEvent): string {
  * widget whose connection was removed (e.g. an unconnected subgraph
  * input port whose -10 sentinel was filtered out) falls back to its
  * widget value, which is the correct ComfyUI behaviour.
+ *
+ * Disabled (mode 2) and bypassed (mode 4) nodes are never serialized:
+ * the API prompt has no mode concept — anything in it is executed by the
+ * server as a normal node — so these must be excluded here, exactly like
+ * ComfyUI's own frontend does. Connections referencing excluded nodes are
+ * dropped with them ("remove inputs connected to removed nodes"), so no
+ * dangling [nodeId, slot] references reach the server; a converted-widget
+ * input that loses its link this way keeps the widget value emitted
+ * above, which matches ComfyUI's fallback semantics.
  */
 function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
+    const active = flat.filter((n) => n.mode !== 2 && n.mode !== 4);
+    const activeIds = new Set(active.map((n) => n.id));
     const prompt: Record<string, unknown> = {};
-    for (const node of flat) {
+    for (const node of active) {
         const inputs: Record<string, unknown> = {};
 
         const registryEntry = comfyNodeRegistry[node.classType];
@@ -1694,8 +1740,11 @@ function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
 
         // ── Linked connections → [sourceNodeId, sourceSlot] ──
         // Processed AFTER widgets so a connected converted-widget input
-        // overrides the (stale) widget value.
+        // overrides the (stale) widget value. References to excluded
+        // (disabled/bypassed) nodes are dropped — a severed widget-input
+        // link therefore falls back to the widget value.
         for (const conn of node.connections) {
+            if (!activeIds.has(conn.sourceNodeId)) continue;
             inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
         }
 
@@ -1849,6 +1898,7 @@ function flattenSubgraphNodes(nodes: UINode[]): UINode[] {
  * `_raw.id`, and via the shared subgraph definition for internal nodes),
  * and writes widget values back in the exact shape they were read from
  * (array `widgets_values`, Record `widgets_values`, or API-prompt `inputs`).
+ * Execution-mode changes (bypass toggles) ride along the same lookup.
  *
  * Everything else (positions, links, groups, definitions) passes through
  * untouched, and unlinked nodes that the execution sort dropped from the
@@ -1877,6 +1927,12 @@ function applyWidgetEditsToRaw(raw: Record<string, unknown>, nodes: UINode[]): R
         }
     };
 
+    /** Write a node's execution mode back (bypass toggles persist with Save). */
+    const writeModeBack = (rawNode: Record<string, unknown>, uiNode: UINode): void => {
+        const rawMode = typeof rawNode.mode === 'number' ? rawNode.mode : 0;
+        if (rawMode !== uiNode.mode) rawNode.mode = uiNode.mode;
+    };
+
     if (Array.isArray(clone.nodes)) {
         // ── Workflow format (v0.4 / v1) ──────────────────────────────
         const applyList = (uiNodes: UINode[], rawList: WorkflowNode[]): void => {
@@ -1884,6 +1940,7 @@ function applyWidgetEditsToRaw(raw: Record<string, unknown>, nodes: UINode[]): R
                 const rawNode = rawList.find((n) => String(n?.id) === String(uiNode._raw?.id));
                 if (rawNode) {
                     writeWidgetsBack(rawNode as Record<string, unknown>, uiNode);
+                    writeModeBack(rawNode as Record<string, unknown>, uiNode);
                 }
                 // Recurse into subgraph definitions — internal node edits
                 // live on the shared definition (matched by the wrapper's
@@ -2333,6 +2390,30 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                         i === widgetIdx ? { ...w, value: parseInputValue(rawValue, w.value) } : w
                     );
                     return { ...n, widgets };
+                }
+                if (n.subgraphNodes && n.subgraphNodes.length > 0) {
+                    return { ...n, subgraphNodes: updateInTree(n.subgraphNodes) };
+                }
+                return n;
+            });
+        setNodes((prev) => updateInTree(prev));
+    }, []);
+
+    // ── Bypass toggling ─────────────────────────────────────────────
+    // Every node card header carries a mode toggle: click to switch the
+    // node between active (mode 0) and bypassed (mode 4) — the same
+    // semantics as ComfyUI's right-click → Bypass. A bypassed/disabled
+    // node is excluded from the API prompt entirely (see
+    // uiNodesToApiPrompt), so the toggle directly controls what the pod
+    // executes. The editor tree is the source of truth: toggling affects
+    // Generate immediately, and Save persists the mode into the stored
+    // workflow json (applyWidgetEditsToRaw).
+    const toggleNodeBypass = React.useCallback((nodeId: string) => {
+        /** Recursively toggle a node's mode in a tree (handles subgraph nesting). */
+        const updateInTree = (nodes: UINode[]): UINode[] =>
+            nodes.map((n) => {
+                if (n.id === nodeId) {
+                    return { ...n, mode: n.mode === 4 ? 0 : 4 };
                 }
                 if (n.subgraphNodes && n.subgraphNodes.length > 0) {
                     return { ...n, subgraphNodes: updateInTree(n.subgraphNodes) };
@@ -3248,18 +3329,14 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                             {registryEntry.category}
                                                         </span>
                                                     )}
-                                                    {node.mode !== 0 && (
-                                                        <span
-                                                            style={{
-                                                                fontSize: theme.fontSize.xs,
-                                                                color: MODE_STYLES[node.mode]?.color ?? theme.textFaint,
-                                                                opacity: MODE_STYLES[node.mode]?.muted ? 0.6 : 1,
-                                                                fontStyle: 'italic'
-                                                            }}
-                                                        >
-                                                            [{MODE_LABELS[node.mode] ?? `mode ${node.mode}`}]
-                                                        </span>
-                                                    )}
+                                                    <ModeToggle
+                                                        type="button"
+                                                        bypassed={node.mode === 4}
+                                                        onClick={() => toggleNodeBypass(node.id)}
+                                                        title={modeToggleTitle(node.mode)}
+                                                    >
+                                                        [{modeToggleLabel(node.mode)}]
+                                                    </ModeToggle>
                                                 </div>
                                                 <NodeId>#{node.id}</NodeId>
                                             </NodeHeader>
@@ -3474,6 +3551,7 @@ export const CloudTab: React.FC<CloudTabProps> = React.memo(({ baseUrl = 'http:/
                                                                     key={inner.id}
                                                                     node={inner}
                                                                     updateNodeWidget={updateNodeWidget}
+                                                                    toggleNodeBypass={toggleNodeBypass}
                                                                     executingNodeId={executingNodeId}
                                                                     promptFields={promptFields}
                                                                     togglePromptField={togglePromptField}
