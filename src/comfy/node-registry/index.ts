@@ -106,6 +106,9 @@ import { LTXVConcatAVLatent } from './LTXVConcatAVLatent';
 import { LTXVSeparateAVLatent } from './LTXVSeparateAVLatent';
 import { LTXVLatentUpsampler } from './LTXVLatentUpsampler';
 import { LTXVAudioVAEDecode } from './LTXVAudioVAEDecode';
+import { LTXVAudioVAELoader } from './LTXVAudioVAELoader';
+import { LTXAVTextEncoderLoader } from './LTXAVTextEncoderLoader';
+import { LatentUpscaleModelLoader } from './LatentUpscaleModelLoader';
 
 // Image batch
 import { ImageFromBatch } from './ImageFromBatch';
@@ -252,6 +255,9 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     LTXVSeparateAVLatent,
     LTXVLatentUpsampler,
     LTXVAudioVAEDecode,
+    LTXVAudioVAELoader,
+    LTXAVTextEncoderLoader,
+    LatentUpscaleModelLoader,
 
     // Image batch
     ImageFromBatch,

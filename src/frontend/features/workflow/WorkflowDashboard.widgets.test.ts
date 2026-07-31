@@ -871,3 +871,165 @@ describe('parseWorkflowJson — node titles', () => {
         expect(sink!.title).toBeUndefined();
     });
 });
+
+describe('workflowToApiPrompt — nested subgraph whose internals only feed outputs', () => {
+    // Regression: the execution sort used to discard internal nodes whose
+    // only links go to the -20 output sentinel (loader-bank subgraphs like
+    // a "Models" group: loaders with no inputs and no internal consumers).
+    // With every internal node gone, the wrapper could no longer be
+    // dissolved and leaked into the API prompt as
+    // { class_type: '<subgraph name>' } — which ComfyUI rejects with
+    // "Node '<name>' not found".
+    const outerSubgraphId = '11111111-2222-3333-4444-555555555555';
+    const innerSubgraphId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+    function makeNestedWorkflow(): Record<string, unknown> {
+        return {
+            version: 1,
+            nodes: [
+                {
+                    id: 1,
+                    type: outerSubgraphId,
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            links: [makeSinkLink(1, 0, 'IMAGE')],
+            definitions: {
+                subgraphs: [
+                    {
+                        id: outerSubgraphId,
+                        version: 1,
+                        name: 'Outer',
+                        inputNode: { id: -10, bounding: [0, 0, 100, 50] },
+                        outputNode: { id: -20, bounding: [0, 0, 100, 50] },
+                        inputs: [],
+                        outputs: [{ id: 'o1', name: 'IMAGE', type: 'IMAGE', linkIds: [103] }],
+                        nodes: [
+                            {
+                                // Nested "loader bank" subgraph (all internals
+                                // feed -20 only — dropped by the sort pre-fix).
+                                id: 100,
+                                type: innerSubgraphId,
+                                pos: [0, 0],
+                                size: [200, 100],
+                                flags: {},
+                                order: 0,
+                                mode: 0,
+                                properties: {},
+                                inputs: [],
+                                outputs: [{ name: 'VAE', type: 'VAE', links: [102], slot_index: 0 }],
+                                widgets_values: [],
+                            },
+                            {
+                                id: 101,
+                                type: 'EmptyLatentImage',
+                                pos: [0, 0],
+                                size: [200, 100],
+                                flags: {},
+                                order: 1,
+                                mode: 0,
+                                properties: {},
+                                inputs: [],
+                                outputs: [{ name: 'LATENT', type: 'LATENT', links: [101], slot_index: 0 }],
+                                widgets_values: [512, 512, 1],
+                            },
+                            {
+                                id: 102,
+                                type: 'VAEDecode',
+                                pos: [0, 0],
+                                size: [200, 100],
+                                flags: {},
+                                order: 2,
+                                mode: 0,
+                                properties: {},
+                                inputs: [
+                                    { name: 'samples', type: 'LATENT', link: 101 },
+                                    { name: 'vae', type: 'VAE', link: 102 },
+                                ],
+                                outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [103], slot_index: 0 }],
+                                widgets_values: [],
+                            },
+                        ],
+                        links: [
+                            { id: 101, origin_id: 101, origin_slot: 0, target_id: 102, target_slot: 0, type: 'LATENT' },
+                            { id: 102, origin_id: 100, origin_slot: 0, target_id: 102, target_slot: 1, type: 'VAE' },
+                            { id: 103, origin_id: 102, origin_slot: 0, target_id: -20, target_slot: 0, type: 'IMAGE' },
+                        ],
+                    },
+                    {
+                        id: innerSubgraphId,
+                        version: 1,
+                        name: 'ModelBank',
+                        inputNode: { id: -10, bounding: [0, 0, 100, 50] },
+                        outputNode: { id: -20, bounding: [0, 0, 100, 50] },
+                        inputs: [],
+                        outputs: [{ id: 'o1', name: 'VAE', type: 'VAE', linkIds: [201] }],
+                        nodes: [
+                            {
+                                // Feeds ONLY the -20 output sentinel: no inputs,
+                                // no internal consumers — the node the old sort
+                                // discarded, emptying the whole subgraph.
+                                id: 201,
+                                type: 'VAELoader',
+                                pos: [0, 0],
+                                size: [200, 100],
+                                flags: {},
+                                order: 0,
+                                mode: 0,
+                                properties: {},
+                                inputs: [],
+                                outputs: [{ name: 'VAE', type: 'VAE', links: [201], slot_index: 0 }],
+                                widgets_values: ['vae.safetensors'],
+                            },
+                        ],
+                        links: [
+                            { id: 201, origin_id: 201, origin_slot: 0, target_id: -20, target_slot: 0, type: 'VAE' },
+                        ],
+                    },
+                ],
+            },
+        };
+    }
+
+    it('keeps loader-bank internals and dissolves the nested wrapper completely', () => {
+        const prompt = workflowToApiPrompt(makeNestedWorkflow()) as Record<string, {
+            class_type: string;
+            inputs: Record<string, unknown>;
+        }>;
+
+        const classTypes = Object.values(prompt).map((n) => n.class_type);
+        // Neither wrapper may survive as a node in the prompt.
+        expect(classTypes).not.toContain('Outer');
+        expect(classTypes).not.toContain('ModelBank');
+
+        // The nested loader must be present with its widget value.
+        const vaeLoaderEntry = Object.entries(prompt).find(([, n]) => n.class_type === 'VAELoader');
+        expect(vaeLoaderEntry).toBeDefined();
+        expect(vaeLoaderEntry![1].inputs.vae_name).toBe('vae.safetensors');
+
+        // VAEDecode's vae input must be rewired to that loader.
+        const vaeDecode = Object.values(prompt).find((n) => n.class_type === 'VAEDecode');
+        expect(vaeDecode).toBeDefined();
+        expect(vaeDecode!.inputs.vae).toEqual([vaeLoaderEntry![0], 0]);
+
+        // No dangling link references at all.
+        const ids = new Set(Object.keys(prompt));
+        for (const [id, node] of Object.entries(prompt)) {
+            for (const val of Object.values(node.inputs)) {
+                if (Array.isArray(val) && val.length === 2 && typeof val[0] === 'string') {
+                    expect(ids.has(val[0]), `node ${id} references missing node '${val[0]}'`).toBe(true);
+                }
+            }
+        }
+    });
+});
+

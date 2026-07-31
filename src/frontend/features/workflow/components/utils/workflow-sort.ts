@@ -37,10 +37,20 @@ import type { UIInputConnection, UINode } from '../../../../nodes/node-type';
  * Nodes with no links at all (neither incoming nor outgoing) are discarded:
  * ComfyUI never executes them, since they are not ancestors of an output node.
  *
+ * EXCEPTION — `protectedNodeIds`: when sorting a subgraph's internal nodes,
+ * nodes that feed the subgraph's -20 output sentinel LOOK unlinked (their
+ * only links leave the internal node set, so neither incoming nor outgoing
+ * is counted) but they are the roots of the internal graph — their data
+ * exits the subgraph. Discarding them would empty loader-bank subgraphs
+ * (e.g. a "Models" group whose loaders only feed subgraph outputs) and lose
+ * subgraph outputs produced by such nodes. sortNodesDeep therefore passes
+ * the ids of -20 feeders so they are kept (as seeds, since they have no
+ * counted incoming links).
+ *
  * Each returned node's `order` field is rewritten to its computed execution
  * index so downstream consumers see truthful ordering metadata.
  */
-export function sortNodes(nodes: UINode[]): UINode[] {
+export function sortNodes(nodes: UINode[], protectedNodeIds?: ReadonlySet<string>): UINode[] {
     const nodeIds = new Set(nodes.map((n) => n.id));
     const nodeById = new Map(nodes.map((n): [string, UINode] => [n.id, n]));
 
@@ -80,7 +90,10 @@ export function sortNodes(nodes: UINode[]): UINode[] {
     for (const n of nodes) {
         const incoming = remainingLinks.get(n.id)!;
         const outgoing = outlinks.get(n.id)!.length;
-        if (incoming === 0 && outgoing === 0) continue; // unlinked — never executes
+        // Unlinked — never executes. Protected nodes (subgraph internal
+        // nodes feeding the -20 output sentinel) only LOOK unlinked: their
+        // links leave the internal node set. They must be kept.
+        if (incoming === 0 && outgoing === 0 && !protectedNodeIds?.has(n.id)) continue;
         if (incoming === 0) queue.push(n.id);
     }
 
@@ -113,11 +126,35 @@ export function sortNodes(nodes: UINode[]): UINode[] {
 /**
  * Sort a node tree into ComfyUI execution order, recursing into each
  * subgraph's internal nodes (which form their own dependency graphs).
+ *
+ * `protectedNodeIds` — node ids that must not be discarded even when they
+ * have no counted incoming/outgoing links (see sortNodes). Computed per
+ * subgraph from the wrapper's internal links: every internal node feeding
+ * the -20 output sentinel is a graph root whose data exits the subgraph.
  */
-export function sortNodesDeep(nodes: UINode[]): UINode[] {
-    return sortNodes(nodes).map((n) =>
-        n.subgraphNodes && n.subgraphNodes.length > 0 ? { ...n, subgraphNodes: sortNodesDeep(n.subgraphNodes) } : n
-    );
+export function sortNodesDeep(nodes: UINode[], protectedNodeIds?: ReadonlySet<string>): UINode[] {
+    return sortNodes(nodes, protectedNodeIds).map((n) => {
+        if (!n.subgraphNodes || n.subgraphNodes.length === 0) return n;
+        return { ...n, subgraphNodes: sortNodesDeep(n.subgraphNodes, subgraphOutputRootIds(n)) };
+    });
+}
+
+/**
+ * Ids of a subgraph wrapper's internal nodes that feed the -20 output
+ * sentinel (the subgraph's output ports). These nodes must survive the
+ * execution-order sort even though they have no links within the internal
+ * node set — otherwise subgraphs whose internals only produce outputs
+ * (loader banks, primitive settings) would be emptied out, and the wrapper
+ * could no longer be flattened into a valid API prompt.
+ */
+function subgraphOutputRootIds(wrapper: UINode): Set<string> {
+    const ids = new Set<string>();
+    for (const link of wrapper.subgraphLinks ?? []) {
+        if (String(link.target_id) === '-20') {
+            ids.add(String(link.origin_id));
+        }
+    }
+    return ids;
 }
 
 /** Re-number node IDs sequentially from 1 and update all link references. */
