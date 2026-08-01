@@ -108,6 +108,18 @@ export interface NodeWidgetLayout {
     widgets: WidgetDef[];
     /** GitHub source repository where this node originates. */
     github?: GitHubSource;
+    /**
+     * Custom widget→API-input serializer for nodes whose widgets are
+     * DYNAMIC (e.g. rgthree's Power Lora Loader: a variable number of
+     * `lora_N` object widgets bracketed by header/divider/button widgets
+     * whose slots shift with the lora count — a static index→name mapping
+     * cannot work). When present, it REPLACES the default per-widget name
+     * mapping in the API prompt builder; linked connections are still
+     * applied afterwards (and take precedence).
+     */
+    serializeWidgets?: (
+        widgets: ReadonlyArray<{ value: unknown; index: number }>,
+    ) => Record<string, unknown>;
 }
 
 // ── Enum Constants ───────────────────────────────────────────────────────────

@@ -105,6 +105,17 @@ export function parseInputValue(raw: string, original: unknown, def?: WidgetDef)
     if (typeof original === 'boolean') {
         return raw.toLowerCase() === 'true' || raw === '1';
     }
+    // Structured widget values (e.g. rgthree Power Lora Loader's lora
+    // objects) are edited as JSON text in the UI — parse them back into
+    // real objects so they round-trip through the tree and the API prompt
+    // as objects, not strings.
+    if (original !== null && typeof original === 'object') {
+        try {
+            return JSON.parse(raw);
+        } catch {
+            return original;
+        }
+    }
     return raw;
 }
 

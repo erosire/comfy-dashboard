@@ -223,6 +223,143 @@ const Base64DataUriValue: React.FC<{
     );
 };
 
+/**
+ * Editor for STRUCTURED widget values — plain objects (rgthree Power Lora
+ * Loader's lora entries `{on, lora, strength, strengthTwo}` and its header
+ * widget, divider spacers `{}`, etc.). Raw `String(value)` renders as the
+ * useless "[object Object]", so object values instead get a compact summary
+ * plus a JSON text editor.
+ *
+ * Editing is draft-based: the textarea holds a local JSON draft; only
+ * drafts that JSON.parse cleanly are committed to the tree (parseInputValue
+ * re-parses into a real object), so a half-typed document never clobbers
+ * the stored value. An invalid draft gets a red border. Empty objects
+ * (rgthree's divider spacers) render as a read-only placeholder line.
+ */
+const ObjectWidgetEditor: React.FC<{
+    node: UINode;
+    widget: UIWidget;
+    updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+    title?: string;
+    testId?: string;
+}> = ({ node, widget, updateNodeWidget, title, testId }) => {
+    const value = widget.value;
+    const keys =
+        value && typeof value === 'object' && !Array.isArray(value)
+            ? Object.keys(value as Record<string, unknown>)
+            : [];
+
+    // Divider spacer ({}) — pure layout machinery, nothing to edit.
+    if (keys.length === 0) {
+        return (
+            <DataUriPreview title="Layout spacer (no editable value)" data-testid={testId}>
+                ⋯
+            </DataUriPreview>
+        );
+    }
+
+    return <JsonObjectDraftEditor node={node} widget={widget} updateNodeWidget={updateNodeWidget} title={title} testId={testId} />;
+};
+
+/** Draft-JSON editor for non-empty object widget values. */
+const JsonObjectDraftEditor: React.FC<{
+    node: UINode;
+    widget: UIWidget;
+    updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+    title?: string;
+    testId?: string;
+}> = ({ node, widget, updateNodeWidget, title, testId }) => {
+    const serialized = React.useMemo(() => JSON.stringify(widget.value, null, 2) ?? '', [widget.value]);
+    const [draft, setDraft] = React.useState(serialized);
+    const [editing, setEditing] = React.useState(false);
+
+    // External value changes (workflow load, other-tab edit) reset the draft.
+    React.useEffect(() => {
+        if (!editing) setDraft(serialized);
+    }, [serialized, editing]);
+
+    // Compact one-line summary for the collapsed view.
+    const summary = React.useMemo(() => {
+        const obj = widget.value as Record<string, unknown>;
+        if (obj && typeof obj.lora === 'string') {
+            return `${obj.on === false ? 'off' : 'on'} · ${obj.lora} · ×${String(obj.strength ?? 1)}` +
+                (obj.strengthTwo != null ? ` /×${String(obj.strengthTwo)}` : '');
+        }
+        const flat = JSON.stringify(widget.value);
+        return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
+    }, [widget.value]);
+
+    const isValid = React.useMemo(() => {
+        try {
+            JSON.parse(draft);
+            return true;
+        } catch {
+            return false;
+        }
+    }, [draft]);
+
+    const commit = (text: string) => {
+        setDraft(text);
+        try {
+            JSON.parse(text);
+            updateNodeWidget(node.id, widget.index, text);
+        } catch {
+            // Invalid intermediate draft — keep it local only.
+        }
+    };
+
+    if (!editing) {
+        return (
+            <>
+                <DataUriPreview title={title ?? 'Structured widget value'} data-testid={testId}>
+                    {summary}
+                </DataUriPreview>
+                <DataUriAction
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    title="Edit as JSON"
+                    data-testid={testId ? `${testId}-json` : undefined}
+                >
+                    json
+                </DataUriAction>
+            </>
+        );
+    }
+
+    return (
+        <>
+            <AutoGrowTextarea
+                value={draft}
+                onChange={(e) => commit(e.target.value)}
+                readOnly={false}
+                title={
+                    (title ? `${title} — ` : '') +
+                    (isValid ? 'JSON — edits apply immediately' : 'Invalid JSON — not applied yet')
+                }
+                style={isValid ? undefined : { borderColor: theme.danger }}
+                data-testid={testId ? `${testId}-draft` : undefined}
+            />
+            <DataUriAction
+                type="button"
+                onClick={() => {
+                    if (isValid) {
+                        setEditing(false);
+                        setDraft(serialized);
+                    } else {
+                        // Discard the invalid draft and leave edit mode.
+                        setEditing(false);
+                        setDraft(serialized);
+                    }
+                }}
+                title={isValid ? 'Done editing' : 'Discard invalid JSON'}
+                data-testid={testId ? `${testId}-done` : undefined}
+            >
+                {isValid ? '▾' : '✕'}
+            </DataUriAction>
+        </>
+    );
+};
+
 /** Number (and slider) editor for INT/FLOAT widgets. */
 export const NumberWidgetEditor: React.FC<{
     node: UINode;
@@ -373,6 +510,21 @@ export const WidgetValueEditor: React.FC<{
             >
                 {on ? 'true' : 'false'}
             </WidgetBoolToggle>
+        );
+    }
+
+    // Structured (plain-object) values — rgthree lora entries, header
+    // objects, divider spacers — get the JSON object editor instead of the
+    // useless "[object Object]" text.
+    if (widget.value !== null && typeof widget.value === 'object' && !Array.isArray(widget.value)) {
+        return (
+            <ObjectWidgetEditor
+                node={node}
+                widget={widget}
+                updateNodeWidget={updateNodeWidget}
+                title={title}
+                testId={testId}
+            />
         );
     }
 

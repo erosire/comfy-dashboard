@@ -1115,3 +1115,190 @@ describe('workflowToApiPrompt — LTXVImgToVideoInplaceKJ dynamic-combo widget o
     });
 });
 
+describe('workflowToApiPrompt — VAELoaderKJ widget emission', () => {
+    // Regression: VAELoaderKJ was registered with an empty widget list, so
+    // NONE of its widget values reached the prompt — the pod rejected it
+    // with "Required input is missing: vae_name / weight_dtype / device".
+    it('emits vae_name, device and weight_dtype in INPUT_TYPES order', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'VAELoaderKJ',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'VAE', type: 'VAE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: ['ltx-2.3-spatial-upscaler-x2-1.0.safetensors', 'cpu', 'bf16'],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'VAE')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'VAELoaderKJ');
+        expect(node).toBeDefined();
+        expect(node!.inputs.vae_name).toBe('ltx-2.3-spatial-upscaler-x2-1.0.safetensors');
+        expect(node!.inputs.device).toBe('cpu');
+        expect(node!.inputs.weight_dtype).toBe('bf16');
+    });
+});
+
+describe('workflowToApiPrompt — PrimitiveInt widget emission', () => {
+    it('emits the value widget; the control-mode companion is not an API input', () => {
+        // Saved workflows carry a second widgets_values entry for the
+        // control mode ("fixed"/"randomize"/…) — it has no API input, so
+        // the prompt must only carry `value` (mirrors Seed's behaviour).
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'PrimitiveInt',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'INT', type: 'INT', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [480, 'fixed'],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'INT')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'PrimitiveInt');
+        expect(node).toBeDefined();
+        expect(node!.inputs.value).toBe(480);
+        expect(node!.inputs.control_after_generate).toBeUndefined();
+    });
+});
+
+describe('workflowToApiPrompt — Power Lora Loader (rgthree) dynamic widgets', () => {
+    // The node's lora count is variable, so widget slots shift: a saved
+    // workflow with 3 loras stores [divider{}, header{}, lora×3, divider{},
+    // button ""]. Regression: the old registry emitted NONE of these
+    // (empty widget list), and the editor displayed "[object Object]".
+    it('rebuilds header/lora_N/add-lora inputs, skipping dividers, mirroring rgthree', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'Power Lora Loader (rgthree)',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: { 'Show Strengths': 'Single Strength', Match: '' },
+                    inputs: [{ name: 'model', type: 'MODEL', link: null }],
+                    outputs: [{ name: 'MODEL', type: 'MODEL', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [
+                        {},
+                        { type: 'PowerLoraLoaderHeaderWidget' },
+                        { on: false, lora: 'LTX23_OmniNFT_RL_bf16.safetensors', strength: 1, strengthTwo: null },
+                        { on: false, lora: 'LTX23_DR34ML4Y_v2.safetensors', strength: 0.7, strengthTwo: null },
+                        { on: false, lora: 'LTX23_Reasoning_v3.safetensors', strength: 1, strengthTwo: null },
+                        {},
+                        '',
+                    ],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'MODEL')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'Power Lora Loader (rgthree)');
+        expect(node).toBeDefined();
+
+        // Matches the structure ComfyUI itself produces for this node.
+        expect(node!.inputs.PowerLoraLoaderHeaderWidget).toEqual({ type: 'PowerLoraLoaderHeaderWidget' });
+        expect(node!.inputs.lora_1).toEqual({ on: false, lora: 'LTX23_OmniNFT_RL_bf16.safetensors', strength: 1 });
+        expect(node!.inputs.lora_2).toEqual({ on: false, lora: 'LTX23_DR34ML4Y_v2.safetensors', strength: 0.7 });
+        expect(node!.inputs.lora_3).toEqual({ on: false, lora: 'LTX23_Reasoning_v3.safetensors', strength: 1 });
+        expect(node!.inputs['➕ Add Lora']).toBe('');
+        // Divider spacers have no API input.
+        expect(node!.inputs.divider).toBeUndefined();
+    });
+
+    it('keeps strengthTwo when it is a real value (Separate Model & Clip mode)', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'Power Lora Loader (rgthree)',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: { 'Show Strengths': 'Separate Model & Clip', Match: '' },
+                    inputs: [{ name: 'model', type: 'MODEL', link: null }],
+                    outputs: [{ name: 'MODEL', type: 'MODEL', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [
+                        {},
+                        { type: 'PowerLoraLoaderHeaderWidget' },
+                        { on: true, lora: 'a.safetensors', strength: 0.5, strengthTwo: 0.25 },
+                        {},
+                        '',
+                    ],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'MODEL')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'Power Lora Loader (rgthree)');
+        expect(node!.inputs.lora_1).toEqual({ on: true, lora: 'a.safetensors', strength: 0.5, strengthTwo: 0.25 });
+    });
+
+    it('counts only lora objects when naming lora_N (slot gaps do not shift names)', () => {
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 1,
+                    type: 'Power Lora Loader (rgthree)',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [{ name: 'model', type: 'MODEL', link: null }],
+                    outputs: [{ name: 'MODEL', type: 'MODEL', links: [SINK_LINK_ID], slot_index: 0 }],
+                    // A single lora at slot index 2 must still become lora_1.
+                    widgets_values: [
+                        {},
+                        { type: 'PowerLoraLoaderHeaderWidget' },
+                        { on: true, lora: 'solo.safetensors', strength: 0.9, strengthTwo: null },
+                        {},
+                        '',
+                    ],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(1, 0, 'MODEL')]
+        );
+
+        const prompt = workflowToApiPrompt(raw) as Record<string, { class_type: string; inputs: Record<string, unknown> }>;
+
+        const node = Object.values(prompt).find((n) => n.class_type === 'Power Lora Loader (rgthree)');
+        expect(node!.inputs.lora_1).toEqual({ on: true, lora: 'solo.safetensors', strength: 0.9 });
+        expect(node!.inputs.lora_2).toBeUndefined();
+    });
+});
+

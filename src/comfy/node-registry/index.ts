@@ -121,6 +121,7 @@ import { GetImageSize } from './GetImageSize';
 // Built-in ComfyUI primitives & text nodes
 import { PrimitiveBoolean } from './PrimitiveBoolean';
 import { PrimitiveFloat } from './PrimitiveFloat';
+import { PrimitiveInt } from './PrimitiveInt';
 import { PrimitiveStringMultiline } from './PrimitiveStringMultiline';
 import { StringConcatenate } from './StringConcatenate';
 import { LoraLoaderModelOnly } from './LoraLoaderModelOnly';
@@ -270,6 +271,7 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     // Built-in ComfyUI primitives & text nodes
     PrimitiveBoolean,
     PrimitiveFloat,
+    PrimitiveInt,
     PrimitiveStringMultiline,
     StringConcatenate,
     LoraLoaderModelOnly,

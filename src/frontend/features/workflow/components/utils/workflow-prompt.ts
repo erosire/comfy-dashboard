@@ -38,19 +38,26 @@ export function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
         const registryEntry = comfyNodeRegistry[node.classType];
 
         // ── Widget values (emitted first; connections override below) ──
-        for (const widget of node.widgets) {
-            const regWidget = registryEntry?.widgets[widget.index];
-            if (regWidget) {
-                inputs[regWidget.name] = widget.value;
-            } else if (widget.inferredName) {
-                // Unregistered node — use the name inferred from the
-                // workflow's converted-to-input slots or Record-style
-                // widgets_values keys.
-                inputs[widget.inferredName] = widget.value;
+        // Nodes with dynamic widgets (a registry serializeWidgets hook —
+        // e.g. rgthree's Power Lora Loader) own their widget serialization;
+        // the positional name mapping cannot describe shifting slots.
+        if (registryEntry?.serializeWidgets) {
+            Object.assign(inputs, registryEntry.serializeWidgets(node.widgets));
+        } else {
+            for (const widget of node.widgets) {
+                const regWidget = registryEntry?.widgets[widget.index];
+                if (regWidget) {
+                    inputs[regWidget.name] = widget.value;
+                } else if (widget.inferredName) {
+                    // Unregistered node — use the name inferred from the
+                    // workflow's converted-to-input slots or Record-style
+                    // widgets_values keys.
+                    inputs[widget.inferredName] = widget.value;
+                }
+                // Registered nodes with undefined registry widgets (e.g.
+                // TemporaryImagePreview's hidden internal widget) are
+                // intentionally skipped — they have no API input.
             }
-            // Registered nodes with undefined registry widgets (e.g.
-            // TemporaryImagePreview's hidden internal widget) are
-            // intentionally skipped — they have no API input.
         }
 
         // ── Linked connections → [sourceNodeId, sourceSlot] ──
