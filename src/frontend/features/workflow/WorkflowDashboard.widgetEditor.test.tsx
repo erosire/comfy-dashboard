@@ -395,3 +395,266 @@ describe('WidgetValueEditor — base64 data: URI values', () => {
         );
     });
 });
+
+// ── Power Lora Loader (rgthree) ─────────────────────────────────────────────
+//
+// The node's widget values are OBJECTS with a fixed shape (lora entries
+// `{on, lora, strength, strengthTwo}`, a header widget, divider spacers and
+// a trailing "➕ Add Lora" button string), so they render as dedicated
+// controls instead of the generic JSON editor:
+//   - lora entry → on/off toggle + filename field + strength number field
+//     (clip strength field only in "Separate Model & Clip" mode)
+//   - header     → a "toggle all" control flipping every lora on the node
+//   - dividers   → read-only spacer
+//   - add-lora   → read-only hint (rows are added in ComfyUI)
+// Edits commit the whole entry as JSON text (parseInputValue re-parses it
+// into a real object downstream).
+
+describe('WidgetValueEditor — Power Lora Loader (rgthree) lora entries', () => {
+    const NODE_TYPE = 'Power Lora Loader (rgthree)';
+
+    const makeLoraNode = (
+        entry: Record<string, unknown>,
+        widgetIndex = 2,
+        properties: Record<string, unknown> = { 'Show Strengths': 'Single Strength' }
+    ) => {
+        const widget: UIWidget = { value: entry, index: widgetIndex };
+        const node = {
+            id: '7',
+            classType: NODE_TYPE,
+            properties,
+            widgets: [widget]
+        } as unknown as UINode;
+        return { node, widget };
+    };
+
+    it('renders toggle + filename + strength — no JSON textarea', () => {
+        const { node, widget } = makeLoraNode({
+            on: false,
+            lora: 'LTX23_DR34ML4Y_v2.safetensors',
+            strength: 0.7,
+            strengthTwo: null
+        });
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={() => {}} testId="w" />);
+
+        const toggle = container.querySelector<HTMLButtonElement>('[data-testid="w-toggle"]')!;
+        expect(toggle.textContent).toBe('off');
+        expect(container.querySelector<HTMLInputElement>('input[type=text]')!.value).toBe(
+            'LTX23_DR34ML4Y_v2.safetensors'
+        );
+        const strength = container.querySelector<HTMLInputElement>('[data-testid="w-strength"]')!;
+        expect(strength.value).toBe('0.7');
+        // Single-strength mode: no clip strength field, and never a JSON editor.
+        expect(container.querySelector('[data-testid="w-strengthTwo"]')).toBeNull();
+        expect(container.querySelector('textarea')).toBeNull();
+    });
+
+    it('dimmed controls signal an off entry', () => {
+        const { node, widget } = makeLoraNode({ on: false, lora: 'a.safetensors', strength: 1, strengthTwo: null });
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={() => {}} testId="w" />);
+        const text = container.querySelector<HTMLInputElement>('input[type=text]')!;
+        expect(text.style.opacity).toBe('0.45');
+    });
+
+    it('toggle click commits the whole entry with on flipped, preserving strengthTwo: null', () => {
+        const update = vi.fn();
+        const entry = { on: false, lora: 'a.safetensors', strength: 0.7, strengthTwo: null };
+        const { node, widget } = makeLoraNode(entry, 2);
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} testId="w" />);
+
+        act(() =>
+            container
+                .querySelector<HTMLButtonElement>('[data-testid="w-toggle"]')!
+                .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+        );
+        expect(update).toHaveBeenCalledWith('7', 2, JSON.stringify({ ...entry, on: true }));
+        // Round-trips back into an object via parseInputValue downstream.
+        expect(JSON.parse(update.mock.calls[0][2] as string)).toEqual({
+            on: true,
+            lora: 'a.safetensors',
+            strength: 0.7,
+            strengthTwo: null
+        });
+    });
+
+    it('commits filename edits as the entry lora', () => {
+        const update = vi.fn();
+        const { node, widget } = makeLoraNode({ on: true, lora: 'old.safetensors', strength: 1, strengthTwo: null });
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} testId="w" />);
+
+        const text = container.querySelector<HTMLInputElement>('input[type=text]')!;
+        act(() => fireInput(text, 'new.safetensors'));
+        expect(JSON.parse(update.mock.calls[update.mock.calls.length - 1][2] as string)).toEqual({
+            on: true,
+            lora: 'new.safetensors',
+            strength: 1,
+            strengthTwo: null
+        });
+    });
+
+    it('commits strength edits as numbers', () => {
+        const update = vi.fn();
+        const { node, widget } = makeLoraNode({ on: true, lora: 'a.safetensors', strength: 1, strengthTwo: null });
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} testId="w" />);
+
+        const strength = container.querySelector<HTMLInputElement>('[data-testid="w-strength"]')!;
+        act(() => fireInput(strength, '0.35'));
+        expect(JSON.parse(update.mock.calls[update.mock.calls.length - 1][2] as string)).toEqual({
+            on: true,
+            lora: 'a.safetensors',
+            strength: 0.35,
+            strengthTwo: null
+        });
+    });
+
+    it('ignores an emptied strength field instead of committing NaN', () => {
+        const update = vi.fn();
+        const { node, widget } = makeLoraNode({ on: true, lora: 'a.safetensors', strength: 1, strengthTwo: null });
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} testId="w" />);
+
+        const strength = container.querySelector<HTMLInputElement>('[data-testid="w-strength"]')!;
+        act(() => fireInput(strength, ''));
+        expect(update).not.toHaveBeenCalled();
+    });
+
+    it('shows the clip strength field in "Separate Model & Clip" mode and edits strengthTwo', () => {
+        const update = vi.fn();
+        const { node, widget } = makeLoraNode(
+            { on: true, lora: 'a.safetensors', strength: 0.5, strengthTwo: null },
+            2,
+            { 'Show Strengths': 'Separate Model & Clip' }
+        );
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} testId="w" />);
+
+        // A null strengthTwo initialises to the model strength (rgthree mirrors this).
+        const clip = container.querySelector<HTMLInputElement>('[data-testid="w-strengthTwo"]')!;
+        expect(clip).not.toBeNull();
+        expect(clip.value).toBe('0.5');
+
+        act(() => fireInput(clip, '0.25'));
+        expect(JSON.parse(update.mock.calls[update.mock.calls.length - 1][2] as string)).toEqual({
+            on: true,
+            lora: 'a.safetensors',
+            strength: 0.5,
+            strengthTwo: 0.25
+        });
+    });
+
+    it('shows the clip field when a saved strengthTwo exists even without the property', () => {
+        const { node, widget } = makeLoraNode(
+            { on: true, lora: 'a.safetensors', strength: 0.5, strengthTwo: 0.25 },
+            2,
+            {}
+        );
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={() => {}} testId="w" />);
+        expect(container.querySelector<HTMLInputElement>('[data-testid="w-strengthTwo"]')!.value).toBe('0.25');
+    });
+
+    it('toggle-all header flips every lora entry (mixed → all on)', () => {
+        const update = vi.fn();
+        const entryA = { on: true, lora: 'a.safetensors', strength: 1, strengthTwo: null };
+        const entryB = { on: false, lora: 'b.safetensors', strength: 0.7, strengthTwo: null };
+        const header: UIWidget = { value: { type: 'PowerLoraLoaderHeaderWidget' }, index: 1 };
+        const node = {
+            id: '7',
+            classType: NODE_TYPE,
+            properties: {},
+            widgets: [
+                { value: {}, index: 0 },
+                header,
+                { value: entryA, index: 2 },
+                { value: entryB, index: 3 },
+                { value: {}, index: 4 },
+                { value: '', index: 5 }
+            ]
+        } as unknown as UINode;
+        render(<WidgetValueEditor node={node} widget={header} updateNodeWidget={update} testId="w" />);
+
+        const toggle = container.querySelector<HTMLButtonElement>('[data-testid="w"]')!;
+        expect(toggle.textContent).toBe('◐ mixed');
+        act(() => toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+        // Only the off entry needs a commit — the on one is already right.
+        expect(update).toHaveBeenCalledTimes(1);
+        expect(update).toHaveBeenCalledWith('7', 3, JSON.stringify({ ...entryB, on: true }));
+    });
+
+    it('toggle-all header flips all-on entries off', () => {
+        const update = vi.fn();
+        const entryA = { on: true, lora: 'a.safetensors', strength: 1, strengthTwo: null };
+        const entryB = { on: true, lora: 'b.safetensors', strength: 0.7, strengthTwo: null };
+        const header: UIWidget = { value: { type: 'PowerLoraLoaderHeaderWidget' }, index: 1 };
+        const node = {
+            id: '7',
+            classType: NODE_TYPE,
+            properties: {},
+            widgets: [header, { value: entryA, index: 2 }, { value: entryB, index: 3 }]
+        } as unknown as UINode;
+        render(<WidgetValueEditor node={node} widget={header} updateNodeWidget={update} testId="w" />);
+
+        const toggle = container.querySelector<HTMLButtonElement>('[data-testid="w"]')!;
+        expect(toggle.textContent).toBe('● all on');
+        act(() => toggle.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+        expect(update).toHaveBeenCalledTimes(2);
+        expect(update).toHaveBeenCalledWith('7', 2, JSON.stringify({ ...entryA, on: false }));
+        expect(update).toHaveBeenCalledWith('7', 3, JSON.stringify({ ...entryB, on: false }));
+    });
+
+    it('renders the trailing "➕ Add Lora" button string as a read-only hint', () => {
+        const buttonWidget: UIWidget = { value: '', index: 6 };
+        const node = { id: '7', classType: NODE_TYPE, properties: {}, widgets: [buttonWidget] } as unknown as UINode;
+        render(<WidgetValueEditor node={node} widget={buttonWidget} updateNodeWidget={() => {}} />);
+
+        expect(container.querySelector('textarea')).toBeNull();
+        expect(container.querySelector('input')).toBeNull();
+        expect(container.textContent).toContain('➕ Add Lora');
+    });
+
+    it('keeps the generic JSON editor for object values that are not lora-shaped', () => {
+        const { node, widget } = makeNode('SomeOtherNode', { foo: 'bar', count: 3 }, 0);
+        render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={() => {}} />);
+
+        const jsonBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+            (b) => b.textContent === 'json'
+        )!;
+        expect(jsonBtn).toBeDefined();
+        act(() => jsonBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+        expect(container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe(
+            JSON.stringify({ foo: 'bar', count: 3 }, null, 2)
+        );
+    });
+});
+
+// ── widgetLabel — Power Lora Loader labels ────────────────────────────────
+
+describe('widgetLabel — Power Lora Loader (rgthree)', () => {
+    it('labels each widget slot by its role, numbering lora entries only', async () => {
+        const { widgetLabel } = await import('./components/utils');
+        const widgets = [
+            { value: {}, index: 0 },
+            { value: { type: 'PowerLoraLoaderHeaderWidget' }, index: 1 },
+            { value: { on: false, lora: 'a.safetensors', strength: 1, strengthTwo: null }, index: 2 },
+            { value: { on: true, lora: 'b.safetensors', strength: 0.7, strengthTwo: null }, index: 3 },
+            { value: { on: true, lora: 'c.safetensors', strength: 1, strengthTwo: null }, index: 4 },
+            { value: {}, index: 5 },
+            { value: '', index: 6 }
+        ];
+        const node = { id: '7', classType: 'Power Lora Loader (rgthree)', widgets } as unknown as UINode;
+
+        expect(widgetLabel(node, widgets[0] as UIWidget)).toBe('—');
+        expect(widgetLabel(node, widgets[1] as UIWidget)).toBe('Toggle All');
+        expect(widgetLabel(node, widgets[2] as UIWidget)).toBe('LoRA 1');
+        expect(widgetLabel(node, widgets[3] as UIWidget)).toBe('LoRA 2');
+        expect(widgetLabel(node, widgets[4] as UIWidget)).toBe('LoRA 3');
+        expect(widgetLabel(node, widgets[5] as UIWidget)).toBe('—');
+        expect(widgetLabel(node, widgets[6] as UIWidget)).toBe('➕ Add Lora');
+    });
+
+    it('falls back to #N for unregistered node types', async () => {
+        const { widgetLabel } = await import('./components/utils');
+        const widget = { value: 'x', index: 3 } as UIWidget;
+        const node = { id: '7', classType: 'TotallyUnknownNode', widgets: [widget] } as unknown as UINode;
+        expect(widgetLabel(node, widget)).toBe('#4');
+    });
+});

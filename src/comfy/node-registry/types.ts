@@ -120,6 +120,20 @@ export interface NodeWidgetLayout {
     serializeWidgets?: (
         widgets: ReadonlyArray<{ value: unknown; index: number }>,
     ) => Record<string, unknown>;
+    /**
+     * Custom widget label resolver for nodes with DYNAMIC widgets (same
+     * rationale as `serializeWidgets`): the static `widgets[]` list is
+     * empty, so this hook derives a label from the widget's VALUE — e.g.
+     * Power Lora Loader labels its object widgets "LoRA 1", "LoRA 2", …
+     * (counting only lora entries), names the header and the "➕ Add Lora"
+     * button, and marks divider spacers. Receives the full widget list so
+     * positional labels stay correct when slots shift. Return `undefined`
+     * to fall back to "#N".
+     */
+    widgetLabel?: (
+        widget: { value: unknown; index: number },
+        allWidgets: ReadonlyArray<{ value: unknown; index: number }>,
+    ) => string | undefined;
 }
 
 // ── Enum Constants ───────────────────────────────────────────────────────────

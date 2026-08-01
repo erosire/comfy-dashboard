@@ -5,7 +5,8 @@
 // data-type / node-name display helpers shared by the node cards.
 
 import type { DataType, WidgetDef } from '../../../../../comfy';
-import type { UINode } from '../../../../nodes/node-type';
+import { comfyNodeRegistry, getWidgetLabel } from '../../../../../comfy';
+import type { UINode, UIWidget } from '../../../../nodes/node-type';
 import { MODE_LABELS } from '../../../../nodes/node-type';
 import { base64ByteSize } from './pod-utils';
 
@@ -14,6 +15,21 @@ export function displayValue(val: unknown): string {
     if (val === null || val === undefined) return '';
     if (typeof val === 'boolean') return val ? 'true' : 'false';
     return String(val);
+}
+
+/**
+ * Resolve the displayed label for a widget. The registry's dynamic
+ * `widgetLabel` hook (Power Lora Loader's "LoRA N" / "Toggle All" /
+ * "➕ Add Lora" labels, derived from the widget VALUE) wins over the static
+ * index→label lookup, which itself falls back to "#N".
+ */
+export function widgetLabel(node: UINode, widget: UIWidget): string {
+    const layout = comfyNodeRegistry[node.classType];
+    const dynamic = layout?.widgetLabel?.(
+        { value: widget.value, index: widget.index },
+        node.widgets,
+    );
+    return dynamic ?? getWidgetLabel(node.classType, widget.index);
 }
 
 /** Base64 `data:` URI breakdown: mime type, raw payload and its decoded size. */

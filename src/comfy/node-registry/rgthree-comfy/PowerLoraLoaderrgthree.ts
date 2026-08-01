@@ -18,8 +18,49 @@ import type { NodeWidgetLayout } from '../types';
 // single-strength mode the stored `strengthTwo: null` is dropped from the
 // prompt (rgthree's PowerLoraLoaderWidget.serializeValue deletes it unless
 // "Separate Model & Clip" is active).
+
+/** The node type string (class_type) of the rgthree Power Lora Loader. */
+export const POWER_LORA_LOADER_NODE_TYPE = 'Power Lora Loader (rgthree)';
+
+/** rgthree's "Show Strengths" property value that splits model & clip strength. */
+export const POWER_LORA_LOADER_SEPARATE_STRENGTHS = 'Separate Model & Clip';
+
+/**
+ * A Power Lora Loader lora entry widget value. `strengthTwo` is the CLIP
+ * strength — only meaningful when the node's "Show Strengths" property is
+ * "Separate Model & Clip"; in single-strength mode it stays `null` (and is
+ * dropped from the API prompt by serializeWidgets).
+ */
+export type PowerLoraEntry = {
+    on: boolean;
+    lora: string | null;
+    strength: number;
+    strengthTwo?: number | null;
+};
+
+/** Detect a lora entry widget value (`{"on":…, "lora":…, …}`). */
+export function isPowerLoraEntry(value: unknown): value is PowerLoraEntry {
+    return (
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        'lora' in value &&
+        'on' in value
+    );
+}
+
+/** Detect the PowerLoraLoaderHeaderWidget value (`{"type": "PowerLoraLoaderHeaderWidget"}`). */
+export function isPowerLoraHeader(value: unknown): boolean {
+    return (
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        (value as Record<string, unknown>).type === 'PowerLoraLoaderHeaderWidget'
+    );
+}
+
 export const PowerLoraLoaderrgthree: NodeWidgetLayout = {
-    nodeType: 'Power Lora Loader (rgthree)',
+    nodeType: POWER_LORA_LOADER_NODE_TYPE,
     displayName: 'Power Lora Loader (rgthree)',
     category: 'rgthree',
     github: {
@@ -28,6 +69,25 @@ export const PowerLoraLoaderrgthree: NodeWidgetLayout = {
         extension: 'rgthree-comfy',
     },
     widgets: [],
+    // Dynamic labels: lora entries are numbered (counting lora objects only,
+    // mirroring the serializer's lora_N naming); header, divider spacers and
+    // the "➕ Add Lora" button get their own labels instead of bare "#N".
+    widgetLabel: (widget, allWidgets) => {
+        const { value } = widget;
+        if (typeof value === 'string') return '➕ Add Lora';
+        if (isPowerLoraHeader(value)) return 'Toggle All';
+        if (isPowerLoraEntry(value)) {
+            let n = 0;
+            for (const w of allWidgets) {
+                if (isPowerLoraEntry(w.value)) n += 1;
+                if (w.index === widget.index) break;
+            }
+            return `LoRA ${n}`;
+        }
+        // Divider spacers ({}) and anything else — layout machinery, not a field.
+        if (value !== null && typeof value === 'object' && !Array.isArray(value)) return '—';
+        return undefined;
+    },
     serializeWidgets: (widgets) => {
         const inputs: Record<string, unknown> = {};
         let loraIndex = 0;
@@ -39,14 +99,13 @@ export const PowerLoraLoaderrgthree: NodeWidgetLayout = {
                 continue;
             }
             if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-            const obj = value as Record<string, unknown>;
-            if (obj.type === 'PowerLoraLoaderHeaderWidget') {
+            if (isPowerLoraHeader(value)) {
                 inputs.PowerLoraLoaderHeaderWidget = value;
                 continue;
             }
-            if ('lora' in obj && 'on' in obj) {
+            if (isPowerLoraEntry(value)) {
                 loraIndex += 1;
-                const lora = { ...obj };
+                const lora = { ...value };
                 // Single-strength mode keeps strengthTwo null in the
                 // workflow file, but the prompt never carries it.
                 if (lora.strengthTwo === null || lora.strengthTwo === undefined) {

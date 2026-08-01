@@ -5,7 +5,7 @@
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { comfyNodeRegistry, getWidgetLabel } from '../../../../comfy';
+import { comfyNodeRegistry } from '../../../../comfy';
 import type { UINode } from '../../../nodes/node-type';
 import {
     dataTypeColor,
@@ -14,7 +14,8 @@ import {
     modeToggleTitle,
     nodeDisplayName,
     nodeDisplayNameTitle,
-    promptWidgetKey
+    promptWidgetKey,
+    widgetLabel
 } from './utils';
 import { InputLabel, InputRow, LinkBadge, ModeToggle, NodeCard, NodeClassType, NodeHeader, NodeId, NodeInputs } from './ui';
 import { WidgetValueEditor } from './WidgetValueEditor';
@@ -141,7 +142,7 @@ export const SubgraphNodeCard: React.FC<{
                                     fontWeight: isPromptField ? 600 : undefined
                                 }}
                             >
-                                {getWidgetLabel(node.classType, widget.index)}
+                                {widgetLabel(node, widget)}
                             </InputLabel>
                             <WidgetValueEditor
                                 node={node}

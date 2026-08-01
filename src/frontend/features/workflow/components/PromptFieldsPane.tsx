@@ -11,9 +11,9 @@
 import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
-import { comfyNodeRegistry, getWidgetLabel } from '../../../../comfy';
+import { comfyNodeRegistry } from '../../../../comfy';
 import type { UINode } from '../../../nodes/node-type';
-import { nodeDisplayName, type PromptWidgetRef } from './utils';
+import { nodeDisplayName, widgetLabel, type PromptWidgetRef } from './utils';
 import { WidgetValueEditor } from './WidgetValueEditor';
 import { EmptyHint, NodeCard, NodeHeader, NodeId, NodeInputs, NodeList } from './ui';
 
@@ -91,7 +91,7 @@ export const PromptFieldsPane: React.FC<PromptFieldsPaneProps> = ({ entries, tog
                                     whiteSpace: 'nowrap'
                                 }}
                             >
-                                {getWidgetLabel(node.classType, widget.index)}
+                                {widgetLabel(node, widget)}
                             </span>
                             <div
                                 style={{

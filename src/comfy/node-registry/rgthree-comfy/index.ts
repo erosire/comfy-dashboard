@@ -86,3 +86,12 @@ export {
     SDXLPowerPromptSimplenegativethree,
     Seedrgthree,
 };
+
+// Power Lora Loader helpers (value guards + constants for the dedicated editors)
+export {
+    POWER_LORA_LOADER_NODE_TYPE,
+    POWER_LORA_LOADER_SEPARATE_STRENGTHS,
+    isPowerLoraEntry,
+    isPowerLoraHeader,
+} from './PowerLoraLoaderrgthree';
+export type { PowerLoraEntry } from './PowerLoraLoaderrgthree';

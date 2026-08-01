@@ -14,7 +14,14 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 import type { WidgetDef } from '../../../../comfy';
-import { comfyNodeRegistry } from '../../../../comfy';
+import {
+    comfyNodeRegistry,
+    POWER_LORA_LOADER_NODE_TYPE,
+    POWER_LORA_LOADER_SEPARATE_STRENGTHS,
+    isPowerLoraEntry,
+    isPowerLoraHeader,
+    type PowerLoraEntry
+} from '../../../../comfy';
 import type { UINode, UIWidget } from '../../../nodes/node-type';
 import { AutoGrowTextarea } from './AutoGrowTextarea';
 import { Badge } from './ui';
@@ -54,6 +61,23 @@ export const WidgetSelect = styled('select')({
 // attributes come from the registry definition so the native spinners and
 // validation restrict what can be typed.
 export const WidgetNumberField = styled('input')({
+    flex: '1 1 auto',
+    padding: '3px 6px',
+    fontSize: theme.fontSize.xs,
+    fontFamily: theme.fontMono,
+    color: theme.text,
+    backgroundColor: theme.surface3,
+    border: `1px solid ${theme.border}`,
+    borderRadius: theme.radiusSm,
+    outline: 'none',
+    minWidth: 0,
+    boxSizing: 'border-box' as const
+});
+
+// WidgetTextField — single-line text input for structured editors that need
+// a compact inline field (e.g. the Power Lora Loader's lora filename), where
+// the multi-line AutoGrowTextarea would be the wrong control.
+export const WidgetTextField = styled('input')({
     flex: '1 1 auto',
     padding: '3px 6px',
     fontSize: theme.fontSize.xs,
@@ -223,6 +247,155 @@ const Base64DataUriValue: React.FC<{
     );
 };
 
+// ── Power Lora Loader (rgthree) dedicated editors ────────────────────────
+//
+// The node's object widget values are not opaque JSON blobs — they have a
+// fixed shape (src_web/comfyui/power_lora_loader.ts), so they get real
+// controls instead of a JSON document:
+//
+//   lora entry  {on, lora, strength, strengthTwo}  → toggle + filename +
+//                                                     strength field(s)
+//   header      {type: "PowerLoraLoaderHeaderWidget"} → toggle-all control
+//   dividers    {}                                  → (handled above as ⋯)
+//
+// `strengthTwo` is the CLIP strength and only exists when the node's
+// "Show Strengths" property is "Separate Model & Clip" — in single-strength
+// mode it stays null and is never sent to the prompt, so the editor hides
+// it (mirroring rgthree's own canvas row).
+//
+// All edits commit the whole entry object as JSON text; parseInputValue
+// re-parses it into a real object so tree/prompt/save round-trip intact.
+
+/**
+ * One lora row: on/off toggle, lora filename, strength — plus a clip
+ * strength field when the node is in "Separate Model & Clip" mode (or a
+ * saved strengthTwo value exists). Post-toggle controls dim when the entry
+ * is off, mirroring rgthree's canvas rendering.
+ */
+const PowerLoraEntryEditor: React.FC<{
+    node: UINode;
+    widget: UIWidget;
+    updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+    title?: string;
+    testId?: string;
+}> = ({ node, widget, updateNodeWidget, title, testId }) => {
+    const entry = widget.value as PowerLoraEntry;
+    const on = entry.on !== false;
+    const lora = typeof entry.lora === 'string' ? entry.lora : '';
+    const strength = typeof entry.strength === 'number' ? entry.strength : 1;
+
+    // Show the second (clip) strength only in separate mode, or when the
+    // saved value already carries a real number; rgthree initializes a null
+    // strengthTwo to the model strength when the mode is switched on.
+    const separate = node.properties?.['Show Strengths'] === POWER_LORA_LOADER_SEPARATE_STRENGTHS;
+    const showStrengthTwo = separate || typeof entry.strengthTwo === 'number';
+    const strengthTwo = typeof entry.strengthTwo === 'number' ? entry.strengthTwo : strength;
+
+    const commit = (patch: Partial<PowerLoraEntry>) =>
+        updateNodeWidget(node.id, widget.index, JSON.stringify({ ...entry, ...patch }));
+
+    // Strength fields: valid numbers commit immediately; an emptied field
+    // is left uncommitted so the user can retype from scratch (same rule
+    // as NumberWidgetEditor's blur handling).
+    const commitNumber = (key: 'strength' | 'strengthTwo') => (e: React.ChangeEvent<HTMLInputElement>) => {
+        const raw = e.target.value;
+        if (raw.trim() === '') return;
+        const n = Number(raw);
+        if (isNaN(n)) return;
+        commit({ [key]: n } as Partial<PowerLoraEntry>);
+    };
+
+    const dimmed = on ? undefined : 0.45;
+    return (
+        <div style={{ flex: '1 1 auto', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <WidgetBoolToggle
+                type="button"
+                active={on}
+                onClick={() => commit({ on: !on })}
+                title={on ? 'LoRA enabled — click to disable' : 'LoRA disabled — click to enable'}
+                data-testid={testId ? `${testId}-toggle` : undefined}
+            >
+                {on ? 'on' : 'off'}
+            </WidgetBoolToggle>
+            <WidgetTextField
+                type="text"
+                value={lora}
+                placeholder="None"
+                onChange={(e) => commit({ lora: e.target.value })}
+                title={title ?? 'LoRA filename'}
+                style={{ opacity: dimmed }}
+                data-testid={testId}
+            />
+            <WidgetNumberField
+                type="number"
+                step={0.05}
+                style={{ flex: '0 0 auto', width: 76, opacity: dimmed }}
+                value={displayValue(strength)}
+                onChange={commitNumber('strength')}
+                title={showStrengthTwo ? 'Model strength' : 'Strength (model & clip)'}
+                data-testid={testId ? `${testId}-strength` : undefined}
+            />
+            {showStrengthTwo && (
+                <WidgetNumberField
+                    type="number"
+                    step={0.05}
+                    style={{ flex: '0 0 auto', width: 76, opacity: dimmed }}
+                    value={displayValue(strengthTwo)}
+                    onChange={commitNumber('strengthTwo')}
+                    title="Clip strength"
+                    data-testid={testId ? `${testId}-strengthTwo` : undefined}
+                />
+            )}
+        </div>
+    );
+};
+
+/**
+ * The PowerLoraLoaderHeaderWidget: rgthree renders a "Toggle All" switch
+ * plus the strength column captions. The toggle flips every lora entry on
+ * the node (mirroring rgthree's toggleAllLoras: anything off → all on,
+ * all on → all off), committing one update per affected entry.
+ */
+const PowerLoraHeaderEditor: React.FC<{
+    node: UINode;
+    widget: UIWidget;
+    updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
+    title?: string;
+    testId?: string;
+}> = ({ node, updateNodeWidget, title, testId }) => {
+    const loraWidgets = node.widgets.filter((w) => isPowerLoraEntry(w.value));
+    const allOn = loraWidgets.length > 0 && loraWidgets.every((w) => (w.value as PowerLoraEntry).on !== false);
+    const allOff = loraWidgets.length > 0 && loraWidgets.every((w) => (w.value as PowerLoraEntry).on === false);
+
+    const toggleAll = () => {
+        const target = !allOn;
+        for (const w of loraWidgets) {
+            const entry = w.value as PowerLoraEntry;
+            if ((entry.on !== false) !== target) {
+                updateNodeWidget(node.id, w.index, JSON.stringify({ ...entry, on: target }));
+            }
+        }
+    };
+
+    const separate = node.properties?.['Show Strengths'] === POWER_LORA_LOADER_SEPARATE_STRENGTHS;
+    return (
+        <>
+            <WidgetBoolToggle
+                type="button"
+                active={allOn}
+                onClick={toggleAll}
+                title={title ?? 'Toggle every LoRA on this node'}
+                data-testid={testId}
+            >
+                {allOn ? '● all on' : allOff ? '○ all off' : '◐ mixed'}
+            </WidgetBoolToggle>
+            <DataUriPreview title="Column header (read-only)">
+                {separate ? 'model · clip' : 'strength'}
+            </DataUriPreview>
+        </>
+    );
+};
+
 /**
  * Editor for STRUCTURED widget values — plain objects (rgthree Power Lora
  * Loader's lora entries `{on, lora, strength, strengthTwo}` and its header
@@ -230,11 +403,13 @@ const Base64DataUriValue: React.FC<{
  * useless "[object Object]", so object values instead get a compact summary
  * plus a JSON text editor.
  *
- * Editing is draft-based: the textarea holds a local JSON draft; only
- * drafts that JSON.parse cleanly are committed to the tree (parseInputValue
- * re-parses into a real object), so a half-typed document never clobbers
- * the stored value. An invalid draft gets a red border. Empty objects
- * (rgthree's divider spacers) render as a read-only placeholder line.
+ * rgthree Power Lora Loader values route to dedicated per-shape editors
+ * (see above); anything else falls back to a draft-based JSON editor: the
+ * textarea holds a local JSON draft and only drafts that JSON.parse cleanly
+ * are committed to the tree (parseInputValue re-parses into a real object),
+ * so a half-typed document never clobbers the stored value. An invalid
+ * draft gets a red border. Empty objects (rgthree's divider spacers) render
+ * as a read-only placeholder line.
  */
 const ObjectWidgetEditor: React.FC<{
     node: UINode;
@@ -255,6 +430,30 @@ const ObjectWidgetEditor: React.FC<{
             <DataUriPreview title="Layout spacer (no editable value)" data-testid={testId}>
                 ⋯
             </DataUriPreview>
+        );
+    }
+
+    // Power Lora Loader's known object shapes get dedicated controls.
+    if (isPowerLoraEntry(value)) {
+        return (
+            <PowerLoraEntryEditor
+                node={node}
+                widget={widget}
+                updateNodeWidget={updateNodeWidget}
+                title={title}
+                testId={testId}
+            />
+        );
+    }
+    if (isPowerLoraHeader(value)) {
+        return (
+            <PowerLoraHeaderEditor
+                node={node}
+                widget={widget}
+                updateNodeWidget={updateNodeWidget}
+                title={title}
+                testId={testId}
+            />
         );
     }
 
@@ -280,11 +479,6 @@ const JsonObjectDraftEditor: React.FC<{
 
     // Compact one-line summary for the collapsed view.
     const summary = React.useMemo(() => {
-        const obj = widget.value as Record<string, unknown>;
-        if (obj && typeof obj.lora === 'string') {
-            return `${obj.on === false ? 'off' : 'on'} · ${obj.lora} · ×${String(obj.strength ?? 1)}` +
-                (obj.strengthTwo != null ? ` /×${String(obj.strengthTwo)}` : '');
-        }
         const flat = JSON.stringify(widget.value);
         return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
     }, [widget.value]);
@@ -525,6 +719,20 @@ export const WidgetValueEditor: React.FC<{
                 title={title}
                 testId={testId}
             />
+        );
+    }
+
+    // Power Lora Loader's trailing "➕ Add Lora" button serializes as an
+    // empty string — it is a row-adding button in ComfyUI, not an editable
+    // field, so show a read-only hint instead of a pointless text box.
+    if (node.classType === POWER_LORA_LOADER_NODE_TYPE && typeof widget.value === 'string') {
+        return (
+            <DataUriPreview
+                title="Adds a new lora row in ComfyUI — not an editable value"
+                data-testid={testId}
+            >
+                ➕ Add Lora — rows are added in ComfyUI
+            </DataUriPreview>
         );
     }
 

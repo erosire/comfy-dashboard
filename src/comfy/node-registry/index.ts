@@ -141,6 +141,15 @@ import { ComfyUIKJNodes } from './ComfyUI-KJNodes';
 // rgthree-comfy
 import { rgthreeNodes } from './rgthree-comfy';
 
+// Power Lora Loader (rgthree) helpers used by the dashboard's dedicated editors.
+export {
+    POWER_LORA_LOADER_NODE_TYPE,
+    POWER_LORA_LOADER_SEPARATE_STRENGTHS,
+    isPowerLoraEntry,
+    isPowerLoraHeader,
+} from './rgthree-comfy';
+export type { PowerLoraEntry } from './rgthree-comfy';
+
 // RES4LYF
 import {
     ClownsharKSampler_Beta,
