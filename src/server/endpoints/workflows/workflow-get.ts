@@ -42,6 +42,7 @@ export const workflowGet = asHandlerMethod(async (_, parameters, variables) => {
                     createdDate: metaData.createdDate ?? '',
                     modifiedDate: metaData.modifiedDate ?? '',
                     tags: metaData.tags ?? [],
+                    inputFields: Array.isArray(metaData.inputFields) ? metaData.inputFields : [],
                     raw: workflowData
                 }
             }

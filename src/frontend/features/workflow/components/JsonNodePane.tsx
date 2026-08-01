@@ -8,7 +8,6 @@ import { WorkflowNodeCard } from './WorkflowNodeCard';
 
 export type JsonNodePaneProps = {
     nodes: UINode[];
-    executingNodeId: string | null;
     promptFields: Set<string>;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
     toggleNodeBypass: (nodeId: string) => void;
@@ -17,7 +16,6 @@ export type JsonNodePaneProps = {
 
 export const JsonNodePane: React.FC<JsonNodePaneProps> = ({
     nodes,
-    executingNodeId,
     promptFields,
     updateNodeWidget,
     toggleNodeBypass,
@@ -28,7 +26,6 @@ export const JsonNodePane: React.FC<JsonNodePaneProps> = ({
             <WorkflowNodeCard
                 key={node.id}
                 node={node}
-                executingNodeId={executingNodeId}
                 promptFields={promptFields}
                 updateNodeWidget={updateNodeWidget}
                 toggleNodeBypass={toggleNodeBypass}

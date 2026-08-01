@@ -15,6 +15,5 @@ export const MAX_POD_FAILURES = 2;
 /**
  * Dim accent track for the pod button's circular loading border — the
  * static border color while the sg-ring-loading arc sweeps over it.
- * Matches the SpinnerEl track alpha.
  */
 export const POD_RING_TRACK = 'rgba(129, 140, 248, 0.30)';

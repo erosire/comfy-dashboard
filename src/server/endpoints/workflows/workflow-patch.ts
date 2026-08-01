@@ -60,6 +60,18 @@ function extractTags(raw: Record<string, unknown>): string[] {
     return tags;
 }
 
+/**
+ * Extract the workflow's declared "Input" field keys — widget markings
+ * the dashboard persists in raw.extra.inputFields (see the PROMPT tab's
+ * Input chips). Mirrored into meta.json so the list endpoint can surface
+ * "this workflow has Inputs" without parsing every workflow.json.
+ */
+function extractInputFields(raw: Record<string, unknown>): string[] {
+    const saved = (raw as any)?.extra?.inputFields;
+    if (!Array.isArray(saved)) return [];
+    return saved.filter((key): key is string => typeof key === 'string');
+}
+
 export const workflowPatch = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
     const workflowId = parameters.path.id;
@@ -99,6 +111,9 @@ export const workflowPatch = asHandlerMethod(async (_, parameters, variables) =>
 
         if (body.raw !== undefined) {
             meta.nodeCount = countNodes(body.raw);
+            // Input markings ride inside the raw json (extra.inputFields);
+            // keep the mirrored meta copy in sync on every raw save.
+            meta.inputFields = extractInputFields(body.raw);
         }
 
         meta.modifiedDate = new Date().toISOString();
@@ -122,6 +137,7 @@ export const workflowPatch = asHandlerMethod(async (_, parameters, variables) =>
                     createdDate: meta.createdDate,
                     modifiedDate: meta.modifiedDate,
                     tags: meta.tags,
+                    inputFields: Array.isArray(meta.inputFields) ? meta.inputFields : [],
                     raw
                 }
             }

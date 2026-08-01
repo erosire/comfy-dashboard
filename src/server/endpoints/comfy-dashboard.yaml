@@ -37,7 +37,8 @@ paths:
       description: >-
         Returns stored workflow metadata, optionally filtered by search query
         (matches name, description, or tags). Each entry includes id, name,
-        description, nodeCount, timestamps, and tags. Sorted by modifiedDate
+        description, nodeCount, timestamps, tags, and inputFields (the
+        workflow's declared Input markings). Sorted by modifiedDate
         descending (most recently modified first).
       tags:
         - Workflows
@@ -66,6 +67,7 @@ paths:
                     createdDate: '2026-07-01T10:00:00.000Z'
                     modifiedDate: '2026-07-01T10:00:00.000Z'
                     tags: [txt2img, basic]
+                    inputFields: ['3:data_uri']
     post:
       operationId: createWorkflow
       summary: Create a new workflow
@@ -843,6 +845,17 @@ components:
           type: array
           items:
             type: string
+        inputFields:
+          type: array
+          items:
+            type: string
+          description: >-
+            Widget keys ("<nodeId>:<inputName>") marked as workflow Inputs
+            in the dashboard's PROMPT tab (mirrored from the workflow
+            json's extra.inputFields). Workflows with a non-empty list
+            appear in the result preview's workflow dropdown — picking one
+            feeds the viewed image's base64 data stream into the marked
+            Data URI (Universal Data Input) fields and triggers a run.
 
     Workflow:
       allOf:

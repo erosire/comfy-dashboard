@@ -81,6 +81,18 @@ function extractTags(raw: Record<string, unknown>): string[] {
     return tags;
 }
 
+/**
+ * Extract the workflow's declared "Input" field keys — widget markings
+ * the dashboard persists in raw.extra.inputFields (see the PROMPT tab's
+ * Input chips). Mirrored into meta.json so the list endpoint can surface
+ * "this workflow has Inputs" without parsing every workflow.json.
+ */
+function extractInputFields(raw: Record<string, unknown>): string[] {
+    const saved = (raw as any)?.extra?.inputFields;
+    if (!Array.isArray(saved)) return [];
+    return saved.filter((key): key is string => typeof key === 'string');
+}
+
 export const workflowCreate = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
     const body = parameters.body as { name?: string; description?: string; raw?: Record<string, unknown> } | undefined;
@@ -127,7 +139,8 @@ export const workflowCreate = asHandlerMethod(async (_, parameters, variables) =
         nodeCount,
         createdDate: nowIso,
         modifiedDate: nowIso,
-        tags
+        tags,
+        inputFields: extractInputFields(body.raw)
     };
     const metaJsonPath = path.join(folderPath, 'meta.json');
     fs.writeFileSync(metaJsonPath, JSON.stringify(meta, null, 2), 'utf-8');

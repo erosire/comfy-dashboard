@@ -24,59 +24,30 @@ export const SubgraphNodeCard: React.FC<{
     node: UINode;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
     toggleNodeBypass: (nodeId: string) => void;
-    executingNodeId?: string | null;
     promptFields: Set<string>;
     togglePromptField: (node: UINode, widgetIdx: number) => void;
-}> = React.memo(({ node, updateNodeWidget, toggleNodeBypass, executingNodeId, promptFields, togglePromptField }) => {
+}> = React.memo(({ node, updateNodeWidget, toggleNodeBypass, promptFields, togglePromptField }) => {
     const isSubgraph = !!node.subgraphDef;
     const registryEntry = comfyNodeRegistry[node.classType];
     const isUnregistered = !isSubgraph && !registryEntry;
-    const isExecuting = node.id === executingNodeId;
     const isBypassed = node.mode === 4;
     return (
         <NodeCard
             style={{
-                ...(isExecuting
-                    ? {
-                          marginLeft: 8,
-                          border: `2px solid ${theme.accent}`,
-                          backgroundColor: theme.accentSoft,
-                          boxShadow: `0 0 12px rgba(129, 140, 248, 0.35)`
-                      }
-                    : isUnregistered
-                      ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
-                      : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }),
+                ...(isUnregistered
+                    ? { marginLeft: 8, border: `1px solid ${theme.dangerBorder}`, backgroundColor: theme.dangerSoft }
+                    : { marginLeft: 8, borderLeft: `2px solid ${theme.accent}30` }),
                 // Bypassed nodes render half-transparent as a "not in the prompt" indicator.
                 opacity: isBypassed ? 0.25 : undefined
             }}
         >
             <NodeHeader
-                style={
-                    isExecuting
-                        ? { backgroundColor: 'rgba(129, 140, 248, 0.25)' }
-                        : isUnregistered
-                          ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' }
-                          : undefined
-                }
+                style={isUnregistered ? { backgroundColor: 'rgba(248, 113, 113, 0.20)' } : undefined}
             >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-                    {isExecuting && (
-                        <span
-                            style={{
-                                fontSize: theme.fontSize.xs,
-                                color: theme.accent,
-                                marginRight: 2
-                            }}
-                            title="Currently executing"
-                        >
-                            ▶
-                        </span>
-                    )}
                     <NodeClassType
                         title={nodeDisplayNameTitle(node)}
-                        style={
-                            isExecuting ? { color: theme.accent } : isUnregistered ? { color: theme.danger } : undefined
-                        }
+                        style={isUnregistered ? { color: theme.danger } : undefined}
                     >
                         {nodeDisplayName(node, registryEntry)}
                     </NodeClassType>
@@ -245,7 +216,6 @@ export const SubgraphNodeCard: React.FC<{
                                     node={inner}
                                     updateNodeWidget={updateNodeWidget}
                                     toggleNodeBypass={toggleNodeBypass}
-                                    executingNodeId={executingNodeId}
                                     promptFields={promptFields}
                                     togglePromptField={togglePromptField}
                                 />

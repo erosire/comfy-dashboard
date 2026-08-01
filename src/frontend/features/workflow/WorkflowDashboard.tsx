@@ -13,7 +13,7 @@
 
 import React from 'react';
 import type { WorkflowMeta } from '../../api';
-import { generationResultUrl } from '../../api';
+import { fetchWorkflow as fetchWorkflowApi, generationResultUrl } from '../../api';
 import { ComfyDashboard } from '../../components';
 import { useDashboardStore } from '../../context';
 import {
@@ -25,12 +25,13 @@ import {
     ResultViewer,
     WorkflowEditorContent,
     WorkflowSidebar,
+    buildWorkflowWithInputs,
+    fetchMediaAsDataUri,
     useDebouncedSearch,
     useGenerationsPolling,
     useMediaQuery,
     usePods,
     useResultViewer,
-    useSpawnAgent,
     useWorkflowActions,
     useWorkflowEditor,
     type GenerationSnapshot,
@@ -55,7 +56,6 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             refreshGenerations,
             fetchGeneration,
             generateWorkflow,
-            updateGeneration,
             deleteGeneration
         } = useDashboardStore();
 
@@ -74,7 +74,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
 
         // ── Pods (lifecycle, heartbeat, generation sync) ─────────────
 
-        const { pods, handleGenerate, handlePodGenerate } = usePods({
+        const { pods, handleGenerate, handlePodGenerate, handleAutoGenerate } = usePods({
             baseUrl,
             nodes: editor.nodes,
             editingWorkflowId,
@@ -85,17 +85,6 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             // to an API prompt at submission and "Create Workflow" copies.
             getCurrentRaw: editor.serializeCurrentRaw,
             generateWorkflow
-        });
-
-        // ── Spawn agent (pod that runs all pending generations) ──────
-
-        const { agentRunning, agentCount, executingNodeId, handleSpawnAgent } = useSpawnAgent({
-            baseUrl,
-            generations: store.generations,
-            editingWorkflowId,
-            updateGeneration,
-            refreshGenerations,
-            fetchGeneration
         });
 
         // ── Result viewer (image/video modal) ─────────────────────────
@@ -138,65 +127,166 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             [editingWorkflowId, fetchGeneration]
         );
 
-        const handleViewerGenerate = React.useCallback(async () => {
-            const generationId = viewer.viewerCurrent?.generationId;
-            if (!generationId || viewerActionBusy) return;
-            setViewerActionBusy(true);
-            try {
-                const snapshot = await getViewerGenerationSnapshot(generationId);
-                // Fire and forget — the spawned "#N" button reports state.
-                if (snapshot) void handleGenerate(snapshot);
-            } catch (err: any) {
-                alert(`Failed to regenerate: ${err.message ?? String(err)}`);
-            } finally {
-                setViewerActionBusy(false);
-            }
-        }, [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationSnapshot, handleGenerate]);
+        // ── Viewer Input-target selection ────────────────────────────
+        // Workflows that declare Input markings (extra.inputFields —
+        // surfaced by the list endpoint as meta.inputFields) populate the
+        // preview dropdown. The dropdown only ARMS a target: nothing
+        // fires until New / #N / Auto is pressed, the target workflow is
+        // never modified or navigated to, and the resulting generation is
+        // saved on the workflow being viewed.
 
-        const handleViewerPodGenerate = React.useCallback(
-            async (pod: PodEntry) => {
+        const inputTargets = React.useMemo(
+            () =>
+                store.workflows
+                    .filter((w) => (w.inputFields?.length ?? 0) > 0)
+                    .map((w) => ({ id: w.id, name: w.name })),
+            [store.workflows]
+        );
+
+        // Selected dropdown target — null means "Default" (rerun the
+        // viewed image's own stored prompt).
+        const [viewerInputTargetId, setViewerInputTargetId] = React.useState<string | null>(null);
+
+        // The selection belongs to an open viewer session — reset it when
+        // the viewer closes or the loaded workflow changes.
+        React.useEffect(() => {
+            if (!viewer.viewerOpen) setViewerInputTargetId(null);
+        }, [viewer.viewerOpen]);
+        React.useEffect(() => {
+            setViewerInputTargetId(null);
+        }, [editingWorkflowId]);
+
+        // Build the fed snapshot for an armed Input target: an in-memory
+        // COPY of the selected workflow's document with the viewed image's
+        // base64 data stream written into its marked Input fields (Data
+        // URI / Universal Data Input widgets). The target workflow itself
+        // is never modified, saved, or navigated to. Returns the injected
+        // document plus the target's display name (for forking/naming).
+        const buildViewerInputSnapshot = React.useCallback(
+            async (targetWorkflowId: string): Promise<{ snapshot: GenerationSnapshot; name: string }> => {
+                const entry = viewer.viewerCurrent;
+                if (!entry || entry.type !== 'image' || !viewer.viewerMediaUrl) {
+                    throw new Error('Only image results can feed workflow Inputs.');
+                }
+                // The image's bytes as a base64 data stream — what a
+                // Universal Data Input (data_uri) widget consumes.
+                const dataUri = await fetchMediaAsDataUri(viewer.viewerMediaUrl, entry.mimeType || 'image/png');
+                const { workflow: target } = await fetchWorkflowApi(
+                    `${store.config.baseUrl}/workflows`,
+                    targetWorkflowId
+                );
+                const injected = buildWorkflowWithInputs(target.raw, dataUri);
+                if (!injected) {
+                    throw new Error(
+                        `Workflow "${target.name}" has no usable Input fields — ` +
+                            'mark a Data URI (Universal Data Input) field as Input in its PROMPT tab first.'
+                    );
+                }
+                return { snapshot: injected, name: target.name };
+            },
+            [viewer.viewerCurrent, viewer.viewerMediaUrl, store.config.baseUrl]
+        );
+
+        // Shared spine for the viewer rerun buttons. "Default": resubmit
+        // the viewed image's stored prompt. With an Input target armed:
+        // feed the image into an injected copy of that workflow instead.
+        // Either way the generation is recorded under the CURRENTLY
+        // VIEWED workflow (same as every other rerun).
+        const runViewerGeneration = React.useCallback(
+            async (run: (snapshot: GenerationSnapshot) => void) => {
                 const generationId = viewer.viewerCurrent?.generationId;
                 if (!generationId || viewerActionBusy) return;
                 setViewerActionBusy(true);
                 try {
-                    const snapshot = await getViewerGenerationSnapshot(generationId);
-                    // Fire and forget — the pod button reports state.
-                    if (snapshot) void handlePodGenerate(pod, snapshot);
+                    if (viewerInputTargetId) {
+                        const { snapshot } = await buildViewerInputSnapshot(viewerInputTargetId);
+                        run(snapshot);
+                    } else {
+                        const snapshot = await getViewerGenerationSnapshot(generationId);
+                        if (snapshot) run(snapshot);
+                    }
                 } catch (err: any) {
                     alert(`Failed to regenerate: ${err.message ?? String(err)}`);
                 } finally {
                     setViewerActionBusy(false);
                 }
             },
-            [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationSnapshot, handlePodGenerate]
+            [
+                viewer.viewerCurrent,
+                viewerActionBusy,
+                viewerInputTargetId,
+                buildViewerInputSnapshot,
+                getViewerGenerationSnapshot
+            ]
         );
 
-        const handleViewerCreateWorkflow = React.useCallback(async () => {
+        const handleViewerGenerate = React.useCallback(() => {
+            // Fire and forget — the spawned "#N" button reports state.
+            void runViewerGeneration((snapshot) => void handleGenerate(snapshot));
+        }, [runViewerGeneration, handleGenerate]);
+
+        const handleViewerPodGenerate = React.useCallback(
+            (pod: PodEntry) => {
+                // Fire and forget — the pod button reports state.
+                void runViewerGeneration((snapshot) => void handlePodGenerate(pod, snapshot));
+            },
+            [runViewerGeneration, handlePodGenerate]
+        );
+
+        const handleViewerAutoGenerate = React.useCallback(() => {
+            // Fire and forget — the picked pod's button reports state.
+            void runViewerGeneration((snapshot) => void handleAutoGenerate(snapshot));
+        }, [runViewerGeneration, handleAutoGenerate]);
+
+        const handleViewerForkWorkflow = React.useCallback(async () => {
             const generationId = viewer.viewerCurrent?.generationId;
             if (!generationId || viewerActionBusy) return;
             setViewerActionBusy(true);
             try {
-                const snapshot = await getViewerGenerationSnapshot(generationId);
-                if (!snapshot) return;
-                // Copy the stored original workflow json VERBATIM — no
-                // parse → re-serialize round trip, so widgets/links/groups
-                // arrive exactly as stored.
-                const created = await createWorkflow({
-                    name: generationId,
-                    description: store.selectedWorkflow
-                        ? `Created from generation "${generationId}" of workflow "${store.selectedWorkflow.name}".`
-                        : `Created from generation "${generationId}".`,
-                    raw: snapshot
-                });
+                let snapshot: GenerationSnapshot | null;
+                let name: string;
+                let description: string;
+                if (viewerInputTargetId) {
+                    // Fork the SELECTED workflow with the viewed image fed
+                    // into its Input fields — the fed copy becomes the new
+                    // workflow (the selected one stays untouched).
+                    const fed = await buildViewerInputSnapshot(viewerInputTargetId);
+                    snapshot = fed.snapshot;
+                    name = `${fed.name} (Fork)`;
+                    description =
+                        `Fork of workflow "${fed.name}" with the image of generation "${generationId}" ` +
+                        'fed into its Input fields.';
+                } else {
+                    // Copy the stored original workflow json VERBATIM — no
+                    // parse → re-serialize round trip, so widgets/links/groups
+                    // arrive exactly as stored.
+                    snapshot = await getViewerGenerationSnapshot(generationId);
+                    if (!snapshot) return;
+                    name = generationId;
+                    description = store.selectedWorkflow
+                        ? `Forked from generation "${generationId}" of workflow "${store.selectedWorkflow.name}".`
+                        : `Forked from generation "${generationId}".`;
+                }
+                const created = await createWorkflow({ name, description, raw: snapshot });
                 // Load the new workflow the same way the sidebar does.
                 viewer.closeViewer();
                 await selectWorkflow(created.id);
             } catch (err: any) {
-                alert(`Failed to create workflow: ${err.message ?? String(err)}`);
+                alert(`Failed to fork workflow: ${err.message ?? String(err)}`);
             } finally {
                 setViewerActionBusy(false);
             }
-        }, [viewer.viewerCurrent, viewerActionBusy, getViewerGenerationSnapshot, createWorkflow, store.selectedWorkflow, viewer, selectWorkflow]);
+        }, [
+            viewer.viewerCurrent,
+            viewerActionBusy,
+            viewerInputTargetId,
+            buildViewerInputSnapshot,
+            getViewerGenerationSnapshot,
+            createWorkflow,
+            store.selectedWorkflow,
+            viewer,
+            selectWorkflow
+        ]);
 
         // ── OUTPUT tab view mode (list vs thumbnail masonry grid) ──────
 
@@ -274,9 +364,6 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             titleClickable={isEditingSaved}
                             onTitleClick={actions.openRename}
                             loadWarning={store.loadWarning}
-                            agentCount={agentCount}
-                            agentRunning={agentRunning}
-                            onSpawnAgent={handleSpawnAgent}
                         />
                     }
                     sidebar={
@@ -303,10 +390,11 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             onSelectTab={editor.setContentTab}
                             promptFields={editor.promptFields}
                             promptEntries={editor.promptEntries}
-                            executingNodeId={executingNodeId}
+                            inputFields={editor.inputFields}
                             updateNodeWidget={editor.updateNodeWidget}
                             toggleNodeBypass={editor.toggleNodeBypass}
                             togglePromptField={editor.togglePromptField}
+                            toggleInputField={editor.toggleInputField}
                             onCopyJson={editor.handleCopyJson}
                             onClone={actions.handleClone}
                             generations={store.generations}
@@ -325,7 +413,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             nodeCount={editor.nodes.length}
                             onPodGenerate={handlePodGenerate}
                             onGenerate={handleGenerate}
-                            contentTab={editor.contentTab}
+                            onAutoGenerate={handleAutoGenerate}
                             outputView={outputView}
                             onOutputViewChange={setOutputView}
                         />
@@ -373,7 +461,11 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                         pods={pods}
                         onGenerate={handleViewerGenerate}
                         onPodGenerate={handleViewerPodGenerate}
-                        onCreateWorkflow={handleViewerCreateWorkflow}
+                        onAutoGenerate={handleViewerAutoGenerate}
+                        onForkWorkflow={handleViewerForkWorkflow}
+                        inputTargets={inputTargets}
+                        inputTargetId={viewerInputTargetId}
+                        onInputTargetChange={setViewerInputTargetId}
                         actionBusy={viewerActionBusy}
                     />
                 )}

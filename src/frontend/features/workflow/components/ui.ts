@@ -1,7 +1,7 @@
 // Shared styled primitives for the workflow dashboard components.
 //
 // Extracted verbatim from the original CloudTab.tsx — buttons, badges,
-// spinner, tab buttons, header widgets and the node-card building blocks
+// tab buttons, header widgets and the node-card building blocks
 // shared by WorkflowNodeCard and SubgraphNodeCard.
 
 import styled from '@emotion/styled';
@@ -64,16 +64,6 @@ export const BadgeDot = styled('span')({
     flex: '0 0 auto'
 });
 
-export const SpinnerEl = styled('span')({
-    display: 'inline-block',
-    width: 12,
-    height: 12,
-    border: `2px solid rgba(129, 140, 248, 0.30)`,
-    borderTopColor: theme.accent,
-    borderRadius: '50%',
-    animation: 'sg-spin 700ms linear infinite'
-});
-
 // TabBtn — a tab-strip item for the content area switcher. The active tab
 // gets an accent underline (via the style prop) that overlaps the strip's
 // 1px bottom border (marginBottom: -1).
@@ -115,29 +105,6 @@ export const HeaderTitle = styled('span')({
     letterSpacing: 0.2,
     whiteSpace: 'nowrap' as const,
     userSelect: 'none' as const
-});
-
-export const SpawnAgentBtn = styled('button')({
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 34,
-    height: 34,
-    flex: '0 0 auto',
-    borderRadius: theme.radiusMd,
-    border: `1px solid ${theme.accent}`,
-    backgroundColor: theme.accent,
-    color: '#ffffff',
-    cursor: 'pointer',
-    fontSize: theme.fontSize.xl,
-    lineHeight: 1,
-    padding: 0,
-    fontWeight: 600,
-    transition: `background-color ${theme.transition}, opacity ${theme.transition}`,
-    '&:disabled': {
-        opacity: 0.5,
-        cursor: 'not-allowed'
-    }
 });
 
 // ── Shared layout / feedback ──────────────────────────────────────────

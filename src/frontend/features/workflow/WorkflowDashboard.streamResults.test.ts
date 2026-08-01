@@ -3,10 +3,9 @@
 //
 // The ComfyUI-CloudClient save nodes (ClientImageSaveNode / ClientVideoSaveNode
 // / FileCompressor) emit `server_client_data` events via PromptServer.send_sync
-// with { files: [{ filename, data (raw base64), format }], prompt_id }. Both
-// stream consumers (server-side cloud-prompt background processor and the
-// client-side spawn agent) turn these into generation results through
-// extractServerClientDataResults.
+// with { files: [{ filename, data (raw base64), format }], prompt_id }. The
+// stream consumer (the server-side cloud-prompt background processor) turns
+// these into generation results through extractServerClientDataResults.
 //
 // Verifies:
 //   1. Non-server_client_data events produce nothing.

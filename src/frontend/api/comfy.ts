@@ -39,6 +39,14 @@ export type WorkflowMeta = {
     createdDate: string;
     modifiedDate: string;
     tags?: string[];
+    /**
+     * Widget keys ("<nodeId>:<inputName>") marked as workflow Inputs in
+     * the PROMPT tab (persisted in the workflow json as extra.inputFields
+     * and mirrored into meta.json). Workflows with Inputs appear in the
+     * result viewer's preview dropdown — picking one feeds the viewed
+     * image's base64 data stream into the marked fields and runs it.
+     */
+    inputFields?: string[];
 };
 
 export type WorkflowNode = {

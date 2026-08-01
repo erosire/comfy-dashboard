@@ -27,7 +27,6 @@ import { WidgetValueEditor } from './WidgetValueEditor';
 
 export type WorkflowNodeCardProps = {
     node: UINode;
-    executingNodeId: string | null;
     promptFields: Set<string>;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
     toggleNodeBypass: (nodeId: string) => void;
@@ -35,45 +34,36 @@ export type WorkflowNodeCardProps = {
 };
 
 export const WorkflowNodeCard: React.FC<WorkflowNodeCardProps> = React.memo(
-    ({ node, executingNodeId, promptFields, updateNodeWidget, toggleNodeBypass, togglePromptField }) => {
+    ({ node, promptFields, updateNodeWidget, toggleNodeBypass, togglePromptField }) => {
         const isSubgraph = !!node.subgraphDef;
         const registryEntry = comfyNodeRegistry[node.classType];
         const isUnregistered = !isSubgraph && !registryEntry;
-        const isExecuting = node.id === executingNodeId;
         const isBypassed = node.mode === 4;
         return (
             <NodeCard
                 data-testid={`cloud-node-${node.id}`}
                 style={{
-                    ...(isExecuting
+                    ...(isUnregistered
                         ? {
-                              border: `2px solid ${theme.accent}`,
-                              backgroundColor: theme.accentSoft,
-                              boxShadow: `0 0 12px rgba(129, 140, 248, 0.35)`
+                              border: `1px solid ${theme.dangerBorder}`,
+                              backgroundColor: theme.dangerSoft
                           }
-                        : isUnregistered
-                          ? {
-                                border: `1px solid ${theme.dangerBorder}`,
-                                backgroundColor: theme.dangerSoft
-                            }
-                          : isSubgraph
-                            ? { border: `1px solid ${theme.accent}40` }
-                            : undefined),
+                        : isSubgraph
+                          ? { border: `1px solid ${theme.accent}40` }
+                          : undefined),
                     // Bypassed nodes render half-transparent as a "not in the prompt" indicator.
                     opacity: isBypassed ? 0.25 : undefined
                 }}
             >
                 <NodeHeader
                     style={{
-                        backgroundColor: isExecuting
-                            ? 'rgba(129, 140, 248, 0.25)'
-                            : node.color
-                              ? node.color
-                              : isUnregistered
-                                ? 'rgba(248, 113, 113, 0.20)'
-                                : isSubgraph
-                                  ? 'rgba(129, 140, 248, 0.15)'
-                                  : undefined
+                        backgroundColor: node.color
+                            ? node.color
+                            : isUnregistered
+                              ? 'rgba(248, 113, 113, 0.20)'
+                              : isSubgraph
+                                ? 'rgba(129, 140, 248, 0.15)'
+                                : undefined
                     }}
                 >
                     <div
@@ -84,18 +74,6 @@ export const WorkflowNodeCard: React.FC<WorkflowNodeCardProps> = React.memo(
                             minWidth: 0
                         }}
                     >
-                        {isExecuting && (
-                            <span
-                                style={{
-                                    fontSize: theme.fontSize.xs,
-                                    color: theme.accent,
-                                    marginRight: 2
-                                }}
-                                title="Currently executing"
-                            >
-                                ▶
-                            </span>
-                        )}
                         {isSubgraph && (
                             <span
                                 style={{
@@ -364,7 +342,6 @@ export const WorkflowNodeCard: React.FC<WorkflowNodeCardProps> = React.memo(
                                         node={inner}
                                         updateNodeWidget={updateNodeWidget}
                                         toggleNodeBypass={toggleNodeBypass}
-                                        executingNodeId={executingNodeId}
                                         promptFields={promptFields}
                                         togglePromptField={togglePromptField}
                                     />

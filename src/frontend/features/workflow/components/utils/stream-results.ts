@@ -13,10 +13,9 @@
 //     ("mp4" | "webm" | "gif" | "png" | "jpeg" | "zip" | …).
 //
 // This module extracts the files of the second shape into generation-result
-// items (the same structural type the generation store persists), so both
-// stream consumers — the server-side background processor in
-// endpoints/cloud/cloud-prompt.ts and the client-side spawn agent in
-// useSpawnAgent.ts — capture them identically.
+// items (the same structural type the generation store persists), so the
+// stream consumer — the server-side background processor in
+// endpoints/cloud/cloud-prompt.ts — captures them identically.
 
 import { base64ByteSize } from './pod-utils';
 

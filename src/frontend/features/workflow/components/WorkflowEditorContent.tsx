@@ -42,10 +42,13 @@ export type WorkflowEditorContentProps = {
     onSelectTab: (tab: EditorContentTab) => void;
     promptFields: Set<string>;
     promptEntries: PromptWidgetRef[];
-    executingNodeId: string | null;
+    /** Keys of widgets marked as workflow Inputs (PROMPT-tab Input chips). */
+    inputFields: Set<string>;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
     toggleNodeBypass: (nodeId: string) => void;
     togglePromptField: (node: UINode, widgetIdx: number) => void;
+    /** Toggle a PROMPT-tab field's Input marking. */
+    toggleInputField: (node: UINode, widgetIdx: number) => void;
     onCopyJson: () => void;
     onClone: () => void;
     generations: GenerationSummary[];
@@ -74,10 +77,11 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
     onSelectTab,
     promptFields,
     promptEntries,
-    executingNodeId,
+    inputFields,
     updateNodeWidget,
     toggleNodeBypass,
     togglePromptField,
+    toggleInputField,
     onCopyJson,
     onClone,
     generations,
@@ -134,7 +138,6 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
                     {contentTab === 'json' && (
                         <JsonNodePane
                             nodes={nodes}
-                            executingNodeId={executingNodeId}
                             promptFields={promptFields}
                             updateNodeWidget={updateNodeWidget}
                             toggleNodeBypass={toggleNodeBypass}
@@ -150,6 +153,8 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
                             entries={promptEntries}
                             togglePromptField={togglePromptField}
                             updateNodeWidget={updateNodeWidget}
+                            inputFields={inputFields}
+                            toggleInputField={toggleInputField}
                         />
                     )}
 
@@ -178,7 +183,7 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
                     into ComfyUI), Clone, then Save on the right. Hidden
                     on the OUTPUT tab, where none of the actions apply.
                     The pod run controls (#N) live in the footer,
-                    immediately left of Generate. */}
+                    immediately right of New. */}
                 {isEditingSaved && contentTab !== 'results' && (
                     <WorkflowActionBar
                         saving={saving}

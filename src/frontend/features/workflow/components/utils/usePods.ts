@@ -1,12 +1,13 @@
-// Cloud pod lifecycle — pod creation/reuse for Generate + "#N" buttons,
-// run-state sync from polled generations, and the keepalive heartbeat that
-// detects dead pod_urls.
+// Cloud pod lifecycle — pod creation/reuse for the New / "#N" / Auto
+// buttons, run-state sync from polled generations, and the keepalive
+// heartbeat that detects dead pod_urls.
 //
 // Extracted from the original CloudTab.tsx. Behaviour notes preserved:
-//   - Generate is NEVER blocked: every click spawns a fresh pod, as fast
+//   - New is NEVER blocked: every click spawns a fresh pod, as fast
 //     as the user can click. Per-pod status lives on the "#N" button.
 //   - Pods accept concurrent jobs: each "#N" click queues another job; the
-//     server scopes each submission with its own client_id.
+//     server scopes each submission with its own client_id. "Auto" queues
+//     on the least-loaded ready pod (see pickLeastLoadedPod).
 //   - Heartbeat probes every POD_HEARTBEAT_MS keep pods warm and accrue
 //     strikes; MAX_POD_FAILURES consecutive failures remove the pod.
 
@@ -16,7 +17,7 @@ import { cloud, cloudPrompt } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
 import { MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
-import { podLetter } from './pod-utils';
+import { podLetter, pickLeastLoadedPod } from './pod-utils';
 
 /**
  * Local-timestamp suffix for default generation names: YYYYMMDD-HHMMSS
@@ -60,7 +61,10 @@ export type UsePodsParams = {
 /**
  * Snapshot override for the result viewer's rerun buttons: the source
  * generation's stored original workflow json — resubmitted as-is, so
- * chained reruns always carry the same lossless document.
+ * chained reruns always carry the same lossless document. Also used by
+ * the viewer's Input-feeding path: an in-memory copy of another
+ * workflow's document with the viewed image fed into its Input fields
+ * (the generation is still recorded under the workflow being viewed).
  */
 export type GenerationSnapshot = Record<string, unknown>;
 
@@ -112,8 +116,9 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     }, [generations]);
 
     // ── Run a generation on a cloud pod ────────────────────────────
-    // Shared by "Generate" (spawns a fresh pod), "#N" (reuses a pod) and
-    // the result viewer's rerun buttons.
+    // Shared by "New" (spawns a fresh pod), "#N" (reuses a pod), "Auto"
+    // (load-balances onto the least-loaded pod) and the result viewer's
+    // rerun buttons.
     //
     // 1. Takes the snapshot document: the CURRENT editor serialization
     //    (every widget edit included) by default, or a stored generation's
@@ -193,16 +198,16 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow]
     );
 
-    // ── Generate workflow ──────────────────────────────────────────
+    // ── New workflow ───────────────────────────────────────────────
     // Creates a cloud pod first, then runs a new generation snapshot on it
     // via POST /v1/comfy/cloud/prompt. The "#N" button appears
     // IMMEDIATELY on click — in "spawning" state (spinner) while the
     // pod_url is being resolved — then flips to ready. Clicking a ready
     // #N does the same thing but reuses that pod (skipping pod creation).
     //
-    // Generate is NEVER blocked: every click spawns a fresh pod, as fast
+    // New is NEVER blocked: every click spawns a fresh pod, as fast
     // as the user can click. Per-pod status (spawning, running, done/error)
-    // lives on the individual "#N" button, not on Generate.
+    // lives on the individual "#N" button, not on New.
     //
     // generationOverride: rerun with a stored generation snapshot (result
     // viewer) instead of building from the editor tree.
@@ -258,7 +263,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         }
     }, [nodes.length, editingWorkflowId, baseUrl, runGenerationOnPod]);
 
-    // ── Pod button (A00): same as Generate but reuses an existing pod_url ──
+    // ── Pod button (A00): same as New but reuses an existing pod_url ──
     // NEVER blocked while running: each click queues ANOTHER job on the
     // pod. The server scopes each submission with its own client_id and
     // filters the shared pod stream by prompt_id, so every generation
@@ -279,6 +284,32 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             }
         },
         [nodes.length, editingWorkflowId, runGenerationOnPod]
+    );
+
+    // ── Auto button: queue on the least-loaded ready pod ───────────
+    // The load balancer — never spawns anything; just delegates to the
+    // pod button path with pickLeastLoadedPod's choice. No-ops when no
+    // pod is ready (the button renders disabled then anyway).
+    //
+    // generationOverride: rerun with a stored generation snapshot (result
+    // viewer) instead of building from the editor tree.
+
+    const handleAutoGenerate = React.useCallback(
+        async (generationOverride?: GenerationSnapshot) => {
+            // Read through the ref — a click must see the freshest queue
+            // depths, not the counts from the last render's closure.
+            const pod = pickLeastLoadedPod(podsRef.current);
+            if (!pod) {
+                console.log('[Auto] No ready pod — click "New" to spawn one first.');
+                return;
+            }
+            console.log(
+                `[Auto] Pod#${pod.podNumber} picked — least loaded ` +
+                    `(${pod.activeGenerationIds.length} job${pod.activeGenerationIds.length !== 1 ? 's' : ''} in flight)`
+            );
+            await handlePodGenerate(pod, generationOverride);
+        },
+        [handlePodGenerate]
     );
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
@@ -359,5 +390,5 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         return () => clearInterval(interval);
     }, [baseUrl, strikePod]);
 
-    return { pods, handleGenerate, handlePodGenerate };
+    return { pods, handleGenerate, handlePodGenerate, handleAutoGenerate };
 }

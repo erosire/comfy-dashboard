@@ -1,5 +1,7 @@
 // Pod naming & payload helpers for the workflow dashboard.
 
+import type { PodEntry } from './types';
+
 /** Approximate byte size of a base64 payload (accounts for padding). */
 export function base64ByteSize(b64: string): number {
     const padding = b64.endsWith('==') ? 2 : b64.endsWith('=') ? 1 : 0;
@@ -39,4 +41,22 @@ export function podLetter(podNumber: number): string {
  */
 export function podButtonLabel(podNumber: number, inFlight: number): string {
     return `${podLetter(podNumber)}${String(inFlight).padStart(2, '0')}`;
+}
+
+/**
+ * "Auto" load-balancer pick — the eligible pod with the SMALLEST in-flight
+ * queue. Eligibility mirrors the pod buttons themselves: status 'ready'
+ * with a resolved pod_url and no heartbeat strikes blocking it. Ties go to
+ * the oldest pod (array order == spawn order). Null when nothing can take
+ * a job — the Auto button stays disabled until a pod is ready.
+ */
+export function pickLeastLoadedPod(pods: PodEntry[]): PodEntry | null {
+    let best: PodEntry | null = null;
+    for (const p of pods) {
+        if (p.status !== 'ready' || !p.pod_url) continue;
+        if (!best || p.activeGenerationIds.length < best.activeGenerationIds.length) {
+            best = p;
+        }
+    }
+    return best;
 }

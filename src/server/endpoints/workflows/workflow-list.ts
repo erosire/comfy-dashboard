@@ -22,6 +22,8 @@ type WorkflowMeta = {
     createdDate: string;
     modifiedDate: string;
     tags?: string[];
+    /** Widget keys marked as Inputs (mirrored from raw.extra.inputFields). */
+    inputFields?: string[];
 };
 
 export const workflowList = asHandlerMethod(async (_, parameters, variables) => {
@@ -52,7 +54,9 @@ export const workflowList = asHandlerMethod(async (_, parameters, variables) => 
                 nodeCount: typeof data.nodeCount === 'number' ? data.nodeCount : 0,
                 createdDate: data.createdDate ?? '',
                 modifiedDate: data.modifiedDate ?? '',
-                tags: Array.isArray(data.tags) ? data.tags : []
+                tags: Array.isArray(data.tags) ? data.tags : [],
+                // Legacy metas predate the mirror — absent means no Inputs.
+                inputFields: Array.isArray(data.inputFields) ? data.inputFields : []
             };
 
             if (searchQuery && searchQuery.trim()) {

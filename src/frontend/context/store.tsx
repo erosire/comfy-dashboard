@@ -213,7 +213,8 @@ export const DashboardStoreProvider: React.FC<{
                               nodeCount: workflow.nodeCount,
                               createdDate: workflow.createdDate,
                               modifiedDate: workflow.modifiedDate,
-                              tags: workflow.tags
+                              tags: workflow.tags,
+                              inputFields: workflow.inputFields
                           }
                         : w
                 ),

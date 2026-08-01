@@ -20,6 +20,7 @@ import { parseWorkflowJson } from './workflow-parser';
 import { renumberNodes, sortNodesDeep } from './workflow-sort';
 import { applyWidgetEditsToRaw } from './workflow-serialize';
 import { collectPromptWidgets, promptWidgetKey, readSavedPromptFields, writePromptFieldsToRaw } from './prompt-fields';
+import { readSavedInputFields, writeInputFieldsToRaw } from './input-fields';
 import { useNodeTree } from './useNodeTree';
 
 export type UseWorkflowEditorParams = {
@@ -60,6 +61,11 @@ export function useWorkflowEditor({
     // widget label in the JSON layout toggles its key here. Persisted into
     // the workflow json (extra.promptFields) via Save so it survives reload.
     const [promptFields, setPromptFields] = React.useState<Set<string>>(new Set());
+    // Keys of widgets marked as workflow "Inputs" from the PROMPT tab —
+    // external data entry points the result viewer can feed (a Universal
+    // Data Input takes the viewed image's base64 stream). Persisted into
+    // the workflow json (extra.inputFields) via Save, like promptFields.
+    const [inputFields, setInputFields] = React.useState<Set<string>>(new Set());
     const [saving, setSaving] = React.useState(false);
 
     // When selectedWorkflow changes, parse its raw JSON into nodes.
@@ -79,6 +85,8 @@ export function useWorkflowEditor({
             // the PROMPT tab becomes the active view.
             const fields = readSavedPromptFields(selectedWorkflow.raw, parsed);
             setPromptFields(fields);
+            // Restore the saved Input markings alongside.
+            setInputFields(readSavedInputFields(selectedWorkflow.raw, parsed));
             setContentTab(fields.size > 0 ? 'prompt' : 'json');
         }
     }, [selectedWorkflow, setNodes]);
@@ -119,6 +127,8 @@ export function useWorkflowEditor({
                     // Dropped files may carry a saved PROMPT selection too.
                     const fields = readSavedPromptFields(parsed, uiNodes);
                     setPromptFields(fields);
+                    // …and saved Input markings.
+                    setInputFields(readSavedInputFields(parsed, uiNodes));
                     setContentTab(fields.size > 0 ? 'prompt' : 'json');
                 } catch {
                     alert('Invalid JSON file');
@@ -162,6 +172,21 @@ export function useWorkflowEditor({
         if (!widget) return;
         const key = promptWidgetKey(node, widget);
         setPromptFields((prev) => {
+            const next = new Set(prev);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            return next;
+        });
+    }, []);
+
+    // Input marking toggle — the "Input" chip on a PROMPT-tab card. Marks
+    // the field as an external data entry point (used by the result
+    // viewer's workflow dropdown); the marking persists via Save.
+    const toggleInputField = React.useCallback((node: UINode, widgetIdx: number) => {
+        const widget = node.widgets.find((w) => w.index === widgetIdx);
+        if (!widget) return;
+        const key = promptWidgetKey(node, widget);
+        setInputFields((prev) => {
             const next = new Set(prev);
             if (next.has(key)) next.delete(key);
             else next.add(key);
@@ -225,8 +250,11 @@ export function useWorkflowEditor({
 
     const serializeCurrentRaw = React.useCallback((): Record<string, unknown> | null => {
         if (!rawJson) return null;
-        return writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields);
-    }, [rawJson, nodes, promptFields]);
+        return writeInputFieldsToRaw(
+            writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields),
+            inputFields
+        );
+    }, [rawJson, nodes, promptFields, inputFields]);
 
     // ── Save workflow edits ────────────────────────────────────────────
     // Persist the editor tree's widget edits back into the stored workflow
@@ -257,6 +285,7 @@ export function useWorkflowEditor({
         setRawJson(null);
         setFileName('');
         setPromptFields(new Set());
+        setInputFields(new Set());
         setContentTab('json');
     }, [setNodes]);
 
@@ -269,10 +298,12 @@ export function useWorkflowEditor({
         setContentTab,
         promptFields,
         promptEntries,
+        inputFields,
         saving,
         updateNodeWidget,
         toggleNodeBypass,
         togglePromptField,
+        toggleInputField,
         handleDrop,
         handleDragOver,
         handleDragLeave,

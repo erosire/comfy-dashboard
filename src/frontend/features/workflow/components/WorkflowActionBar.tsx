@@ -3,7 +3,7 @@
 // omits it); Copy (JSON tab only — it copies the workflow json for
 // pasting into ComfyUI), Clone, then Save on the right. Hidden on the
 // OUTPUT tab, where none of the actions apply. The pod run controls
-// (#N) live in the footer, immediately left of Generate.
+// (#N) live in the footer, immediately right of New.
 //
 // Extracted verbatim from the original CloudTab.tsx.
 

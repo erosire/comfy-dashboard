@@ -1,12 +1,12 @@
 // DashboardHeaderControls — the dashboard's header fragment: sidebar
-// toggle, the workflow title (click to rename when saved), the load-warning
-// badge, the agent counter and the spawn-agent button.
+// toggle, the workflow title (click to rename when saved) and the
+// load-warning badge.
 //
 // Extracted verbatim from the original CloudTab.tsx header fragment.
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { Badge, HeaderTitle, SpawnAgentBtn, SpinnerEl, ToggleButton } from './ui';
+import { Badge, HeaderTitle, ToggleButton } from './ui';
 
 export type DashboardHeaderControlsProps = {
     onToggleSidebar: () => void;
@@ -16,9 +16,6 @@ export type DashboardHeaderControlsProps = {
     titleClickable: boolean;
     onTitleClick: () => void;
     loadWarning?: string;
-    agentCount: number;
-    agentRunning: boolean;
-    onSpawnAgent: () => void;
 };
 
 export const DashboardHeaderControls: React.FC<DashboardHeaderControlsProps> = ({
@@ -26,10 +23,7 @@ export const DashboardHeaderControls: React.FC<DashboardHeaderControlsProps> = (
     title,
     titleClickable,
     onTitleClick,
-    loadWarning,
-    agentCount,
-    agentRunning,
-    onSpawnAgent
+    loadWarning
 }) => (
     <>
         <ToggleButton onClick={onToggleSidebar} className="sg-hover" aria-label="Toggle sidebar">
@@ -49,30 +43,5 @@ export const DashboardHeaderControls: React.FC<DashboardHeaderControlsProps> = (
         )}
 
         <div style={{ flex: '1 1 auto' }} />
-
-        {agentCount > 0 && (
-            <Badge
-                style={{
-                    marginRight: 6,
-                    color: agentRunning ? theme.accent : theme.success,
-                    backgroundColor: agentRunning ? theme.accentSoft : theme.successSoft,
-                    border: `1px solid ${agentRunning ? theme.accent : theme.success}`,
-                    fontWeight: 600,
-                    cursor: 'default'
-                }}
-                title={`${agentCount} agent${agentCount !== 1 ? 's' : ''} spawned`}
-            >
-                {agentCount}
-            </Badge>
-        )}
-
-        <SpawnAgentBtn
-            className="sg-primary"
-            onClick={onSpawnAgent}
-            disabled={agentRunning}
-            title={agentRunning ? 'Agent running...' : 'Spawn agent to run generations'}
-        >
-            {agentRunning ? <SpinnerEl /> : '+'}
-        </SpawnAgentBtn>
     </>
 );
