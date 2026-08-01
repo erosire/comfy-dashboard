@@ -2,39 +2,61 @@
 //
 // GET /v1/comfy/workflows/:id/generate/:generate_id/result/:index
 //
-// Streams a single generation result (image or video) back as raw binary
-// with its real Content-Type, so the URL can be dropped straight into
-// <img src=...> / <video src=...> — no base64 JSON payloads, no client-side
-// blob conversion.
+// Answers a single generation result (image/video/audio) so the URL can be
+// dropped straight into <img src=...> / <video src=...> / <audio src=...> —
+// no base64 JSON payloads, no client-side blob conversion.
 //
-// Result payloads come in two shapes (see GenerationResultItem.url):
-//   - `data:` URLs (base64, captured from the pod's event stream) — decoded
-//     here and streamed with the stored mimeType.
+// Result payloads come in three shapes (see GenerationResultItem.url):
+//   - `file:` references (the ONLY shape stored going forward — the payload
+//     lives as a plain file in the generation's assets folder): answered
+//     with a 302 redirect to the static /v1/comfy/media mount, which streams
+//     the file off disk (with byte-range support) — this endpoint never
+//     touches the bytes. The Location is ROOT-RELATIVE, so it resolves
+//     against whatever origin the client reached this server by (localhost,
+//     LAN IP, hostname) — the same json serves every interface correctly.
+//   - `data:` URLs (base64, from generations written before file-backed
+//     storage): MIGRATED ON FIRST READ — decoded once, written to asset
+//     files, the json rewritten with `file:` references — then served via
+//     redirect like any other file-backed result. The decode-and-stream
+//     path below only remains as the write-failure fallback (media stays
+//     viewable even if the asset write couldn't happen).
 //   - Remote http(s) URLs — answered with a 302 redirect so the upstream
 //     server hands the bytes over directly.
 //
-// Byte-range requests are honored for data: payloads (single ranges only) —
-// required by some browsers (notably Safari) before they will play <video>
-// at all, and what makes seeking/scrubbing work.
+// Byte-range requests are honored for the data: fallback path (single
+// ranges only). For file: payloads the static mount handles ranges itself,
+// after the redirect — that includes what browsers (notably Safari) need
+// for <video> playback and seeking.
 
 import { asHandlerMethod } from '@underload/service';
-import { readGenerationFile } from './generation-store';
+import {
+    FILE_URL_PREFIX,
+    RESULT_MIME_EXTENSIONS,
+    migrateGenerationAssets,
+    readGenerationFile
+} from './generation-store';
 
 /** Generation results are immutable snapshots — let the browser cache them. */
 const RESULT_CACHE_CONTROL = 'private, max-age=3600';
 
+/**
+ * Route prefix of the static media mount (see the staticRoutes registration
+ * in @underload/service's server.ts). Files are addressed as
+ * `<MEDIA_ROUTE_PREFIX>/<workflowId>/generation/<generateId>/<index>.<ext>`.
+ */
+const MEDIA_ROUTE_PREFIX = '/v1/comfy/media';
+
+/**
+ * The only file names this server ever writes into an assets folder
+ * (persistResultAssets): a result-array index plus an optional lowercase
+ * extension. Anything else in a `file:` reference means a hand-edited or
+ * foreign generation json — refused outright rather than letting a crafted
+ * reference try to escape the assets directory.
+ */
+const ASSET_FILE_NAME = /^\d+(\.[a-z0-9]+)?$/i;
+
 /** Best-known file extension per mime type, for the inline filename hint. */
-const MIME_EXTENSIONS: Record<string, string> = {
-    'image/png': '.png',
-    'image/jpeg': '.jpg',
-    'image/webp': '.webp',
-    'image/gif': '.gif',
-    'video/mp4': '.mp4',
-    'video/webm': '.webm',
-    'video/quicktime': '.mov',
-    'audio/mpeg': '.mp3',
-    'audio/wav': '.wav'
-};
+const MIME_EXTENSIONS: Record<string, string> = RESULT_MIME_EXTENSIONS;
 
 /**
  * Decode a `data:` URL payload to bytes. Returns null for non-data URLs,
@@ -86,7 +108,7 @@ function parseRangeHeader(
     return { start, end };
 }
 
-/** GET — Stream one result item (image/video) of a generation as raw binary. */
+/** GET — Serve one result item (image/video/audio) of a generation. */
 export const workflowGenerateResultGet = asHandlerMethod(async (context, parameters, variables) => {
     const projectRoot: string = variables.root;
     const workflowId = parameters.path.id;
@@ -104,10 +126,17 @@ export const workflowGenerateResultGet = asHandlerMethod(async (context, paramet
         return { status: 400, response: { error: 'index must be a non-negative integer' } };
     }
 
-    const entry = readGenerationFile(projectRoot, workflowId, generateId);
-    if (!entry) {
+    const loaded = readGenerationFile(projectRoot, workflowId, generateId);
+    if (!loaded) {
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
+
+    // One-time storage heal: generations written before file-backed results
+    // still hold inline base64 — move it to asset files and rewrite the
+    // json. After this the normal path below is always the redirect; the
+    // decode-and-stream branch only survives for items whose asset write
+    // failed this very request.
+    const entry = migrateGenerationAssets(projectRoot, workflowId, generateId, loaded);
 
     const item = entry.result[index];
     if (!item) {
@@ -116,6 +145,36 @@ export const workflowGenerateResultGet = asHandlerMethod(async (context, paramet
             response: {
                 error: `Result index ${index} not found — generation '${generateId}' has ${entry.result.length} result(s)`
             }
+        };
+    }
+
+    // File-backed payload (current storage) → let the static media mount
+    // serve the bytes off disk via a redirect. The Location is root-relative
+    // BY DESIGN: it resolves against whatever origin the client used (LAN
+    // IP included), so no host is ever baked into the stored json. Note the
+    // redirect target is built with new Response(...) — Response.redirect()
+    // rejects relative URLs in Node.
+    if (item.url.startsWith(FILE_URL_PREFIX)) {
+        const fileName = item.url.slice(FILE_URL_PREFIX.length);
+        if (!ASSET_FILE_NAME.test(fileName)) {
+            return {
+                status: 422,
+                response: { error: 'Result file reference is malformed' }
+            };
+        }
+        const location =
+            `${MEDIA_ROUTE_PREFIX}/${encodeURIComponent(workflowId)}` +
+            `/generation/${encodeURIComponent(generateId)}/${encodeURIComponent(fileName)}`;
+        return {
+            status: 302,
+            raw: new Response(null, {
+                status: 302,
+                headers: {
+                    'Location': location,
+                    'Cache-Control': RESULT_CACHE_CONTROL,
+                    'Access-Control-Allow-Origin': '*'
+                }
+            })
         };
     }
 
@@ -128,7 +187,10 @@ export const workflowGenerateResultGet = asHandlerMethod(async (context, paramet
         };
     }
 
-    // Stored payload is a base64 data: URL — decode and serve.
+    // FALLBACK: an inline base64 payload that could NOT be migrated to an
+    // asset file on this request (disk/permission failure — the json keeps
+    // the data: url and the migration retries on the next read). Decode and
+    // stream so the result stays viewable instead of erroring out.
     const decoded = decodeDataUrl(item.url);
     if (!decoded) {
         return {

@@ -10,7 +10,7 @@
 //     ClientVideoSaveNode, FileCompressor) via PromptServer.send_sync when
 //     they "save" their output back to the caller. `data` is RAW base64
 //     (no data: URI prefix) and `format` the lowercase file extension
-//     ("mp4" | "webm" | "gif" | "png" | "jpeg" | "zip" | …).
+//     ("mp4" | "webm" | "gif" | "png" | "jpeg" | "mp3" | "zip" | …).
 //
 // This module extracts the files of the second shape into generation-result
 // items (the same structural type the generation store persists), so the
@@ -27,7 +27,7 @@ export type StreamEventLike = {
 
 /** Structural mirror of the server store's GenerationResultItem. */
 export type StreamResultItem = {
-    type: 'image' | 'video';
+    type: 'image' | 'video' | 'audio';
     url: string;
     mimeType: string;
     size: number;
@@ -53,7 +53,9 @@ const FILE_FORMAT_MIME: Record<string, string> = {
     gif: 'image/gif',
     mp4: 'video/mp4',
     webm: 'video/webm',
-    mov: 'video/quicktime'
+    mov: 'video/quicktime',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav'
 };
 
 /** Extension of a filename, lowercase, '' when there is none. */
@@ -105,14 +107,15 @@ export function extractServerClientDataResults(event: StreamEventLike): Extracte
             payload = rawData;
         }
 
-        // Only viewable media becomes a generation result — the OUTPUT tab
-        // renders results as <img>/<video>; other payloads are skipped.
-        if (!/^image\//.test(mime) && !/^video\//.test(mime)) continue;
+        // Only viewable/playable media becomes a generation result — the
+        // OUTPUT tab renders results as <img>/<video>/<audio>; other
+        // payloads are skipped.
+        if (!/^image\//.test(mime) && !/^video\//.test(mime) && !/^audio\//.test(mime)) continue;
 
         out.push({
             filename,
             result: {
-                type: mime.startsWith('video/') ? 'video' : 'image',
+                type: mime.startsWith('video/') ? 'video' : mime.startsWith('audio/') ? 'audio' : 'image',
                 url: `data:${mime};base64,${payload}`,
                 mimeType: mime,
                 size: base64ByteSize(payload),

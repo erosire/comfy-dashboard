@@ -3,6 +3,16 @@
 // A generation json lives at:
 //   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>.json
 //
+// Result media payloads (image/video/audio, often megabytes each) are NOT
+// stored inside the json. At write time (cloud prompt endpoint, generation
+// PUT) they are persisted as plain files:
+//   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>/<index>.<ext>
+// and the json's result items reference them with a `file:` url (see
+// persistResultAssets). The result endpoint answers those with a 302 to the
+// static /v1/comfy/media mount, so the bytes are served off disk by the OS —
+// never parsed out of JSON, never buffered by an endpoint. Legacy entries
+// with inline `data:` base64 urls (and remote http(s) urls) keep working.
+//
 // Used by the workflow generate endpoints (CRUD) and by the cloud prompt
 // endpoint, which updates the same file server-side while it consumes a
 // pod's NDJSON stream in the background. Keeping the types + IO in one
@@ -12,11 +22,39 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export type GenerationResultItem = {
-    type: 'image' | 'video';
+    type: 'image' | 'video' | 'audio';
     url: string;
     mimeType: string;
     size: number;
     nodeId: string;
+};
+
+/**
+ * URL scheme marking a result payload stored as a PLAIN FILE on disk (in
+ * the generation's assets folder) instead of inline base64. The value after
+ * the prefix is the file name within that folder — always `<index>.<ext>`,
+ * written by persistResultAssets. Never an absolute path, never absolute
+ * URL: the result endpoint turns it into a root-relative /v1/comfy/media
+ * redirect, so whatever host a (LAN) client used to reach the server stays
+ * the host the media comes from.
+ */
+export const FILE_URL_PREFIX = 'file:';
+
+/**
+ * Best-known file extension per result MIME type — the asset files get
+ * real extensions so the static media mount infers the right Content-Type
+ * and browsers sniff nothing.
+ */
+export const RESULT_MIME_EXTENSIONS: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/webp': '.webp',
+    'image/gif': '.gif',
+    'video/mp4': '.mp4',
+    'video/webm': '.webm',
+    'video/quicktime': '.mov',
+    'audio/mpeg': '.mp3',
+    'audio/wav': '.wav'
 };
 
 /**
@@ -135,6 +173,137 @@ export function generationLogPath(root: string, workflowId: string, generateId: 
 }
 
 /**
+ * Directory holding a generation's media asset files — a sibling folder of
+ * its .json/.log named after the generation:
+ *
+ *   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>/
+ *
+ * Each file is named `<resultIndex>.<ext>` (see persistResultAssets), which
+ * keeps the json result array's `file:` references and the on-disk names in
+ * lockstep. Served over HTTP exclusively via the static /v1/comfy/media
+ * mount (whitelisted to media extensions — the .json/.log siblings are
+ * never served).
+ */
+export function generationAssetsDirPath(root: string, workflowId: string, generateId: string): string {
+    return path.join(
+        root,
+        'temporary/database/comfy-workflows',
+        workflowId,
+        'generation',
+        generateId
+    );
+}
+
+/**
+ * Decode a `data:` URL into its MIME and raw bytes. Returns null for
+ * non-data urls, non-base64 payloads, or undecodable input.
+ */
+function decodeDataUrlPayload(url: string): { mime: string; bytes: Buffer } | null {
+    if (!url.startsWith('data:')) return null;
+    const commaIdx = url.indexOf(',');
+    if (commaIdx === -1) return null;
+    const meta = url.substring(0, commaIdx);
+    const payload = url.substring(commaIdx + 1);
+    if (!/;base64/i.test(meta)) return null;
+    const mime = /^data:([^;,]*)/.exec(meta)?.[1] ?? 'application/octet-stream';
+    try {
+        return { mime, bytes: Buffer.from(payload, 'base64') };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Move inline `data:` payloads of a result array OUT of the json and into
+ * asset files on disk, returning the array with `file:` references in
+ * place of the data urls.
+ *
+ * Per item:
+ *   - `data:` url  → bytes written to `<assetsDir>/<index>.<ext>`; the item
+ *     is returned with `url: "file:<index>.<ext>"`, a normalized mimeType
+ *     and the exact decoded byte size.
+ *   - `file:` / `http(s):` (or anything else) → returned untouched.
+ *
+ * Writing is all-or-nothing PER ITEM: if a file write fails (disk full,
+ * permissions, …) that item keeps its original `data:` payload — the result
+ * endpoint serves `data:` urls as a legacy path, so nothing is ever lost,
+ * the run just doesn't get the file-system speedup for that item.
+ *
+ * The json with `file:` references stays small (KBs), which is the whole
+ * point: reads (list, refresh, result lookups) stop parsing megabytes of
+ * base64, and media bytes flow off disk untouched by JSON.stringify.
+ */
+export function persistResultAssets(
+    root: string,
+    workflowId: string,
+    generateId: string,
+    results: GenerationResultItem[]
+): GenerationResultItem[] {
+    const assetsDir = generationAssetsDirPath(root, workflowId, generateId);
+    let dirReady = false;
+
+    return results.map((item, index) => {
+        if (!item.url.startsWith('data:')) return item;
+        const decoded = decodeDataUrlPayload(item.url);
+        if (!decoded) return item; // malformed payload — keep as-is
+
+        const mime = item.mimeType || decoded.mime;
+        const ext = RESULT_MIME_EXTENSIONS[mime] ?? '';
+        const fileName = `${index}${ext}`;
+        try {
+            if (!dirReady) {
+                fs.mkdirSync(assetsDir, { recursive: true });
+                dirReady = true;
+            }
+            fs.writeFileSync(path.join(assetsDir, fileName), decoded.bytes);
+            return {
+                ...item,
+                url: `${FILE_URL_PREFIX}${fileName}`,
+                mimeType: mime,
+                size: decoded.bytes.length
+            };
+        } catch {
+            // Best-effort — on write failure keep the inline payload so the
+            // result stays servable through the legacy data: path.
+            return item;
+        }
+    });
+}
+
+/**
+ * One-time heal for generations stored before file-backed results: if the
+ * entry still carries inline `data:` result payloads, move them to asset
+ * files and rewrite the json with `file:` references. Returns the entry to
+ * serve from — migrated whenever possible, the ORIGINAL when the json
+ * rewrite fails (the read endpoints then hit their fallback path instead;
+ * the next read retries the migration). No-op when nothing inline remains.
+ *
+ * After one pass the generation json holds only small references — reads
+ * stop parsing megabytes of base64 and the media serves straight off disk.
+ */
+export function migrateGenerationAssets(
+    root: string,
+    workflowId: string,
+    generateId: string,
+    entry: GenerationEntry
+): GenerationEntry {
+    if (!entry.result.some((r) => r.url.startsWith('data:'))) return entry;
+
+    const migrated: GenerationEntry = {
+        ...entry,
+        result: persistResultAssets(root, workflowId, generateId, entry.result)
+    };
+    try {
+        writeGenerationFile(root, workflowId, generateId, migrated);
+    } catch {
+        // Best-effort — a failed rewrite never loses data: the asset files
+        // already exist and the original json stays authoritative until the
+        // next read retries.
+    }
+    return migrated;
+}
+
+/**
  * Append a timestamped line to the generation's .log file (next to its .json).
  *
  * Logging is best-effort: any write failure is swallowed so a broken log
@@ -201,14 +370,14 @@ export function writeGenerationFile(
 
 /**
  * Delete a generation's files — the json record and, best-effort, the
- * sibling .log trail. Returns false when the json doesn't exist (the
- * caller's 404 case).
+ * sibling .log trail and the media assets folder. Returns false when the
+ * json doesn't exist (the caller's 404 case).
  *
  * Deleting a still-processing generation is safe on the json side:
  * patchGenerationFile no-ops once the file is gone, so the cloud prompt
  * endpoint's background consumer can't resurrect the record. A consumer
- * mid-run may still append a fresh orphan .log afterwards — harmless, and
- * unavoidable without an execution-cancel mechanism.
+ * mid-run may still append a fresh orphan .log (or asset file) afterwards —
+ * harmless, and unavoidable without an execution-cancel mechanism.
  */
 export function deleteGenerationFiles(root: string, workflowId: string, generateId: string): boolean {
     const jsonPath = generationFilePath(root, workflowId, generateId);
@@ -218,6 +387,14 @@ export function deleteGenerationFiles(root: string, workflowId: string, generate
         fs.rmSync(generationLogPath(root, workflowId, generateId), { force: true });
     } catch {
         // Best-effort — a broken log removal never fails the delete.
+    }
+    try {
+        fs.rmSync(generationAssetsDirPath(root, workflowId, generateId), {
+            recursive: true,
+            force: true
+        });
+    } catch {
+        // Best-effort — media cleanup never fails the delete.
     }
     return true;
 }

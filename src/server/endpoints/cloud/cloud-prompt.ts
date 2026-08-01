@@ -34,6 +34,7 @@ import { extractServerClientDataResults } from '../../../frontend/features/workf
 import {
     appendGenerationLog,
     patchGenerationFile,
+    persistResultAssets,
     type GenerationResultItem,
     type StreamEvent
 } from '../workflows/generation-store';
@@ -264,17 +265,24 @@ async function processPodPromptInBackground(
         log(`Exception while processing: ${failureMessage}`);
     }
 
-    // Persist the final state — results into the generation json. The event
-    // progression is NOT stored: the .log file next to the json already
-    // carries the full chronological trail (a line per status change and
-    // per streamed event), which is sufficient to understand the run.
+    // Persist the final state — results into the generation json. Result
+    // payloads (base64 data: urls captured from the stream) are first moved
+    // onto disk as plain asset files; the json keeps only `file:` references
+    // to them (persistResultAssets). The event progression is NOT stored:
+    // the .log file next to the json already carries the full chronological
+    // trail (a line per status change and per streamed event), which is
+    // sufficient to understand the run.
     const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
     const completedDate = new Date().toISOString();
+    const persistedResults = persistResultAssets(root, workflowId, generationId, results);
+    if (results.some((r, i) => r.url !== persistedResults[i].url)) {
+        log(`Persisted result payload(s) to asset files under generation/${generationId}/`);
+    }
     if (failureMessage) {
         patchGenerationFile(root, workflowId, generationId, {
             status: 'failed',
             error: failureMessage,
-            result: results,
+            result: persistedResults,
             generatedTime: elapsed,
             completedDate
         });
@@ -287,7 +295,7 @@ async function processPodPromptInBackground(
         patchGenerationFile(root, workflowId, generationId, {
             status: 'completed',
             error: null,
-            result: results,
+            result: persistedResults,
             generatedTime: elapsed,
             completedDate
         });
@@ -478,9 +486,9 @@ function summarizeEventData(data: Record<string, unknown>): string {
 
 /**
  * Convert an `imagepreview.update` event into a result item.
- * The base64 data URL is kept as-is — it renders directly in <img src>
- * and, unlike blob URLs, survives a page reload since it lives in the
- * generation json.
+ * The base64 data URL is the capture-time shape — at persist time
+ * (persistResultAssets) its bytes are written to an asset file on disk and
+ * the stored entry keeps only a `file:` reference to it.
  */
 function extractPreviewResult(event: StreamEvent): GenerationResultItem | null {
     if (event.type !== 'imagepreview.update') return null;

@@ -6,10 +6,14 @@
 //     ├── meta.json
 //     └── generation/
 //           ├── YYYYMMDD-HHMMSS.json   ← { id, status, createdDate, prompt, result, ... }
-//           └── YYYYMMDD-HHMMSS.log    ← timestamped processing log, written by
-//                                        POST /v1/comfy/cloud/prompt while it
-//                                        consumes the pod's NDJSON stream. This
-//                                        log (not the json) is the event trail.
+//           ├── YYYYMMDD-HHMMSS.log    ← timestamped processing log, written by
+//           │                            POST /v1/comfy/cloud/prompt while it
+//           │                            consumes the pod's NDJSON stream. This
+//           │                            log (not the json) is the event trail.
+//           └── YYYYMMDD-HHMMSS/       ← media asset files (0.png, 1.mp4, ...) —
+//                                        the result payloads, referenced from the
+//                                        json's result[].url as "file:<index>.<ext>"
+//                                        and served via the /v1/comfy/media mount.
 //
 //   The snapshotted prompt is the request's optional { prompt } body when
 //   provided — the UI sends its serialized ORIGINAL workflow json (v0.4/v1
@@ -31,17 +35,19 @@
 // GET (one)  — Returns the complete GenerationEntry (prompt + result) for a
 //   single generate_id. Used when the agent needs the snapshotted prompt.
 //
-// DELETE     — Removes a generation snapshot: the json record and its
-//   sibling .log event trail. Deleting a still-processing generation does
-//   not cancel its pod run — the background stream consumer simply no-ops
-//   on the missing file.
+// DELETE     — Removes a generation snapshot: the json record, its sibling
+//   .log event trail, and its media assets folder. Deleting a still-processing
+//   generation does not cancel its pod run — the background stream consumer
+//   simply no-ops on the missing file.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 import {
     deleteGenerationFiles,
+    migrateGenerationAssets,
     patchGenerationFile,
+    persistResultAssets,
     readGenerationFile,
     toGenerationSummary,
     type GenerationEntry,
@@ -104,9 +110,13 @@ export const workflowGenerateList = asHandlerMethod(async (_, parameters, variab
         // readGenerationFile normalizes older files and returns null for
         // missing/corrupted entries — skip those. We project to a summary
         // so the list never carries the heavy prompt/result/stream fields.
-        const full = readGenerationFile(projectRoot, workflowId, entry.name.replace('.json', ''));
+        const genId = entry.name.replace('.json', '');
+        const full = readGenerationFile(projectRoot, workflowId, genId);
         if (!full) continue;
-        summaries.push(toGenerationSummary(full));
+        // Heal legacy inline-base64 results as the list sweeps by — each
+        // migration is a one-time file write + json rewrite; afterwards the
+        // generation only carries `file:` references.
+        summaries.push(toGenerationSummary(migrateGenerationAssets(projectRoot, workflowId, genId, full)));
     }
 
     // Sort by createdDate descending (newest first)
@@ -133,7 +143,10 @@ export const workflowGenerateGet = asHandlerMethod(async (_, parameters, variabl
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
 
-    return { status: 200, response: { generation: entry } };
+    // Heal legacy inline-base64 results on read — the API never hands
+    // base64 back out: the json is rewritten with file: references and the
+    // media serves off disk.
+    return { status: 200, response: { generation: migrateGenerationAssets(projectRoot, workflowId, generateId, entry) } };
 });
 
 /** POST — Create a new generation snapshot. */
@@ -240,6 +253,13 @@ export const workflowGenerateUpdate = asHandlerMethod(async (_, parameters, vari
 
     // Parse the request body from parameters.body
     const body = (parameters.body ?? {}) as GenerationPatch;
+
+    // A result array carrying inline `data:` payloads is first persisted to
+    // asset files on disk — the stored json keeps only `file:` references,
+    // so generation files stay small regardless of the write path.
+    if (body.result !== undefined) {
+        body.result = persistResultAssets(projectRoot, workflowId, generateId, body.result);
+    }
 
     // Merge updates — only overwrite provided fields
     const existing = patchGenerationFile(projectRoot, workflowId, generateId, body);

@@ -78,6 +78,20 @@ describe('extractServerClientDataResults', () => {
         expect(out[0].result.size).toBe(5); // "hello"
     });
 
+    it('captures mp3/wav files as audio results', () => {
+        const out = extractServerClientDataResults(
+            makeEvent([
+                { filename: 'track.mp3', data: HELLO_B64, format: 'mp3' },
+                { filename: 'tone.wav', data: HELLO_B64, format: 'wav' }
+            ])
+        );
+        expect(out.map((f) => [f.result.type, f.result.mimeType])).toEqual([
+            ['audio', 'audio/mpeg'],
+            ['audio', 'audio/wav']
+        ]);
+        expect(out[0].result.url).toBe(`data:audio/mpeg;base64,${HELLO_B64}`);
+    });
+
     it('captures multiple files from a single event', () => {
         const out = extractServerClientDataResults(
             makeEvent([

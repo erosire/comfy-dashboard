@@ -81,7 +81,7 @@ export type ServerStatus = {
 };
 
 export type GenerationResultItem = {
-    type: 'image' | 'video';
+    type: 'image' | 'video' | 'audio';
     url: string;
     mimeType: string;
     size: number;
@@ -391,11 +391,13 @@ export async function fetchGeneration(
     return (await response.json()) as { generation: GenerationEntry };
 }
 
-// Build the URL that streams a single generation result (image/video) as
-// raw binary with its real Content-Type. Point <img src> / <video src>
+// Build the URL that serves a single generation result (image/video/audio)
+// with its real Content-Type. Point <img src> / <video src> / <audio src>
 // straight at it — no need to fetch the full generation entry and convert
-// base64 data: URLs into blob URLs. The server honors byte-range requests,
-// so <video> playback + seeking works (including on Safari).
+// base64 data: URLs into blob URLs. File-backed results are 302-redirected
+// to the server's static media mount (which streams them off disk with
+// range support, so <video> playback + seeking works, including on Safari);
+// the browser follows that redirect transparently.
 export function generationResultUrl(
     baseUrl: string,
     workflowId: string,

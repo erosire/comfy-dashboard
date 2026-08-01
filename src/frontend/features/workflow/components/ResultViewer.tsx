@@ -154,8 +154,8 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                 }
             }}
             onTouchStart={(e) => {
-                // Don't hijack gestures on the video player controls.
-                if (e.target instanceof HTMLVideoElement) {
+                // Don't hijack gestures on the media player controls.
+                if (e.target instanceof HTMLVideoElement || e.target instanceof HTMLAudioElement) {
                     touchRef.current = null;
                     return;
                 }
@@ -265,6 +265,17 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                             maxHeight: isMobile ? '100dvh' : '80vh',
                             borderRadius: isMobile ? 0 : theme.radiusMd,
                             boxShadow: isMobile ? 'none' : '0 4px 24px rgba(0,0,0,0.5)'
+                        }}
+                    />
+                ) : mediaUrl && current?.type === 'audio' ? (
+                    <audio
+                        // Remount per item so the new media loads cleanly.
+                        key={`${current.generationId}:${current.resultIndex}`}
+                        src={mediaUrl}
+                        controls
+                        autoPlay
+                        style={{
+                            width: isMobile ? '90vw' : 480
                         }}
                     />
                 ) : null}

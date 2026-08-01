@@ -3,17 +3,19 @@ info:
   title: ComfyUI Dashboard API
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
-    CRUD for workflows,     generation snapshots, and a unified endpoint for
-    spawning/checking Beam cloud pods.     Prompt processing happens
+    CRUD for workflows, generation snapshots, and a unified endpoint for
+    spawning/checking Beam cloud pods. Prompt processing happens
     server-side: POST /v1/comfy/cloud/prompt (with workflow_id +
     generation_id) consumes the pod's NDJSON stream in the background and
     keeps the generation json updated — clients poll
     GET /v1/comfy/workflows/{id}/generate for progress instead of
-    streaming. Result media (images/videos) is streamed per item from
+    streaming. Result media (images/videos/audio) is persisted on disk as
+    plain asset files and served per item from
     GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index},
-    usable directly in <img>/<video> tags — clients never need to pull the
-    heavy base64 payloads stored in the generation json. Multiple
-    generations may be queued on the same pod
+    which 302-redirects to the static /v1/comfy/media mount (streamed off
+    disk with byte-range support) — usable directly in <img>/<video>/<audio>
+    tags, and the generation json only carries small file references.
+    Multiple generations may be queued on the same pod
     concurrently; each submission is scoped by its own client_id so only
     its job's events land in its generation json.
   version: 0.7.0
@@ -318,12 +320,14 @@ paths:
       summary: Get a single generation (full data)
       description: >-
         Returns the complete generation entry for the given workflow and
-        generate_id, including the snapshotted prompt and result payloads
-        (image/video data: URLs). The list endpoint
+        generate_id, including the snapshotted prompt and the result
+        references (`file:` asset urls — legacy inline-base64 entries are
+        migrated to files on read, never handed out as payloads). The list
+        endpoint
         (GET /v1/comfy/workflows/{id}/generate) returns only lightweight
-        summaries (no prompt, no result payloads) for fast loading, so the
+        summaries (no prompt, no result references) for fast loading, so the
         full entry must be fetched on demand per generation — typically only
-        when the snapshotted prompt is needed, since result media streams
+        when the snapshotted prompt is needed, since result media serves
         via
         GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}.
       tags:
@@ -394,12 +398,12 @@ paths:
       operationId: deleteGeneration
       summary: Delete a generation snapshot
       description: >-
-        Permanently removes a generation snapshot: the json record and its
-        sibling .log event trail. Note that deleting a still-pending or
+        Permanently removes a generation snapshot: the json record, its
+        sibling .log event trail, and its media assets folder
+        (`generation/{generate_id}/`). Note that deleting a still-pending or
         processing generation does NOT cancel its execution on the pod —
         the server's background stream consumer simply stops updating the
-        (now missing) file. Result bytes are stored INSIDE the generation
-        json (or at remote URLs), so no extra media files need cleanup.
+        (now missing) file.
       tags:
         - Workflows
       parameters:
@@ -430,23 +434,35 @@ paths:
   /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}:
     get:
       operationId: getGenerationResult
-      summary: Stream a single generation result (image/video)
+      summary: Serve a single generation result (image/video/audio)
       description: >-
-        Streams one result item of a generation back as raw binary with its
-        real Content-Type, so the URL can be used directly as
-        `<img src="...">` or `<video src="...">` — clients never need to pull
-        the full generation entry (megabytes of base64) just to preview an
-        output.
+        Serves one result item of a generation with its real Content-Type, so
+        the URL can be used directly as
+        `<img src="...">`, `<video src="...">`, or `<audio src="...">` —
+        clients never need to pull the full generation entry just to preview
+        an output.
 
         Behavior depends on how the result was persisted
         (see GenerationResultItem.url):
-        - **`data:` URL** (base64 payload captured from the pod's event
-          stream) — decoded server-side and streamed with the stored
-          `Content-Type`. `Accept-Ranges: bytes` is advertised and single
-          `Range: bytes=start-end` requests are honored (206 Partial
+        - **`file:` reference** (current storage — the payload lives as a
+          plain file in the generation's assets folder,
+          `generation/{generate_id}/{index}.{ext}`) — answered with a `302`
+          redirect (root-relative Location) to the static `/v1/comfy/media`
+          mount, which streams the file off disk: `Accept-Ranges: bytes`
+          advertised and `Range: bytes=start-end` honored (206 Partial
           Content), which some browsers (e.g. Safari) require before they
           will play `<video>` at all, and which enables seeking on large
-          payloads.
+          payloads. The endpoint itself never reads the bytes. The
+          root-relative redirect resolves against whatever origin the client
+          reached the server by (localhost, LAN IP, hostname), so the same
+          generation json serves every interface.
+        - **`data:` URL** (base64 payload, from generations written before
+          file-backed storage) — MIGRATED on first read: decoded once,
+          written to an asset file, and the generation json rewritten with
+          a `file:` reference; the request is then answered with the same
+          media-mount redirect. A decode-and-stream path (with the range
+          behavior above) remains only as the fallback for the case where
+          the asset write fails — nothing keeps serving base64 long-term.
         - **Remote http(s) URL** — answered with a `302` redirect so the
           upstream server delivers the bytes directly.
 
@@ -481,7 +497,9 @@ paths:
           required: false
           description: >-
             Optional byte range (e.g. `bytes=0-1023`) — served as 206 Partial
-            Content for data:-backed results.
+            Content for data:-backed results; for file-backed results the
+            browser re-sends it to the /v1/comfy/media mount after the
+            redirect, which honors it there.
           schema:
             type: string
       responses:
@@ -533,8 +551,10 @@ paths:
                 format: binary
         '302':
           description: >-
-            The result is stored as a remote URL — redirect to it so the
-            upstream server delivers the bytes.
+            The result is file-backed (root-relative redirect to the static
+            /v1/comfy/media mount, which streams the file off disk) or a
+            remote URL (redirect to it, so the upstream server delivers the
+            bytes). Followed transparently inside <img>/<video>/<audio>.
         '400':
           description: Missing/invalid path parameter (index not a non-negative integer)
           content:
@@ -1139,22 +1159,31 @@ components:
 
     GenerationResultItem:
       type: object
-      description: A single result from a generation (image or video).
+      description: A single result from a generation (image, video, or audio).
       properties:
         type:
           type: string
-          enum: [image, video]
+          enum: [image, video, audio]
         url:
           type: string
           description: >-
-            Persisted location of the result — a `data:` URL
-            (e.g. "data:image/png;base64,...") for previews captured from
-            the pod's event stream, or a remote URL. Blob URLs are
-            intentionally never stored: they die with the page session.
-            Viewers no longer convert `data:` payloads into throwaway blob
-            URLs — they stream the bytes straight from
-            GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}
-            instead, which works directly as <img src> / <video src>.
+            Persisted location of the result. Shapes:
+            - `file:<index>.<ext>` (the only shape stored going forward) —
+              the payload is a plain file in the generation's assets folder
+              (`generation/{generate_id}/`); the json carries only this
+              small reference. Serve it via
+              GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index},
+              which 302-redirects to the static /v1/comfy/media mount.
+              Host-relative by design: no server address is baked in, so the
+              same json works on localhost and over the LAN alike.
+            - `data:` URL (base64, legacy generations — migrated to `file:`
+              on first read: the bytes are moved to an asset file and the
+              json rewritten).
+            - Remote http(s) URL.
+            Blob URLs are intentionally never stored: they die with the page
+            session. Viewers never convert payloads into throwaway blob
+            URLs — they consume the result endpoint directly as
+            <img src> / <video src> / <audio src>.
         mimeType:
           type: string
           example: "image/png"
@@ -1169,15 +1198,15 @@ components:
     GenerationResultMeta:
       type: object
       description: >-
-        A GenerationResultItem WITHOUT its heavy `url` payload — the display
+        A GenerationResultItem WITHOUT its `url` field — the display
         metadata carried by GenerationSummary entries so clients can label
-        results and build streaming URLs without pulling megabytes of base64.
-        The bytes are served by
+        results and build serving URLs without pulling the payload.
+        The media is served by
         GET /v1/comfy/workflows/{id}/generate/{generate_id}/result/{index}.
       properties:
         type:
           type: string
-          enum: [image, video]
+          enum: [image, video, audio]
         mimeType:
           type: string
           example: "image/png"
