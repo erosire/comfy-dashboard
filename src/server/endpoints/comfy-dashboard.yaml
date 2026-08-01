@@ -581,6 +581,59 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /v1/comfy/workflows/{id}/generate/{generate_id}/log:
+    get:
+      operationId: getGenerationLog
+      summary: Get a generation's .log event trail
+      description: >-
+        Returns the timestamped .log file written next to the generation
+        json by POST /v1/comfy/cloud/prompt while it consumes the pod's
+        NDJSON stream server-side — the chronological trail of status
+        changes and per-event summaries (submission, enqueue, progress,
+        captured results, terminal error). Intended for DEBUGGING failed
+        runs: the dashboard's OUTPUT tab opens this from failed/error
+        generations (a failed run, or a "completed" run that produced no
+        output) in a read-only dialog with a Copy button.
+
+        Generations without a .log file (written outside the cloud prompt
+        endpoint, or predating the .log trail) get a trail SYNTHESIZED from
+        the generation json itself (creation, final status, timing, error
+        message), so the response always carries something meaningful.
+        Logs larger than 256 KB are tail-truncated with a notice prepended
+        — the recent lines are the ones carrying the terminal error.
+      tags:
+        - Workflows
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: generate_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The generation's log trail (plain text in a json envelope)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationLogResponse'
+        '400':
+          description: Missing path parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Generation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   # ── Cloud ──────────────────────────────────────────────────────────
 
   /v1/comfy/cloud:
@@ -1217,6 +1270,19 @@ components:
           type: string
           description: The workflow node that produced this result
       required: [type, mimeType, size, nodeId]
+
+    GenerationLogResponse:
+      type: object
+      description: >-
+        A generation's .log event trail — the timestamped text the cloud
+        prompt endpoint writes next to the generation json while processing
+        the run. Synthesized from the generation json when no .log file
+        exists; tail-truncated at 256 KB (with a notice) when oversized.
+      properties:
+        log:
+          type: string
+          description: The log trail as plain text (one timestamped line per event).
+      required: [log]
 
     # ── Cloud ──────────────────────────────────────────────────────
 

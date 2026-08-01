@@ -53,6 +53,8 @@ export type WorkflowEditorContentProps = {
     onClone: () => void;
     generations: GenerationSummary[];
     onOpenViewer: (generationId: string) => void;
+    /** Opens a failed/error generation's .log event trail dialog. */
+    onShowGenerationLog: (generationId: string) => void;
     /** Asks to delete a generation (confirmation dialog opened by the caller). */
     onDeleteGeneration: (generationId: string) => void;
     /** OUTPUT-tab presentation mode (list rows vs thumbnail grid). */
@@ -86,6 +88,7 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
     onClone,
     generations,
     onOpenViewer,
+    onShowGenerationLog,
     onDeleteGeneration,
     outputView,
     getResultMediaUrl,
@@ -168,6 +171,7 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
                         <GenerationsPane
                             generations={generations}
                             onOpenViewer={onOpenViewer}
+                            onShowLog={onShowGenerationLog}
                             onDeleteGeneration={onDeleteGeneration}
                             view={outputView}
                             isMobile={isMobile}

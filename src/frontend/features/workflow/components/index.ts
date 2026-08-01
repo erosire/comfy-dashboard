@@ -20,5 +20,6 @@ export * from './FooterActions';
 export * from './RenameWorkflowDialog';
 export * from './DeleteWorkflowDialog';
 export * from './DeleteGenerationDialog';
+export * from './GenerationLogDialog';
 export * from './ResultViewer';
 export * from './utils';

@@ -21,6 +21,9 @@
 // Generation result media (streamable binary — <img src> / <video src> ready):
 //   GET    /v1/comfy/workflows/:id/generate/:generate_id/result/:index → raw bytes (image/*, video/*)
 //
+// Generation log (the run's timestamped event trail, for debugging):
+//   GET    /v1/comfy/workflows/:id/generate/:generate_id/log           → { log: string }
+//
 // Queue:
 //   GET /v1/comfy/queue              → { queue: QueueItem[] }
 //   POST /v1/comfy/queue             → { id: string, message: string }
@@ -405,6 +408,31 @@ export function generationResultUrl(
     index: number
 ): string {
     return `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}/result/${index}`;
+}
+
+// Fetch a generation's .log event trail — the timestamped line-per-event
+// record the server writes next to the generation json while it processes
+// the run (see POST /v1/comfy/cloud/prompt). Failed runs surface their
+// terminal error here; generations without a .log file get a trail
+// synthesized from their json (status + error), so a log always comes
+// back. Opened from a failed generation on the OUTPUT tab for debugging.
+export async function fetchGenerationLog(
+    baseUrl: string,
+    workflowId: string,
+    generateId: string
+): Promise<{ log: string }> {
+    const url = `${baseUrl}/workflows/${encodeURIComponent(workflowId)}/generate/${encodeURIComponent(generateId)}/log`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        let message = `Failed to fetch generation log (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+    const data = (await response.json()) as { log?: unknown };
+    return { log: typeof data.log === 'string' ? data.log : '' };
 }
 
 // Update a generation entry (PUT) — e.g. with results after agent completion.

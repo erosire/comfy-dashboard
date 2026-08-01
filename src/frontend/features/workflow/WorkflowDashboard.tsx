@@ -21,6 +21,7 @@ import {
     DeleteGenerationDialog,
     DeleteWorkflowDialog,
     FooterActions,
+    GenerationLogDialog,
     RenameWorkflowDialog,
     ResultViewer,
     WorkflowEditorContent,
@@ -28,6 +29,7 @@ import {
     buildWorkflowWithInputs,
     fetchMediaAsDataUri,
     useDebouncedSearch,
+    useGenerationLog,
     useGenerationsPolling,
     useMediaQuery,
     usePods,
@@ -335,6 +337,15 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
         // Poll generations for the selected workflow
         useGenerationsPolling(editingWorkflowId, refreshGenerations);
 
+        // ── Generation log dialog (failed/error generations, OUTPUT tab) ──
+        // Clicking a red (failed / no-output) generation fetches its .log
+        // event trail from the server and shows it in a read-only dialog
+        // with a Copy button, for debugging.
+        const generationLog = useGenerationLog({
+            baseUrl: store.config.baseUrl,
+            workflowId: editingWorkflowId
+        });
+
         // ── Load a saved workflow from sidebar ───────────────────────────
         // selectWorkflow loads the full workflow into store.selectedWorkflow;
         // the editor hook parses its raw JSON into nodes.
@@ -399,6 +410,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             onClone={actions.handleClone}
                             generations={store.generations}
                             onOpenViewer={viewer.openViewer}
+                            onShowGenerationLog={generationLog.openGenerationLog}
                             onDeleteGeneration={actions.handleDeleteGeneration}
                             outputView={outputView}
                             getResultMediaUrl={getResultMediaUrl}
@@ -445,6 +457,19 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                         generationId={actions.deleteGenerationTarget}
                         onConfirm={actions.confirmDeleteGeneration}
                         onCancel={actions.cancelDeleteGeneration}
+                    />
+                )}
+
+                {/* Generation .log viewer — opened from failed/error
+                    generations on the OUTPUT tab; read-only text + Copy. */}
+                {generationLog.logTarget && (
+                    <GenerationLogDialog
+                        generationId={generationLog.logTarget}
+                        displayText={generationLog.displayText}
+                        loading={generationLog.loading}
+                        copied={generationLog.copied}
+                        onCopy={generationLog.copyGenerationLog}
+                        onClose={generationLog.closeGenerationLog}
                     />
                 )}
 

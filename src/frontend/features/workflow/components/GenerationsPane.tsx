@@ -16,14 +16,20 @@
 //     with output, red = failed OR completed but produced no items,
 //     grey = pending/processing), with the generation time in brackets
 //     next to the id when known.
+//   - Click behavior: a generation WITH results opens the full-screen
+//     result viewer; a FAILED/ERRORED generation (red — including a
+//     "completed" run that produced no output) opens its .log event trail
+//     in a read-only dialog with a Copy button, for debugging. A failed
+//     run that still captured partial results opens the log too — the
+//     terminal error is the thing worth seeing.
 //   - The ||| grip on the left of a LIST row is a PLACEHOLDER for a
 //     per-generation actions menu: clickable (sg-hover affordance) but
 //     performs no action for now.
 //   - The ✕ delete button asks for confirmation (handled by the caller).
 // No relative timestamps, no status badges, no result counts (almost
-// every generation is 1 item) — detail lives in tooltips instead (a
-// failed run's error message, or an output-less "completion", shows on
-// hover).
+// every generation is 1 item) — the tooltip keeps a glanceable hint (the
+// error's first text plus the click affordance); the full trail lives in
+// the log dialog.
 //
 // The editor area scrolls, so no height cap is needed here.
 //
@@ -208,6 +214,8 @@ export type GenerationsPaneProps = {
     generations: GenerationSummary[];
     /** Opens the result viewer positioned at the generation's first result. */
     onOpenViewer: (generationId: string) => void;
+    /** Opens the generation's .log event trail dialog (failed/error runs). */
+    onShowLog: (generationId: string) => void;
     /** Asks to delete a generation (the caller confirms first — destructive). */
     onDeleteGeneration: (generationId: string) => void;
     /** Presentation mode — compact list rows or the thumbnail grid. */
@@ -221,6 +229,7 @@ export type GenerationsPaneProps = {
 export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
     generations,
     onOpenViewer,
+    onShowLog,
     onDeleteGeneration,
     view,
     isMobile,
@@ -244,13 +253,19 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                         const noOutput = gen.status === 'completed' && !hasResults;
                         const failed = gen.status === 'failed' || noOutput;
                         const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
-                        const tooltip = gen.error ?? (noOutput ? 'Completed with no output — treated as failed' : gen.id);
+                        // Failed/error generations open the .log dialog;
+                        // successful ones with results open the viewer.
+                        // (A failed run with partial results opens the log
+                        // — the terminal error is what needs debugging.)
+                        const tooltip = failed
+                            ? `${gen.error ?? 'Completed with no output — treated as failed'} — click to view the log`
+                            : gen.id;
                         return (
                             <ThumbCard
                                 key={gen.id}
                                 data-testid={`gen-thumb-${gen.id}`}
-                                style={hasResults ? { cursor: 'pointer' } : undefined}
-                                onClick={hasResults ? () => onOpenViewer(gen.id) : undefined}
+                                style={hasResults || failed ? { cursor: 'pointer' } : undefined}
+                                onClick={failed ? () => onShowLog(gen.id) : hasResults ? () => onOpenViewer(gen.id) : undefined}
                             >
                                 {first ? (
                                     first.type === 'video' ? (
@@ -317,20 +332,24 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                 // red = failed or output-less "completion", grey =
                 // pending/processing.
                 const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
-                const tooltip = gen.error ?? (noOutput ? 'Completed with no output — treated as failed' : gen.id);
+                // Click target: failed/error → the .log dialog (debugging);
+                // completed with results → the result viewer.
+                const tooltip = failed
+                    ? `${gen.error ?? 'Completed with no output — treated as failed'} — click to view the log`
+                    : gen.id;
                 return (
                     <QueueItemEl
                         key={gen.id}
                         data-testid={`gen-item-${gen.id}`}
                         style={
-                            hasResults
+                            hasResults || failed
                                 ? {
                                       cursor: 'pointer',
                                       transition: `border-color ${theme.transition}`
                                   }
                                 : undefined
                         }
-                        onClick={hasResults ? () => onOpenViewer(gen.id) : undefined}
+                        onClick={failed ? () => onShowLog(gen.id) : hasResults ? () => onOpenViewer(gen.id) : undefined}
                     >
                         {/* Menu grip — placeholder for the per-generation
                             actions menu (added later): clickable, but performs

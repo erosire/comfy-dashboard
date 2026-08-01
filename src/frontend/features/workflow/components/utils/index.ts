@@ -18,6 +18,7 @@ export * from './formatting';
 export * from './useMediaQuery';
 export * from './useDebouncedSearch';
 export * from './useGenerationsPolling';
+export * from './useGenerationLog';
 export * from './useNodeTree';
 export * from './useWorkflowEditor';
 export * from './usePods';
