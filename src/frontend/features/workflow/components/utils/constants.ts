@@ -4,7 +4,7 @@
 export const VIEWER_SWIPE_THRESHOLD_PX = 50;
 
 /** Maximum number of workflow items to display in the sidebar. */
-export const MAX_SIDEBAR_ITEMS = 10;
+export const MAX_SIDEBAR_ITEMS = 100;
 
 /** Heartbeat probe interval — keeps pods warm and detects dead pod_urls. */
 export const POD_HEARTBEAT_MS = 30_000;
