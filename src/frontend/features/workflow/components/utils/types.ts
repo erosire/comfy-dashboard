@@ -14,6 +14,13 @@ export type PodEntry = {
     pod_url: string;
     status: 'spawning' | 'ready' | 'error';
     /**
+     * What the pod_url fronts: true = a DIRECT ComfyUI server (native
+     * websocket at /ws — prompt over POST /cloud/prompt with
+     * `is_direct: true`), false = Tier 2 ComfyProxy. Learned from the
+     * create/status responses' `is_direct` (undefined until detected).
+     */
+    is_direct?: boolean;
+    /**
      * Consecutive heartbeat failures. Reset to 0 on every successful probe.
      * The pod (and its "#N" button) is removed once this reaches
      * MAX_POD_FAILURES — i.e. when the pod_url has stopped working.

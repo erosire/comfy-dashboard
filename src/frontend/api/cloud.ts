@@ -4,8 +4,8 @@
 // http://192.168.8.128:5000). See src/server/endpoints/comfy-dashboard.yml.
 //
 // Routes:
-//   POST /v1/comfy/cloud          → { pod_url }  (create — spawner 302 redirect)
-//                                or { health, models_dir, models } (status)
+//   POST /v1/comfy/cloud          → { pod_url, is_direct }  (create — spawner 302 redirect)
+//                                or { health, models_dir, models, is_direct } (status)
 //   POST /v1/comfy/cloud/prompt   → 202 { accepted } when workflow_id +
 //                                generation_id are given (server consumes the
 //                                pod stream and updates the generation json
@@ -18,11 +18,26 @@
 //            ComfyUI pod and returns its pod_url.
 //   Tier 2 — ComfyProxy: The pod's public proxy (GET / for health+models,
 //            POST / for prompt execution with NDJSON streaming).
+//
+// A pod_url can also front a DIRECT ComfyUI server instead of the Tier 2
+// proxy. The server detects this by attempting the native ComfyUI
+// websocket handshake at <pod_url>/ws (a refused connection → proxy) and
+// reports it as `is_direct` on every response. Prompt submission then
+// passes the flag back: `is_direct: true` makes /cloud/prompt open the
+// native websocket + POST /prompt (fresh client_id per request, so jobs
+// never cross-read each other's events) and translate the socket back
+// into the same NDJSON vocabulary the proxy emits.
 
 // ── Types ──────────────────────────────────────────────────────────────
 
 export type CloudCreateResult = {
     pod_url: string;
+    /**
+     * True when the pod_url fronts a DIRECT ComfyUI server (native
+     * websocket reachable at /ws); false for the Tier 2 ComfyProxy shape.
+     * Feed this back as `is_direct` when prompting the pod.
+     */
+    is_direct?: boolean;
     health?: {
         healthy: boolean;
         system_stats?: Record<string, unknown>;
@@ -38,8 +53,15 @@ export type CloudPodStatusResult = {
         system_stats?: Record<string, unknown>;
         error?: string;
     };
-    models_dir: string;
-    models: Record<string, string[]>;
+    /**
+     * True when the pod_url fronts a DIRECT ComfyUI server (detected via
+     * the native websocket handshake); false for the Tier 2 ComfyProxy.
+     */
+    is_direct?: boolean;
+    /** Empty for direct ComfyUI pods — the native server lists no models. */
+    models_dir?: string;
+    /** Empty for direct ComfyUI pods — the native server lists no models. */
+    models?: Record<string, string[]>;
 };
 
 /** A single line in the NDJSON stream from POST /v1/comfy/cloud/prompt. */
@@ -67,6 +89,14 @@ export type CloudPromptBody = {
      * documents already in API prompt format pass through unchanged.
      */
     prompt: Record<string, unknown>;
+    /**
+     * True when the pod is a DIRECT ComfyUI server (from the `is_direct`
+     * reported by POST /v1/comfy/cloud). The server then opens the native
+     * ComfyUI websocket with a FRESH client_id per request (overriding any
+     * client_id sent here — each job owns its stream, no cross-talk) and
+     * POSTs /prompt natively; omitted/false keeps the Tier 2 proxy flow.
+     */
+    is_direct?: boolean;
     client_id?: string;
     extra_data?: Record<string, unknown>;
     front?: boolean;

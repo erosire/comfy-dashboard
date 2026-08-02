@@ -656,6 +656,17 @@ paths:
         Tier 2 proxy of an existing pod and returns its health, system stats,
         and available models. Use this to verify a pod is ready before
         submitting prompts.
+
+        **Direct ComfyUI detection** — The pod_url can front a DIRECT
+        ComfyUI server instead of the Tier 2 ComfyProxy. Both modes detect
+        this by attempting the native ComfyUI websocket handshake at
+        `<pod_url>/ws?clientId=<id>`: a completed handshake means direct
+        (`is_direct: true`), a refused/failed one means proxy
+        (`is_direct: false`). A direct ComfyUI serves its frontend HTML at
+        GET / instead of the JSON status document, so its health is rebuilt
+        from the native GET /system_stats and the models listing stays
+        empty. Feed the `is_direct` flag back into POST
+        /v1/comfy/cloud/prompt to drive the pod over its native websocket.
       tags:
         - Cloud
       requestBody:
@@ -691,12 +702,14 @@ paths:
                   - $ref: '#/components/schemas/CloudPodStatusResponse'
               examples:
                 create_result:
-                  summary: Pod created successfully
+                  summary: Pod created successfully (direct ComfyUI pod)
                   value:
                     pod_url: "https://test-pod-abc123.beam.cloud:8188"
+                    is_direct: true
                 status_result:
-                  summary: Pod status returned
+                  summary: Pod status returned (Tier 2 proxy pod)
                   value:
+                    is_direct: false
                     health:
                       healthy: true
                       system_stats:
@@ -742,15 +755,15 @@ paths:
         Two modes:
 
         **Server-side processing** — include `workflow_id` and
-        `generation_id` in the body. The server forwards the prompt to
-        `POST <pod_url>/` on the Tier 2 ComfyProxy endpoint, consumes the
-        resulting NDJSON event stream in the background, and keeps the
-        generation json updated by itself (status → processing/completed/
-        failed, results, timing — the same file written by
-        /v1/comfy/workflows/{id}/generate). The event progression itself is
-        traced into the sibling .log file — it is intentionally NOT stored
-        in the generation json. Returns 202 immediately;
-        clients poll GET /v1/comfy/workflows/{id}/generate for progress.
+        `generation_id` in the body. The server submits the prompt to the
+        pod, consumes the resulting NDJSON event stream in the background,
+        and keeps the generation json updated by itself (status →
+        processing/completed/failed, results, timing — the same file
+        written by /v1/comfy/workflows/{id}/generate). The event
+        progression itself is traced into the sibling .log file — it is
+        intentionally NOT stored in the generation json. Returns 202
+        immediately; clients poll GET /v1/comfy/workflows/{id}/generate
+        for progress.
 
         **Legacy proxy mode** — no workflow reference. Streams the pod's
         results back as `application/x-ndjson` — one JSON object per line.
@@ -760,6 +773,24 @@ paths:
         until they receive:
         - `{"type":"proxy_done","data":{}}` — run completed normally, or
         - `{"type":"execution_error",...}` / `{"type":"proxy_error",...}` — failure.
+
+        Two pod branches (orthogonal to the modes above):
+
+        - `is_direct` omitted/false → **proxy branch**: the payload is
+          POSTed to the Tier 2 ComfyProxy at pod_url and its NDJSON stream
+          is consumed.
+        - `is_direct: true` → **direct ComfyUI branch**: a websocket is
+          opened at `<pod_url>/ws` and the prompt is POSTed to the native
+          `<pod_url>/prompt`. EVERY request gets a FRESH client_id
+          (caller-provided client_id is overridden) — ComfyUI routes a
+          prompt's execution events only to the websocket whose client_id
+          submitted it, so every job owns its stream and jobs can never
+          cross-read each other's events. The websocket messages are
+          translated back into the proxy's NDJSON event vocabulary
+          (proxy_enqueue, passthrough execution events, binary preview
+          frames → imagepreview.update, execution_success → proxy_done),
+          so both modes consume the stream with the exact same logic as
+          the proxy branch.
       tags:
         - Cloud
       requestBody:
@@ -1649,20 +1680,31 @@ components:
       description: >-
         Response from spawning a new ComfyUI pod via the Beam spawner.
         The spawner URL returns a 302 redirect; pod_url is the Location
-        URL. The server additionally probes the fresh pod's Tier 2 proxy
-        right away and merges the result into this response — so health,
-        models_dir, and models are present when the pod already answers,
-        or error when the initial probe failed (the pod may still be
-        booting; retry with a status check).
+        URL. The server additionally probes the fresh pod right away and
+        merges the result into this response — so health, models_dir, and
+        models are present when the pod already answers, or error when the
+        initial probe failed (the pod may still be booting; retry with a
+        status check). The probe also detects — via the native websocket
+        handshake — whether pod_url fronts a direct ComfyUI server
+        (is_direct).
       properties:
         pod_url:
           type: string
           format: uri
           description: >-
-            Public URL of the spawned pod's Tier 2 API proxy (obtained from
-            the 302 redirect Location header). Use this URL for status
-            checks and prompt submission.
+            Public URL of the spawned pod (obtained from the 302 redirect
+            Location header) — a Tier 2 API proxy, or a direct ComfyUI
+            server when is_direct is true. Use this URL for status checks
+            and prompt submission.
           example: https://test-pod-abc123.beam.cloud:8188
+        is_direct:
+          type: boolean
+          description: >-
+            True when pod_url fronts a DIRECT ComfyUI server — detected by
+            opening its native websocket at <pod_url>/ws (a refused
+            connection means the Tier 2 ComfyProxy fronts it). Pass this
+            flag back as `is_direct` to POST /v1/comfy/cloud/prompt.
+          example: false
         health:
           $ref: '#/components/schemas/ProxyHealthResponse'
         models_dir:
@@ -1680,17 +1722,29 @@ components:
       description: >-
         Health and model listing for a running ComfyUI pod.
         Returned when POST /v1/comfy/cloud is called with a pod_url.
-        Mirrors the Tier 2 proxy GET / response from the Beam ComfyUI service.
+        Mirrors the Tier 2 proxy GET / response from the Beam ComfyUI
+        service; for a direct ComfyUI pod (is_direct: true) the health is
+        rebuilt from the native GET /system_stats and the models listing
+        stays empty.
       properties:
         health:
           $ref: '#/components/schemas/ProxyHealthResponse'
+        is_direct:
+          type: boolean
+          description: >-
+            True when pod_url fronts a DIRECT ComfyUI server — detected by
+            opening its native websocket at <pod_url>/ws (a refused
+            connection means the Tier 2 ComfyProxy fronts it).
+          example: false
         models_dir:
           type: string
           example: /ComfyUI/models
-          description: Absolute path to the (symlinked) models directory.
+          description: >-
+            Absolute path to the (symlinked) models directory. Empty for
+            direct ComfyUI pods — the native server lists no models.
         models:
           $ref: '#/components/schemas/ModelsListing'
-      required: [health, models_dir, models]
+      required: [health, is_direct, models_dir, models]
 
     ProxyHealthResponse:
       type: object
@@ -1809,17 +1863,30 @@ components:
             converts it to the flat API prompt ({"<nodeId>": {"class_type",
             "inputs"}}) before forwarding to the pod; documents already in
             API prompt format are passed through unchanged.
+        is_direct:
+          type: boolean
+          description: >-
+            Optional (default false). True selects the DIRECT ComfyUI
+            branch: the server opens the pod's native websocket at
+            <pod_url>/ws under a FRESH client_id per request (any
+            client_id sent here is overridden — every job owns its stream,
+            no cross-talk) and POSTs <pod_url>/prompt natively, translating
+            the socket back into the proxy's NDJSON event vocabulary. Use
+            the `is_direct` value reported by POST /v1/comfy/cloud.
+          example: false
         client_id:
           type: string
           description: >-
-            Optional 32-char hex identifier for the submission. In
-            server-side processing mode the server generates one per
-            submission when omitted (or invalid), forwards it to the pod,
-            and uses it to scope the shared pod's broadcast stream: the
-            job's prompt_id is learned from the proxy_enqueue event and
-            stream events carrying a different prompt_id are dropped, so
-            each generation json only receives its own job's events even
-            when multiple generations are queued on the same pod.
+            Optional 32-char hex identifier for the submission (proxy
+            branch only — the direct branch always generates a fresh one
+            per request). In server-side processing mode the server
+            generates one per submission when omitted (or invalid),
+            forwards it to the pod, and uses it to scope the shared pod's
+            broadcast stream: the job's prompt_id is learned from the
+            proxy_enqueue event and stream events carrying a different
+            prompt_id are dropped, so each generation json only receives
+            its own job's events even when multiple generations are queued
+            on the same pod.
           example: abc123def4567890fedcba0987654321
         extra_data:
           type: object

@@ -16,20 +16,39 @@
 //    The pod's NDJSON stream is proxied back to the caller as-is
 //    (application/x-ndjson) for the client to consume.
 //
+// Two pod branches (orthogonal to the modes above):
+//
+// - `is_direct: false | omitted` — PROXY flow (current implementation):
+//   the whole prompt payload is POSTed to the Tier 2 ComfyProxy (the
+//   pod_url itself) and its NDJSON response is consumed.
+//
+// - `is_direct: true` — DIRECT ComfyUI flow: the pod_url fronts a native
+//   ComfyUI server. A websocket is opened at <pod_url>/ws and the prompt
+//   is POSTed to the native <pod_url>/prompt. EVERY prompt request gets a
+//   FRESH client_id — ComfyUI routes a prompt's execution events only to
+//   the websocket whose client_id submitted it, so each request owns its
+//   stream and no cross-talk between jobs is possible. The received
+//   websocket messages are translated back into the proxy's NDJSON event
+//   vocabulary (see ./direct-comfy.ts), so BOTH modes consume the result
+//   with the exact same logic as `is_direct: false`.
+//
 // Common request fields (mirrors beam_comfy_service PromptRequest schema):
-//   - pod_url:  the Tier 2 proxy URL (e.g. "https://...beam.cloud:8188")
-//   - prompt:   the ORIGINAL workflow json snapshot (v0.4/v1 editor format
-//               — what the dashboard stores on every generation). Converted
-//               to the flat API prompt HERE, server-side, right before it
-//               goes out to the Comfy Cloud pod — the one place conversion
-//               happens, so stored documents stay lossless.
-//   - client_id: optional client identifier (32-char hex)
+//   - pod_url:   the pod URL (Tier 2 proxy, or direct ComfyUI)
+//   - prompt:    the ORIGINAL workflow json snapshot (v0.4/v1 editor format
+//                — what the dashboard stores on every generation). Converted
+//                to the flat API prompt HERE, server-side, right before it
+//                goes out to the Comfy Cloud pod — the one place conversion
+//                happens, so stored documents stay lossless.
+//   - client_id: optional client identifier (32-char hex; proxy flow only —
+//                the direct flow always generates a fresh one per request)
 //   - extra_data: passed through to ComfyUI's POST /prompt extra_data
 //   - front / number: forwarded to ComfyUI POST /prompt
+//   - is_direct: optional — true selects the direct ComfyUI branch
 
 import { randomUUID } from 'node:crypto';
 import { Agent } from 'undici';
 import { asHandlerMethod } from '@underload/service';
+import { newDirectClientId, submitDirectPrompt } from './direct-comfy';
 import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
 import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
@@ -78,6 +97,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         number?: number;
         workflow_id?: string;
         generation_id?: string;
+        is_direct?: boolean;
     };
 
     if (!body?.pod_url) {
@@ -122,6 +142,56 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     const incomingHeaders = request.req.header() as Record<string, string>;
     const authorization = incomingHeaders.authorization;
 
+    // ── Pod branch: proxy (default) vs direct ComfyUI websocket ──────
+    // Both branches resolve their pod submission to a plain Response —
+    // Mode 1 and Mode 2 below consume it with IDENTICAL logic.
+    const isDirect = body.is_direct === true;
+
+    // The direct flow talks to ComfyUI's websocket under a FRESH client_id
+    // per prompt request: ComfyUI routes a prompt's execution events only
+    // to the socket whose client_id submitted it, so every job owns its
+    // own stream and jobs can never cross-read each other's events. Any
+    // caller-supplied client_id is overridden — that is the point of the
+    // direct branch.
+    const directClientId = isDirect ? newDirectClientId() : undefined;
+    if (directClientId) {
+        promptPayload.client_id = directClientId;
+    }
+
+    const origin = isDirect ? `${podUrl.toString()} (direct websocket)` : podUrl.toString();
+
+    const submit = (): Promise<Response> => {
+        if (directClientId) {
+            // Open <pod_url>/ws first, POST the native <pod_url>/prompt,
+            // and translate the socket back into the proxy's NDJSON event
+            // vocabulary (see ./direct-comfy.ts).
+            return submitDirectPrompt({
+                podUrl,
+                clientId: directClientId,
+                promptPayload,
+                authorization
+            });
+        }
+
+        const forwardedHeaders: Record<string, string> = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/x-ndjson',
+        };
+        if (authorization) {
+            forwardedHeaders['Authorization'] = authorization;
+        }
+
+        return fetch(podUrl.toString(), {
+            method: 'POST',
+            headers: forwardedHeaders,
+            body: JSON.stringify(promptPayload),
+            // @ts-expect-error -- undici-specific fetch init key (omitted from
+            // the DOM RequestInit type): route through the timeout-free
+            // dispatcher, see podAgent above.
+            dispatcher: podAgent,
+        });
+    };
+
     // ── Mode 1: server-side processing ──────────────────────────────
     // The client submits and is done — the server owns the pod stream
     // and the generation json from here on.
@@ -134,11 +204,14 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         // One client_id per submission. Multiple generations can be queued
         // on the same pod, and the pod broadcasts every execution event to
         // all subscribers — this id ties the job to its prompt_id so the
-        // stream consumer keeps only this job's events.
+        // stream consumer keeps only this job's events. (The direct branch
+        // already fixed its fresh id above; ComfyUI only delivers the job's
+        // own events to its socket there.)
         const clientId =
-            typeof body.client_id === 'string' && /^[0-9a-f]{32}$/i.test(body.client_id)
+            directClientId ??
+            (typeof body.client_id === 'string' && /^[0-9a-f]{32}$/i.test(body.client_id)
                 ? body.client_id
-                : newClientId();
+                : newClientId());
         promptPayload.client_id = clientId;
 
         // Fire-and-forget — intentionally not awaited. The function never
@@ -147,9 +220,9 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             root,
             body.workflow_id,
             body.generation_id,
-            podUrl,
-            promptPayload,
-            authorization
+            origin,
+            clientId,
+            submit
         );
 
         return {
@@ -165,23 +238,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
 
     // ── Mode 2: legacy streaming proxy ──────────────────────────────
     try {
-        const forwardedHeaders: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/x-ndjson',
-        };
-        if (authorization) {
-            forwardedHeaders['Authorization'] = authorization;
-        }
-
-        const upstream = await fetch(podUrl.toString(), {
-            method: 'POST',
-            headers: forwardedHeaders,
-            body: JSON.stringify(promptPayload),
-            // @ts-expect-error -- undici-specific fetch init key (omitted from
-            // the DOM RequestInit type): route through the timeout-free
-            // dispatcher, see podAgent above.
-            dispatcher: podAgent,
-        });
+        const upstream = await submit();
 
         if (!upstream.ok && upstream.headers.get('content-type')?.includes('application/json')) {
             // Non-streaming error from the pod — return as-is
@@ -222,20 +279,24 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
  * the outcome (status, results, timing, error) into the generation json
  * file. The event stream itself is traced into the sibling .log file only.
  * Never throws — failures are recorded in the generation entry itself.
+ *
+ * The pod-facing submission is injected as `submit`: the proxy branch
+ * POSTs to the Tier 2 proxy, the direct branch opens the ComfyUI
+ * websocket and POSTs the native /prompt — both resolve to a Response
+ * whose NDJSON body this function consumes identically.
  */
 async function processPodPromptInBackground(
     root: string,
     workflowId: string,
     generationId: string,
-    podUrl: URL,
-    promptPayload: Record<string, unknown>,
-    authorization?: string
+    origin: string,
+    clientId: string | undefined,
+    submit: () => Promise<Response>
 ): Promise<void> {
     const startedAt = Date.now();
     const results: GenerationResultItem[] = [];
     let failureMessage: string | null = null;
     let eventCount = 0;
-    const clientId = promptPayload.client_id as string | undefined;
 
     // Append a timestamped line to <generationId>.log (next to the .json)
     // at every status change and streamed event. Best-effort — never throws.
@@ -245,7 +306,7 @@ async function processPodPromptInBackground(
     const log = (message: string) =>
         void appendGenerationLog(root, workflowId, generationId, message);
 
-    log(`Generation started — submitting to ${podUrl.toString()} (client_id: ${clientId ?? 'n/a'})`);
+    log(`Generation started — submitting to ${origin} (client_id: ${clientId ?? 'n/a'})`);
 
     try {
         // Mark the generation as picked up so pollers see live progress
@@ -256,24 +317,7 @@ async function processPodPromptInBackground(
             return;
         }
 
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/x-ndjson',
-        };
-        if (authorization) {
-            headers['Authorization'] = authorization;
-        }
-
-        const upstream = await fetch(podUrl.toString(), {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(promptPayload),
-            // @ts-expect-error -- undici-specific fetch init key (omitted from
-            // the DOM RequestInit type): a prompt may sit in ComfyUI's queue
-            // for minutes with zero stream bytes — that must never fail the
-            // generation. See podAgent above.
-            dispatcher: podAgent,
-        });
+        const upstream = await submit();
         log(`Pod responded HTTP ${upstream.status}`);
 
         if (!upstream.ok) {

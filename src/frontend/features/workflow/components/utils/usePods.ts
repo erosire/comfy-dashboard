@@ -12,7 +12,7 @@
 //     strikes; MAX_POD_FAILURES consecutive failures remove the pod.
 
 import React from 'react';
-import type { CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
+import type { CloudCreateResult, CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
 import { cloud, cloudPrompt } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
@@ -137,7 +137,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     //    running → done/error state (see the sync effect below).
 
     const runGenerationOnPod = React.useCallback(
-        async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot) => {
+        async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot, isDirect?: boolean) => {
             const snapshot = generationOverride ?? getCurrentRaw?.() ?? null;
             if (!editingWorkflowId || !snapshot) return;
 
@@ -152,12 +152,20 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             try {
                 // Step 3 — submit and be done. The server processes the
                 // pod stream in the background from here (scoped to this
-                // job via a per-submission client_id).
+                // job via a per-submission client_id). A direct ComfyUI pod
+                // is flagged is_direct so the server drives its native
+                // websocket + /prompt instead of the Tier 2 proxy. The flag
+                // is handed in by the caller (creation/heartbeat are the
+                // authoritative sources); fall back to the freshest pod
+                // state through the ref when it wasn't.
+                const directFlag =
+                    isDirect ?? (podId ? podsRef.current.find((p) => p.id === podId)?.is_direct : undefined);
                 await cloudPrompt(baseUrl, {
                     pod_url: podUrl,
                     prompt: generation.prompt,
                     workflow_id: editingWorkflowId,
                     generation_id: generation.id,
+                    ...(directFlag !== undefined ? { is_direct: directFlag } : {}),
                     extra_data: {
                         workflow_id: editingWorkflowId,
                         generation_id: generation.id
@@ -234,30 +242,36 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         // Step 2 — create the cloud pod
         console.log(`[Generate] Spawning Pod#${podNumber}...`);
         let podUrl: string;
+        let isDirect: boolean | undefined;
         try {
             const result = await cloud(baseUrl, { type: 'create' });
             if (!('pod_url' in result)) {
                 throw new Error('Pod spawn response did not contain pod_url');
             }
             podUrl = (result as { pod_url: string }).pod_url;
+            // The server probed the pod's websocket handshake: true = the
+            // pod_url fronts a DIRECT ComfyUI server, false = Tier 2 proxy.
+            isDirect = (result as CloudCreateResult).is_direct;
         } catch (err: any) {
             // Spawn failed — no pod_url ever existed; remove the button.
             setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
             alert(`Failed to spawn pod ${podLetter(podNumber)}: ${err.message ?? String(err)}`);
             return;
         }
-        console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl}`);
+        console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl} (${isDirect ? 'direct ComfyUI' : 'proxy'})`);
 
         // Step 3 — pod_url exists: the pod is now usable
         setPods((prev) =>
-            prev.map((p) => (p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p))
+            prev.map((p) =>
+                p.id === podEntry.id ? { ...p, pod_url: podUrl, is_direct: isDirect, status: 'ready', failCount: 0 } : p
+            )
         );
 
         // Step 4 — snapshot + submit for server-side processing.
         // A failure here keeps the pod — its button shows the run error
         // and stays reusable.
         try {
-            await runGenerationOnPod(podUrl, podEntry.id, generationOverride);
+            await runGenerationOnPod(podUrl, podEntry.id, generationOverride, isDirect);
         } catch (err: any) {
             alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
@@ -278,7 +292,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             if (!pod.pod_url || pod.status !== 'ready') return;
             try {
                 console.log(`[Pod#${pod.podNumber}] Queueing job on ${pod.pod_url}`);
-                await runGenerationOnPod(pod.pod_url, pod.id, generationOverride);
+                await runGenerationOnPod(pod.pod_url, pod.id, generationOverride, pod.is_direct);
             } catch (err: any) {
                 alert(`Failed to generate: ${err.message ?? String(err)}`);
             }
@@ -362,7 +376,8 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                         const statusResult = result as CloudPodStatusResult;
                         const healthy = 'health' in result ? statusResult.health?.healthy !== false : true;
                         if (healthy) {
-                            // Alive — clear strikes, refresh health, mark ready
+                            // Alive — clear strikes, refresh health + the
+                            // direct/proxy detection, mark ready.
                             setPods((prev) =>
                                 prev.map((ep) =>
                                     ep.id === p.id
@@ -371,7 +386,10 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                                               status: 'ready',
                                               failCount: 0,
                                               error: undefined,
-                                              health: statusResult
+                                              health: statusResult,
+                                              ...(statusResult.is_direct !== undefined
+                                                  ? { is_direct: statusResult.is_direct }
+                                                  : {})
                                           }
                                         : ep
                                 )

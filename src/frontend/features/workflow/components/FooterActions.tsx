@@ -91,13 +91,17 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
             </BtnPrimary>
 
             {/* A00: queue another generation on an existing pod (skips pod
-                creation). Sits immediately right of New. */}
+                creation). Sits immediately right of New. The small dot marks
+                what the pod_url fronts: filled ● a DIRECT ComfyUI server
+                (native websocket + /prompt), hollow ○ a Tier 2 proxy. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';
                 const inFlight = p.activeGenerationIds.length;
                 const isLoading = isSpawning || inFlight > 0;
                 const letter = podLetter(p.podNumber);
                 const isDisabled = isSpawning || nodeCount === 0 || !p.pod_url || p.status !== 'ready';
+                const linkDesc =
+                    p.is_direct === undefined ? '' : p.is_direct ? 'direct ComfyUI' : 'via proxy';
                 return (
                     <Btn
                         key={p.id}
@@ -111,9 +115,9 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                                   ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
                                     `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
                                   : inFlight > 0
-                                    ? `Pod ${letter} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                    ? `Pod ${letter}${linkDesc ? ` (${linkDesc})` : ''} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
                                       `in flight on ${p.pod_url} — click to queue another`
-                                    : `Queue a new generation on ${p.pod_url}`
+                                    : `Queue a new generation on ${p.pod_url}${linkDesc ? ` — ${linkDesc}` : ''}`
                         }
                         style={{
                             fontFamily: theme.fontMono,
@@ -126,8 +130,22 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                                     : theme.border
                         }}
                         data-testid={`pod-generate-${p.podNumber}`}
+                        data-direct={p.is_direct === undefined ? 'unknown' : p.is_direct ? 'direct' : 'proxy'}
                     >
                         {podButtonLabel(p.podNumber, inFlight)}
+                        {p.is_direct !== undefined && (
+                            <span
+                                style={{
+                                    marginLeft: 4,
+                                    fontSize: 7,
+                                    verticalAlign: 'super',
+                                    color: p.is_direct ? theme.accent2 : theme.textDim
+                                }}
+                                data-testid={`pod-link-${p.podNumber}`}
+                            >
+                                {p.is_direct ? '●' : '○'}
+                            </span>
+                        )}
                     </Btn>
                 );
             })}

@@ -143,7 +143,7 @@ export function resolveServerEntries(variables: Record<string, any> | undefined)
 }
 
 /** Add a ComfyUI route below a server base URL without losing its prefix path. */
-function serverRoute(podUrl: URL, route: string): URL {
+export function serverRoute(podUrl: URL, route: string): URL {
     const result = new URL(podUrl.toString());
     const basePath = result.pathname.replace(/\/+$/, '');
     result.pathname = `${basePath}${route}` || route;
@@ -210,7 +210,7 @@ export function isTerminalPromptEvent(message: unknown): boolean {
 }
 
 /** Wait until the undici websocket handshake is complete or fails. */
-function waitForSocketOpen(socket: WebSocket, timeoutMs: number = CONNECT_SOCKET_TIMEOUT_MS): Promise<void> {
+export function waitForSocketOpen(socket: WebSocket, timeoutMs: number = CONNECT_SOCKET_TIMEOUT_MS): Promise<void> {
     if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
 
     return new Promise<void>((resolve, reject) => {
