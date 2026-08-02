@@ -17,8 +17,20 @@
 // endpoint, which updates the same file server-side while it consumes a
 // pod's NDJSON stream in the background. Keeping the types + IO in one
 // place guarantees both write paths produce identical data.
+//
+// ── Concurrency model ────────────────────────────────────────────────────
+// ALL filesystem access here is ASYNC (fs.promises) — the event loop is
+// never blocked by a json read, asset write, or log append, so a media
+// download or a busy polling client can never freeze API requests.
+// Read-modify-write operations (patchGenerationFile, the migration rewrite,
+// deletes) are SERIALIZED PER FILE via a promise chain: the old sync fs
+// calls were accidentally atomic within the process, and this preserves
+// that guarantee — a PUT and the cloud background consumer updating the
+// same generation can no longer interleave into a lost update. Log appends
+// chain the same way, so .log lines keep their chronological order even
+// though every write is now async.
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 
 export type GenerationResultItem = {
@@ -194,6 +206,32 @@ export function generationAssetsDirPath(root: string, workflowId: string, genera
     );
 }
 
+// ── Per-file write serialization ─────────────────────────────────────────
+// A promise chain per path turns every async read-modify-write (and every
+// ordered .log append) into a FIFO: what the sync fs calls once gave us
+// for free (one operation on a file at a time, in call order) now holds
+// under fully-async IO. Failed links never break the chain — the next
+// queued task still runs.
+
+const fileOpChains = new Map<string, Promise<unknown>>();
+
+function enqueueFileOp<T>(filePath: string, task: () => Promise<T>): Promise<T> {
+    const previous = fileOpChains.get(filePath) ?? Promise.resolve();
+    const result = previous.then(task, task);
+    // Housekeeping keeps the map from growing forever; the stored promise
+    // never rejects so a failure of one op can't poison the chain.
+    const tracked = result.then(
+        () => {
+            if (fileOpChains.get(filePath) === tracked) fileOpChains.delete(filePath);
+        },
+        () => {
+            if (fileOpChains.get(filePath) === tracked) fileOpChains.delete(filePath);
+        }
+    );
+    fileOpChains.set(filePath, tracked);
+    return result;
+}
+
 /**
  * Decode a `data:` URL into its MIME and raw bytes. Returns null for
  * non-data urls, non-base64 payloads, or undecodable input.
@@ -232,42 +270,66 @@ function decodeDataUrlPayload(url: string): { mime: string; bytes: Buffer } | nu
  * The json with `file:` references stays small (KBs), which is the whole
  * point: reads (list, refresh, result lookups) stop parsing megabytes of
  * base64, and media bytes flow off disk untouched by JSON.stringify.
+ *
+ * Writes are fully async and saved to disk CONCURRENTLY per item — the
+ * files are independent, so sequential awaits would only add latency.
  */
-export function persistResultAssets(
+export async function persistResultAssets(
     root: string,
     workflowId: string,
     generateId: string,
     results: GenerationResultItem[]
-): GenerationResultItem[] {
+): Promise<GenerationResultItem[]> {
     const assetsDir = generationAssetsDirPath(root, workflowId, generateId);
-    let dirReady = false;
 
-    return results.map((item, index) => {
-        if (!item.url.startsWith('data:')) return item;
+    // Decode everything first (pure CPU on already-held strings), then
+    // issue one mkdir and the file writes in parallel.
+    type Prepared = {
+        item: GenerationResultItem;
+        decoded: { mime: string; bytes: Buffer } | null;
+        fileName: string;
+        mime: string;
+    };
+    const prepared: Prepared[] = results.map((item, index) => {
+        const skip: Prepared = { item, decoded: null, fileName: '', mime: '' };
+        if (!item.url.startsWith('data:')) return skip;
         const decoded = decodeDataUrlPayload(item.url);
-        if (!decoded) return item; // malformed payload — keep as-is
-
+        if (!decoded) return skip;
         const mime = item.mimeType || decoded.mime;
         const ext = RESULT_MIME_EXTENSIONS[mime] ?? '';
-        const fileName = `${index}${ext}`;
-        try {
-            if (!dirReady) {
-                fs.mkdirSync(assetsDir, { recursive: true });
-                dirReady = true;
-            }
-            fs.writeFileSync(path.join(assetsDir, fileName), decoded.bytes);
-            return {
-                ...item,
-                url: `${FILE_URL_PREFIX}${fileName}`,
-                mimeType: mime,
-                size: decoded.bytes.length
-            };
-        } catch {
-            // Best-effort — on write failure keep the inline payload so the
-            // result stays servable through the legacy data: path.
-            return item;
-        }
+        return { item, decoded, fileName: `${index}${ext}`, mime };
     });
+
+    if (prepared.every((p) => !p.decoded)) {
+        return results; // nothing inline — zero filesystem work
+    }
+
+    try {
+        await fs.mkdir(assetsDir, { recursive: true });
+    } catch {
+        // Can't even create the folder — every write would fail; keep all
+        // originals inline (the legacy data: serving path still works).
+        return results;
+    }
+
+    return Promise.all(
+        prepared.map(async ({ item, decoded, fileName, mime }) => {
+            if (!decoded) return item; // untouched (file:/http(s):/malformed)
+            try {
+                await fs.writeFile(path.join(assetsDir, fileName), decoded.bytes);
+                return {
+                    ...item,
+                    url: `${FILE_URL_PREFIX}${fileName}`,
+                    mimeType: mime,
+                    size: decoded.bytes.length
+                };
+            } catch {
+                // Best-effort — on write failure keep the inline payload so the
+                // result stays servable through the legacy data: path.
+                return item;
+            }
+        })
+    );
 }
 
 /**
@@ -280,25 +342,29 @@ export function persistResultAssets(
  *
  * After one pass the generation json holds only small references — reads
  * stop parsing megabytes of base64 and the media serves straight off disk.
+ *
+ * The json rewrite is serialized per file (enqueueFileOp) so a concurrent
+ * patch can never interleave with the heal.
  */
-export function migrateGenerationAssets(
+export async function migrateGenerationAssets(
     root: string,
     workflowId: string,
     generateId: string,
     entry: GenerationEntry
-): GenerationEntry {
+): Promise<GenerationEntry> {
     if (!entry.result.some((r) => r.url.startsWith('data:'))) return entry;
 
     const migrated: GenerationEntry = {
         ...entry,
-        result: persistResultAssets(root, workflowId, generateId, entry.result)
+        result: await persistResultAssets(root, workflowId, generateId, entry.result)
     };
+    // Best-effort rewrite — a failed rewrite never loses data: the asset
+    // files already exist and the original json stays authoritative until
+    // the next read retries.
     try {
-        writeGenerationFile(root, workflowId, generateId, migrated);
+        await writeGenerationFile(root, workflowId, generateId, migrated);
     } catch {
-        // Best-effort — a failed rewrite never loses data: the asset files
-        // already exist and the original json stays authoritative until the
-        // next read retries.
+        // swallowed by design (see above)
     }
     return migrated;
 }
@@ -310,33 +376,38 @@ export function migrateGenerationAssets(
  * never fails an in-flight generation. The generation directory is created
  * on demand (the .json writer usually creates it first, but we ensure it
  * exists to stay self-contained).
+ *
+ * Appends are CHAINED per log file, so callers may fire-and-forget the
+ * returned promise while lines still land in strict chronological order
+ * (the background NDJSON consumer emits them in rapid succession).
  */
 export function appendGenerationLog(
     root: string,
     workflowId: string,
     generateId: string,
     message: string
-): void {
-    try {
-        const logPath = generationLogPath(root, workflowId, generateId);
-        fs.mkdirSync(path.dirname(logPath), { recursive: true });
-        const line = `[${new Date().toISOString()}] ${message}\n`;
-        fs.appendFileSync(logPath, line, 'utf-8');
-    } catch {
-        // Best-effort — never fail a generation over a log write.
-    }
+): Promise<void> {
+    const logPath = generationLogPath(root, workflowId, generateId);
+    return enqueueFileOp(logPath, async () => {
+        try {
+            const line = `[${new Date().toISOString()}] ${message}\n`;
+            await fs.mkdir(path.dirname(logPath), { recursive: true });
+            await fs.appendFile(logPath, line, 'utf-8');
+        } catch {
+            // Best-effort — never fail a generation over a log write.
+        }
+    });
 }
 
 /** Read + normalize a generation file. Returns null if missing or corrupted. */
-export function readGenerationFile(
+export async function readGenerationFile(
     root: string,
     workflowId: string,
     generateId: string
-): GenerationEntry | null {
+): Promise<GenerationEntry | null> {
     const filePath = generationFilePath(root, workflowId, generateId);
-    if (!fs.existsSync(filePath)) return null;
     try {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        const data = JSON.parse(await fs.readFile(filePath, 'utf-8'));
         return {
             id: data.id ?? generateId,
             status: data.status ?? 'pending',
@@ -355,16 +426,15 @@ export function readGenerationFile(
     }
 }
 
-export function writeGenerationFile(
+export async function writeGenerationFile(
     root: string,
     workflowId: string,
     generateId: string,
     entry: GenerationEntry
-): void {
-    fs.writeFileSync(
-        generationFilePath(root, workflowId, generateId),
-        JSON.stringify(entry, null, 2),
-        'utf-8'
+): Promise<void> {
+    const filePath = generationFilePath(root, workflowId, generateId);
+    return enqueueFileOp(filePath, () =>
+        fs.writeFile(filePath, JSON.stringify(entry, null, 2), 'utf-8')
     );
 }
 
@@ -373,52 +443,62 @@ export function writeGenerationFile(
  * sibling .log trail and the media assets folder. Returns false when the
  * json doesn't exist (the caller's 404 case).
  *
- * Deleting a still-processing generation is safe on the json side:
- * patchGenerationFile no-ops once the file is gone, so the cloud prompt
- * endpoint's background consumer can't resurrect the record. A consumer
- * mid-run may still append a fresh orphan .log (or asset file) afterwards —
- * harmless, and unavoidable without an execution-cancel mechanism.
+ * Serialized with patches of the SAME file: a delete queued while a patch
+ * is in flight runs after it (call order), so the outcome no longer
+ * depends on where the async read-modify-write happened to be.
  */
-export function deleteGenerationFiles(root: string, workflowId: string, generateId: string): boolean {
+export async function deleteGenerationFiles(root: string, workflowId: string, generateId: string): Promise<boolean> {
     const jsonPath = generationFilePath(root, workflowId, generateId);
-    if (!fs.existsSync(jsonPath)) return false;
-    fs.rmSync(jsonPath, { force: true });
-    try {
-        fs.rmSync(generationLogPath(root, workflowId, generateId), { force: true });
-    } catch {
-        // Best-effort — a broken log removal never fails the delete.
-    }
-    try {
-        fs.rmSync(generationAssetsDirPath(root, workflowId, generateId), {
-            recursive: true,
-            force: true
-        });
-    } catch {
-        // Best-effort — media cleanup never fails the delete.
-    }
-    return true;
+    return enqueueFileOp(jsonPath, async () => {
+        try {
+            await fs.rm(jsonPath, { force: false });
+        } catch {
+            return false; // no json → nothing deleted (the 404 case)
+        }
+        try {
+            await fs.rm(generationLogPath(root, workflowId, generateId), { force: true });
+        } catch {
+            // Best-effort — a broken log removal never fails the delete.
+        }
+        try {
+            await fs.rm(generationAssetsDirPath(root, workflowId, generateId), {
+                recursive: true,
+                force: true
+            });
+        } catch {
+            // Best-effort — media cleanup never fails the delete.
+        }
+        return true;
+    });
 }
 
 /**
  * Merge a partial patch into an existing generation file.
  * Only provided fields are overwritten. Returns the updated entry,
  * or null when the file is missing/unreadable.
+ *
+ * The full read-modify-write runs as ONE serialized file op, so two
+ * concurrent patches of the same generation apply in call order instead
+ * of both reading, then both writing (losing the first update).
  */
-export function patchGenerationFile(
+export async function patchGenerationFile(
     root: string,
     workflowId: string,
     generateId: string,
     patch: GenerationPatch
-): GenerationEntry | null {
-    const existing = readGenerationFile(root, workflowId, generateId);
-    if (!existing) return null;
+): Promise<GenerationEntry | null> {
+    const filePath = generationFilePath(root, workflowId, generateId);
+    return enqueueFileOp(filePath, async () => {
+        const existing = await readGenerationFile(root, workflowId, generateId);
+        if (!existing) return null;
 
-    if (patch.status !== undefined) existing.status = patch.status;
-    if (patch.completedDate !== undefined) existing.completedDate = patch.completedDate;
-    if (patch.generatedTime !== undefined) existing.generatedTime = patch.generatedTime;
-    if (patch.error !== undefined) existing.error = patch.error;
-    if (patch.result !== undefined) existing.result = patch.result;
+        if (patch.status !== undefined) existing.status = patch.status;
+        if (patch.completedDate !== undefined) existing.completedDate = patch.completedDate;
+        if (patch.generatedTime !== undefined) existing.generatedTime = patch.generatedTime;
+        if (patch.error !== undefined) existing.error = patch.error;
+        if (patch.result !== undefined) existing.result = patch.result;
 
-    writeGenerationFile(root, workflowId, generateId, existing);
-    return existing;
+        await fs.writeFile(filePath, JSON.stringify(existing, null, 2), 'utf-8');
+        return existing;
+    });
 }

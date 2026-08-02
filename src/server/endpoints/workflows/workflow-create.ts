@@ -5,7 +5,7 @@
 //     ├── workflow.json   (ComfyUI-compatible workflow JSON)
 //     └── meta.json       (dashboard metadata: name, description, tags, etc.)
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
@@ -81,6 +81,16 @@ function extractTags(raw: Record<string, unknown>): string[] {
     return tags;
 }
 
+/** Async existence probe (replaces fs.existsSync on the event loop). */
+async function pathExists(p: string): Promise<boolean> {
+    try {
+        await fs.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 /**
  * Extract the workflow's declared "Input" field keys — widget markings
  * the dashboard persists in raw.extra.inputFields (see the PROMPT tab's
@@ -114,22 +124,22 @@ export const workflowCreate = asHandlerMethod(async (_, parameters, variables) =
     // Generate folder name from timestamp; handle collisions with a counter suffix
     const baseFolder = timestampFolder(now);
     const databaseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
-    fs.mkdirSync(databaseDir, { recursive: true });
+    await fs.mkdir(databaseDir, { recursive: true });
 
     let folderName = baseFolder;
     let folderPath = path.join(databaseDir, folderName);
     let counter = 1;
-    while (fs.existsSync(folderPath)) {
+    while (await pathExists(folderPath)) {
         folderName = `${baseFolder}-${String(counter).padStart(2, '0')}`;
         folderPath = path.join(databaseDir, folderName);
         counter++;
     }
 
-    fs.mkdirSync(folderPath, { recursive: true });
+    await fs.mkdir(folderPath, { recursive: true });
 
     // workflow.json — pure ComfyUI-compatible workflow (drop-in ready)
     const workflowJsonPath = path.join(folderPath, 'workflow.json');
-    fs.writeFileSync(workflowJsonPath, JSON.stringify(comfyWorkflow, null, 2), 'utf-8');
+    await fs.writeFile(workflowJsonPath, JSON.stringify(comfyWorkflow, null, 2), 'utf-8');
 
     // meta.json — dashboard metadata
     const meta = {
@@ -143,7 +153,7 @@ export const workflowCreate = asHandlerMethod(async (_, parameters, variables) =
         inputFields: extractInputFields(body.raw)
     };
     const metaJsonPath = path.join(folderPath, 'meta.json');
-    fs.writeFileSync(metaJsonPath, JSON.stringify(meta, null, 2), 'utf-8');
+    await fs.writeFile(metaJsonPath, JSON.stringify(meta, null, 2), 'utf-8');
 
     return {
         status: 200,

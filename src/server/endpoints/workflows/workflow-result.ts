@@ -126,7 +126,7 @@ export const workflowGenerateResultGet = asHandlerMethod(async (context, paramet
         return { status: 400, response: { error: 'index must be a non-negative integer' } };
     }
 
-    const loaded = readGenerationFile(projectRoot, workflowId, generateId);
+    const loaded = await readGenerationFile(projectRoot, workflowId, generateId);
     if (!loaded) {
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
@@ -136,7 +136,7 @@ export const workflowGenerateResultGet = asHandlerMethod(async (context, paramet
     // json. After this the normal path below is always the redirect; the
     // decode-and-stream branch only survives for items whose asset write
     // failed this very request.
-    const entry = migrateGenerationAssets(projectRoot, workflowId, generateId, loaded);
+    const entry = await migrateGenerationAssets(projectRoot, workflowId, generateId, loaded);
 
     const item = entry.result[index];
     if (!item) {

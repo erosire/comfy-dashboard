@@ -40,7 +40,7 @@
 //   generation does not cancel its pod run — the background stream consumer
 //   simply no-ops on the missing file.
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 import {
@@ -54,6 +54,16 @@ import {
     type GenerationPatch,
     type GenerationSummary
 } from './generation-store';
+
+/** Async existence probe (replaces fs.existsSync on the event loop). */
+async function pathExists(p: string): Promise<boolean> {
+    try {
+        await fs.access(p);
+        return true;
+    } catch {
+        return false;
+    }
+}
 
 function timestampFile(date: Date): string {
     const pad = (n: number) => String(n).padStart(2, '0');
@@ -98,26 +108,36 @@ export const workflowGenerateList = asHandlerMethod(async (_, parameters, variab
         projectRoot, 'temporary/database/comfy-workflows', workflowId, 'generation'
     );
 
-    if (!fs.existsSync(generationDir)) {
+    // Async readdir — a missing folder is just an empty list.
+    let entries: import('node:fs').Dirent[];
+    try {
+        entries = await fs.readdir(generationDir, { withFileTypes: true });
+    } catch {
         return { status: 200, response: { generations: [] } };
     }
 
-    const entries = fs.readdirSync(generationDir, { withFileTypes: true });
-    const summaries: GenerationSummary[] = [];
-
-    for (const entry of entries) {
-        if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-        // readGenerationFile normalizes older files and returns null for
-        // missing/corrupted entries — skip those. We project to a summary
-        // so the list never carries the heavy prompt/result/stream fields.
-        const genId = entry.name.replace('.json', '');
-        const full = readGenerationFile(projectRoot, workflowId, genId);
-        if (!full) continue;
-        // Heal legacy inline-base64 results as the list sweeps by — each
-        // migration is a one-time file write + json rewrite; afterwards the
-        // generation only carries `file:` references.
-        summaries.push(toGenerationSummary(migrateGenerationAssets(projectRoot, workflowId, genId, full)));
-    }
+    // Read + project every generation CONCURRENTLY (this endpoint is polled
+    // while generations run — sequential sync reads used to serialize the
+    // whole directory scan into the event loop on every poll).
+    //
+    // readGenerationFile normalizes older files and returns null for
+    // missing/corrupted entries — skip those. We project to a summary so
+    // the list never carries the heavy prompt/result/stream fields.
+    // Heal legacy inline-base64 results as the list sweeps by — each
+    // migration is a one-time file write + json rewrite; afterwards the
+    // generation only carries `file:` references.
+    const summaries = (
+        await Promise.all(
+            entries
+                .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+                .map(async (entry) => {
+                    const genId = entry.name.replace('.json', '');
+                    const full = await readGenerationFile(projectRoot, workflowId, genId);
+                    if (!full) return null;
+                    return toGenerationSummary(await migrateGenerationAssets(projectRoot, workflowId, genId, full));
+                })
+        )
+    ).filter((s): s is GenerationSummary => s !== null);
 
     // Sort by createdDate descending (newest first)
     summaries.sort((a, b) => (b.createdDate || '').localeCompare(a.createdDate || ''));
@@ -138,7 +158,7 @@ export const workflowGenerateGet = asHandlerMethod(async (_, parameters, variabl
         return { status: 400, response: { error: 'generate_id is required' } };
     }
 
-    const entry = readGenerationFile(projectRoot, workflowId, generateId);
+    const entry = await readGenerationFile(projectRoot, workflowId, generateId);
     if (!entry) {
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
@@ -146,7 +166,7 @@ export const workflowGenerateGet = asHandlerMethod(async (_, parameters, variabl
     // Heal legacy inline-base64 results on read — the API never hands
     // base64 back out: the json is rewritten with file: references and the
     // media serves off disk.
-    return { status: 200, response: { generation: migrateGenerationAssets(projectRoot, workflowId, generateId, entry) } };
+    return { status: 200, response: { generation: await migrateGenerationAssets(projectRoot, workflowId, generateId, entry) } };
 });
 
 /** POST — Create a new generation snapshot. */
@@ -163,14 +183,14 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
     );
     const workflowJsonPath = path.join(workflowDir, 'workflow.json');
 
-    if (!fs.existsSync(workflowJsonPath)) {
+    if (!(await pathExists(workflowJsonPath))) {
         return { status: 404, response: { error: `Workflow '${workflowId}' not found` } };
     }
 
     // Read the workflow.json — the default snapshot source
     let workflowData: Record<string, unknown> | null = null;
     try {
-        workflowData = JSON.parse(fs.readFileSync(workflowJsonPath, 'utf-8'));
+        workflowData = JSON.parse(await fs.readFile(workflowJsonPath, 'utf-8'));
     } catch {
         // Tolerated when the request supplies its own prompt below
     }
@@ -202,13 +222,13 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
 
     // Ensure the generation subfolder exists
     const generationDir = path.join(workflowDir, 'generation');
-    fs.mkdirSync(generationDir, { recursive: true });
+    await fs.mkdir(generationDir, { recursive: true });
 
     // Handle filename collision with a counter suffix
     let filename = `${genId}.json`;
     let filePath = path.join(generationDir, filename);
     let counter = 1;
-    while (fs.existsSync(filePath)) {
+    while (await pathExists(filePath)) {
         filename = `${genId}-${String(counter).padStart(2, '0')}.json`;
         filePath = path.join(generationDir, filename);
         counter++;
@@ -228,7 +248,7 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
         result: []
     };
 
-    fs.writeFileSync(filePath, JSON.stringify(generation, null, 2), 'utf-8');
+    await fs.writeFile(filePath, JSON.stringify(generation, null, 2), 'utf-8');
 
     return {
         status: 200,
@@ -258,11 +278,11 @@ export const workflowGenerateUpdate = asHandlerMethod(async (_, parameters, vari
     // asset files on disk — the stored json keeps only `file:` references,
     // so generation files stay small regardless of the write path.
     if (body.result !== undefined) {
-        body.result = persistResultAssets(projectRoot, workflowId, generateId, body.result);
+        body.result = await persistResultAssets(projectRoot, workflowId, generateId, body.result);
     }
 
     // Merge updates — only overwrite provided fields
-    const existing = patchGenerationFile(projectRoot, workflowId, generateId, body);
+    const existing = await patchGenerationFile(projectRoot, workflowId, generateId, body);
     if (!existing) {
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
@@ -288,7 +308,7 @@ export const workflowGenerateDelete = asHandlerMethod(async (_, parameters, vari
         return { status: 400, response: { error: 'generate_id is required' } };
     }
 
-    if (!deleteGenerationFiles(projectRoot, workflowId, generateId)) {
+    if (!(await deleteGenerationFiles(projectRoot, workflowId, generateId))) {
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
 

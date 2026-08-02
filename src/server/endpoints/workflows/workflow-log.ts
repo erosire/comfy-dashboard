@@ -20,7 +20,7 @@
 // lines are the ones that carry the terminal error, and a pathological run
 // must not push megabytes into a debugging dialog.
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import { asHandlerMethod } from '@underload/service';
 import { generationLogPath, readGenerationFile, type GenerationEntry } from './generation-store';
 
@@ -73,17 +73,20 @@ export const workflowGenerateLogGet = asHandlerMethod(async (_context, parameter
         return { status: 400, response: { error: 'generate_id is required' } };
     }
 
-    const entry = readGenerationFile(projectRoot, workflowId, generateId);
+    const entry = await readGenerationFile(projectRoot, workflowId, generateId);
     if (!entry) {
         return { status: 404, response: { error: `Generation '${generateId}' not found` } };
     }
 
+    // Single async read (no existsSync+readFileSync pair): a missing/unreadable
+    // .log simply means there is no trail on disk → synthesize from the json.
     const logPath = generationLogPath(projectRoot, workflowId, generateId);
-    if (!fs.existsSync(logPath)) {
+    let raw: Buffer;
+    try {
+        raw = await fs.readFile(logPath);
+    } catch {
         return { status: 200, response: { log: synthesizeLog(entry) } };
     }
-
-    const raw = fs.readFileSync(logPath);
     if (raw.length <= LOG_RESPONSE_MAX_BYTES) {
         return { status: 200, response: { log: raw.toString('utf-8') } };
     }

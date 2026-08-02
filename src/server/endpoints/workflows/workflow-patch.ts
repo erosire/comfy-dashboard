@@ -9,7 +9,7 @@
 //     ├── workflow.json   (ComfyUI-compatible workflow JSON)
 //     └── meta.json       (dashboard metadata)
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
@@ -94,12 +94,9 @@ export const workflowPatch = asHandlerMethod(async (_, parameters, variables) =>
     const metaPath = path.join(baseDir, workflowId, 'meta.json');
     const workflowJsonPath = path.join(baseDir, workflowId, 'workflow.json');
 
-    if (!fs.existsSync(metaPath) || !fs.existsSync(workflowJsonPath)) {
-        return { status: 404, response: { error: `Workflow '${workflowId}' not found` } };
-    }
-
     try {
-        const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+        const metaRaw = await fs.readFile(metaPath, 'utf-8');
+        const meta = JSON.parse(metaRaw);
 
         if (body.name !== undefined) meta.name = body.name;
         if (body.description !== undefined) meta.description = body.description;
@@ -118,13 +115,13 @@ export const workflowPatch = asHandlerMethod(async (_, parameters, variables) =>
 
         meta.modifiedDate = new Date().toISOString();
 
-        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
 
         if (body.raw !== undefined) {
-            fs.writeFileSync(workflowJsonPath, JSON.stringify(body.raw, null, 2), 'utf-8');
+            await fs.writeFile(workflowJsonPath, JSON.stringify(body.raw, null, 2), 'utf-8');
         }
 
-        const raw = body.raw ?? JSON.parse(fs.readFileSync(workflowJsonPath, 'utf-8'));
+        const raw = body.raw ?? JSON.parse(await fs.readFile(workflowJsonPath, 'utf-8'));
 
         return {
             status: 200,

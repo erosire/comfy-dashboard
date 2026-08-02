@@ -70,7 +70,7 @@ const resultUrl = (index: number, generateId = GENERATION_ID) =>
     `http://127.0.0.1:${port}/v1/comfy/workflows/${WORKFLOW_ID}/generate/${generateId}/result/${index}`;
 
 /** Seed a generation json directly (no asset persistence). */
-function seedGenerationJson(generateId: string, result: GenerationEntry['result']) {
+async function seedGenerationJson(generateId: string, result: GenerationEntry['result']) {
     fs.mkdirSync(path.dirname(generationFilePath(tmpRoot, WORKFLOW_ID, generateId)), { recursive: true });
     const entry: GenerationEntry = {
         id: generateId,
@@ -82,7 +82,7 @@ function seedGenerationJson(generateId: string, result: GenerationEntry['result'
         prompt: {},
         result
     };
-    writeGenerationFile(tmpRoot, WORKFLOW_ID, generateId, entry);
+    await writeGenerationFile(tmpRoot, WORKFLOW_ID, generateId, entry);
 }
 
 beforeAll(async () => {
@@ -90,7 +90,7 @@ beforeAll(async () => {
 
     // Write path, exactly as cloud-prompt's background consumer does it:
     // capture data: → persist assets to files → store the json reference.
-    const results = persistResultAssets(tmpRoot, WORKFLOW_ID, GENERATION_ID, [
+    const results = await persistResultAssets(tmpRoot, WORKFLOW_ID, GENERATION_ID, [
         {
             type: 'video',
             url: `data:video/mp4;base64,${VIDEO_BYTES.toString('base64')}`,
@@ -100,12 +100,12 @@ beforeAll(async () => {
         }
     ]);
     expect(results[0].url).toBe('file:0.mp4');
-    seedGenerationJson(GENERATION_ID, results);
+    await seedGenerationJson(GENERATION_ID, results);
 
     // A LEGACY generation, as written before file-backed storage existed:
     // its result payload sits inline in the json as base64. The server's
     // read paths must migrate it to files on first touch.
-    seedGenerationJson(LEGACY_GENERATION_ID, [
+    await seedGenerationJson(LEGACY_GENERATION_ID, [
         {
             type: 'video',
             url: `data:video/mp4;base64,${VIDEO_BYTES.toString('base64')}`,

@@ -7,7 +7,7 @@
 //     ├── workflow.json   (ComfyUI-compatible workflow JSON)
 //     └── meta.json       (dashboard metadata)
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
@@ -23,13 +23,20 @@ export const workflowGet = asHandlerMethod(async (_, parameters, variables) => {
     const metaPath = path.join(baseDir, workflowId, 'meta.json');
     const workflowJsonPath = path.join(baseDir, workflowId, 'workflow.json');
 
-    if (!fs.existsSync(metaPath) || !fs.existsSync(workflowJsonPath)) {
+    // Read both files concurrently; any missing/unreadable one → the lookup
+    // checks below decide 404 (absent file) vs 500 (present but corrupt).
+    const [metaRaw, workflowRaw] = await Promise.all([
+        fs.readFile(metaPath, 'utf-8').catch(() => null),
+        fs.readFile(workflowJsonPath, 'utf-8').catch(() => null)
+    ]);
+
+    if (metaRaw === null || workflowRaw === null) {
         return { status: 404, response: { error: `Workflow '${workflowId}' not found` } };
     }
 
     try {
-        const metaData = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-        const workflowData = JSON.parse(fs.readFileSync(workflowJsonPath, 'utf-8'));
+        const metaData = JSON.parse(metaRaw);
+        const workflowData = JSON.parse(workflowRaw);
 
         return {
             status: 200,

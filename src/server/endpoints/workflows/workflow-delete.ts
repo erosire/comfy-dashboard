@@ -5,7 +5,7 @@
 // Folder format:
 //   YYYYMMDD-HHMMSS/   (recursively deleted)
 
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { asHandlerMethod } from '@underload/service';
 
@@ -19,12 +19,15 @@ export const workflowDelete = asHandlerMethod(async (_, parameters, variables) =
 
     const folderPath = path.join(projectRoot, 'temporary/database/comfy-workflows', workflowId);
 
-    if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+    try {
+        const stats = await fs.stat(folderPath);
+        if (!stats.isDirectory()) throw new Error('not a directory');
+    } catch {
         return { status: 404, response: { error: `Workflow '${workflowId}' not found` } };
     }
 
     try {
-        fs.rmSync(folderPath, { recursive: true, force: true });
+        await fs.rm(folderPath, { recursive: true, force: true });
         return { status: 200, response: { success: true, id: workflowId } };
     } catch {
         return { status: 500, response: { error: 'Failed to delete workflow folder' } };

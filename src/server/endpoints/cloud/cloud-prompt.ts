@@ -217,14 +217,17 @@ async function processPodPromptInBackground(
 
     // Append a timestamped line to <generationId>.log (next to the .json)
     // at every status change and streamed event. Best-effort — never throws.
+    // Fire-and-forget: appends are chained per log file inside the store,
+    // so rapid event bursts still land in strict chronological order while
+    // the NDJSON reader never waits on disk.
     const log = (message: string) =>
-        appendGenerationLog(root, workflowId, generationId, message);
+        void appendGenerationLog(root, workflowId, generationId, message);
 
     log(`Generation started — submitting to ${podUrl.toString()} (client_id: ${clientId ?? 'n/a'})`);
 
     try {
         // Mark the generation as picked up so pollers see live progress
-        const patched = patchGenerationFile(root, workflowId, generationId, { status: 'processing' });
+        const patched = await patchGenerationFile(root, workflowId, generationId, { status: 'processing' });
         if (!patched) {
             log(`Generation '${generationId}' not found — aborting background processing`);
             console.warn(`[cloud/prompt] Generation '${generationId}' not found — aborting background processing`);
@@ -274,12 +277,12 @@ async function processPodPromptInBackground(
     // sufficient to understand the run.
     const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
     const completedDate = new Date().toISOString();
-    const persistedResults = persistResultAssets(root, workflowId, generationId, results);
+    const persistedResults = await persistResultAssets(root, workflowId, generationId, results);
     if (results.some((r, i) => r.url !== persistedResults[i].url)) {
         log(`Persisted result payload(s) to asset files under generation/${generationId}/`);
     }
     if (failureMessage) {
-        patchGenerationFile(root, workflowId, generationId, {
+        await patchGenerationFile(root, workflowId, generationId, {
             status: 'failed',
             error: failureMessage,
             result: persistedResults,
@@ -292,7 +295,7 @@ async function processPodPromptInBackground(
             `in ${elapsed}: ${failureMessage}`
         );
     } else {
-        patchGenerationFile(root, workflowId, generationId, {
+        await patchGenerationFile(root, workflowId, generationId, {
             status: 'completed',
             error: null,
             result: persistedResults,
