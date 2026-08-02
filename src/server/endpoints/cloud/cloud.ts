@@ -1,9 +1,16 @@
 // Cloud pod endpoint — POST /v1/comfy/cloud
 //
 // Dual-purpose endpoint:
-//   1. Create mode: body = {} or {"name": "..."} → GET the Beam spawner URL,
-//      which returns a 302 redirect to the spawned pod's public proxy URL.
-//      Returns { pod_url } to the UI.
+//   1. Create mode: body = {"gpu": "4090" | "B300" | ..., "name"?} → pick
+//      the spawner server list registered for that GPU under
+//      comfyCloudServiceEndpoint (runtime/secret/private/modal/comfy.ts:
+//      gpu → { serverName: spawnerUrl }), then try each server IN ORDER:
+//      GET the spawner URL, which returns a 302 redirect to the spawned
+//      pod's public proxy URL. A failed attempt (unreachable, non-redirect
+//      status, missing Location) falls through to the next server; when
+//      every server fails the request answers 503 so the user understands
+//      no server is available to spawn the requested GPU. Returns
+//      { pod_url } to the UI.
 //   2. Status mode: body = {"pod_url": "..."} → probe an existing pod and
 //      return { health, models_dir, models }.
 //
@@ -32,14 +39,17 @@ import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
 import { probeDirectComfyUI, probeDirectHealth } from './direct-comfy';
 import { probeProxyStatus } from './proxy-comfy';
 
-// This is the spawner URL
-const DEFAULT_SPAWNER_URL = comfyCloudServiceEndpoint.standard;
+// GPU-keyed spawner registry — gpu → { serverName: spawnerUrl }. The map
+// lives in runtime/secret/private/modal/comfy.ts; keyed loosely here so a
+// GPU request resolves by string lookup (numeric keys like 4090 arrive as
+// strings over JSON anyway).
+const SPAWNER_BY_GPU = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
-    const spawnerUrl: string = _variables?.spawnerUrl ?? DEFAULT_SPAWNER_URL;
     const body = (parameters.body ?? {}) as {
         name?: string;
         pod_url?: string;
+        gpu?: string;
     };
 
     // ── Status mode: probe existing pod ────────────────────────────
@@ -74,87 +84,167 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
     }
 
     // ── Create mode: spawn a new pod ──────────────────────────────
-    // The spawner URL is a direct endpoint. GET it → 302 redirect to the
-    // spawned pod's public proxy URL. Use ?name=<pod_name> to name the pod.
+    // The GPU requested by the UI selects the candidate spawner server
+    // list. Each server is tried in registration order; the first one
+    // whose spawner answers a 302 redirect wins, the rest act as
+    // fallback. The _variables.spawnerUrl override (tests / ops) bypasses
+    // the registry as a single-candidate list.
     const podName: string | undefined = body.name;
 
+    let candidates: { server: string; url: string }[];
+    const overrideUrl: string | undefined = _variables?.spawnerUrl;
+    if (overrideUrl) {
+        candidates = [{ server: 'override', url: overrideUrl }];
+    } else {
+        if (!body.gpu) {
+            // The UI always sends a GPU — a missing one is a client bug,
+            // reported with the valid options so it is self-explanatory.
+            return {
+                status: 400,
+                response: {
+                    error: 'Missing gpu — specify which GPU to spawn the pod on',
+                    available_gpus: Object.keys(SPAWNER_BY_GPU)
+                }
+            };
+        }
+        const spawners = SPAWNER_BY_GPU[body.gpu];
+        if (!spawners || Object.keys(spawners).length === 0) {
+            return {
+                status: 400,
+                response: {
+                    error: `Unknown gpu: ${body.gpu}`,
+                    available_gpus: Object.keys(SPAWNER_BY_GPU)
+                }
+            };
+        }
+        candidates = Object.entries(spawners).map(([server, url]) => ({ server, url }));
+    }
+
+    // Try each candidate server in order (see spawnFromCandidates).
+    const spawned = await spawnFromCandidates(candidates, podName);
+
+    if (!spawned.location) {
+        // Every candidate failed — no server is available to spawn the
+        // requested GPU. 503 (Service Unavailable) is the honest signal:
+        // capacity may return later, and the UI surfaces the error and the
+        // per-server attempts verbatim.
+        return {
+            status: 503,
+            response: {
+                error: `No server available to spawn gpu=${body.gpu ?? 'override'} — every spawner failed`,
+                attempts: spawned.attempts
+            }
+        };
+    }
+
+    const location = spawned.location;
+
+    // The pod may not be ready yet — probe it for the health +
+    // models listing AND whether it is a direct ComfyUI.
+    let statusData: any;
+    let isDirect: boolean;
+    try {
+        const podUrl = new URL(location);
+        const probe = await probePod(podUrl);
+        statusData = probe.statusData ?? { error: `Status probe failed: ${probe.error}` };
+        isDirect = probe.isDirect;
+    } catch (err: any) {
+        console.error(`[cloud] Initial status probe failed for ${location}:`, err.message);
+        statusData = { error: `Status probe failed: ${err.message}` };
+        isDirect = false;
+    }
+
+    console.log('[cloud] spawn status response:', JSON.stringify(statusData, null, 2), `is_direct=${isDirect}`);
+
+    return {
+        status: 200,
+        response: {
+            pod_url: location,
+            gpu: body.gpu,
+            spawner: spawned.server,
+            ...statusData,
+            is_direct: isDirect
+        }
+    };
+});
+
+// ── Spawner request ──────────────────────────────────────────────────
+
+/** One spawn candidate: a named spawner server from the GPU's list. */
+export type SpawnCandidate = { server: string; url: string };
+
+/** One failed spawn attempt, kept for the exhausted-list error report. */
+export type SpawnAttempt = { server: string; error: string };
+
+export type SpawnResult = {
+    /** Spawned pod's public URL from the winning server's 302 Location; null when every candidate failed. */
+    location: string | null;
+    /** Name of the server that produced `location` (undefined on failure). */
+    server?: string;
+    /** Failure trail, in attempt order — every server tried before the outcome. */
+    attempts: SpawnAttempt[];
+};
+
+/**
+ * Walk the GPU's candidate servers IN ORDER: the first spawner that
+ * answers a usable 302 redirect wins; ANY failure (unreachable host,
+ * non-redirect status, redirect without Location) is recorded and the
+ * next server is tried. Returns location=null once the whole list is
+ * exhausted — the handler maps that to HTTP 503.
+ */
+export async function spawnFromCandidates(candidates: SpawnCandidate[], podName?: string): Promise<SpawnResult> {
+    const attempts: SpawnAttempt[] = [];
+    for (const candidate of candidates) {
+        try {
+            const location = await requestSpawn(candidate.url, podName);
+            return { location, server: candidate.server, attempts };
+        } catch (err: any) {
+            const message = err?.message ?? String(err);
+            console.error(`[cloud] Spawner "${candidate.server}" (${candidate.url}) failed: ${message}`);
+            attempts.push({ server: candidate.server, error: message });
+        }
+    }
+    return { location: null, attempts };
+}
+
+/**
+ * GET one spawner URL and extract the spawned pod's public proxy URL from
+ * its 302 redirect. The spawner URL is a direct endpoint — ?name=<pod_name>
+ * names the pod. THROWS on every failure shape (invalid URL, unreachable
+ * host, non-redirect status, redirect without a Location header) so the
+ * caller can fall through to the next candidate server.
+ */
+export async function requestSpawn(spawnerUrl: string, podName?: string): Promise<string> {
     let spawnUrl: URL;
     try {
         spawnUrl = new URL(String(spawnerUrl));
     } catch {
-        console.error(`[cloud] Invalid spawner URL: ${spawnerUrl}`);
-        return {
-            status: 500,
-            response: { error: 'Server misconfigured: invalid spawner URL' }
-        };
+        throw new Error(`Invalid spawner URL: ${spawnerUrl}`);
     }
     if (podName) {
         spawnUrl.searchParams.set('name', podName);
     }
 
-    try {
-        const upstream = await fetch(spawnUrl.toString(), {
-            method: 'GET',
-            redirect: 'manual' // Don't follow the 302 — we need the Location header
-        });
+    const upstream = await fetch(spawnUrl.toString(), {
+        method: 'GET',
+        redirect: 'manual' // Don't follow the 302 — we need the Location header
+    });
 
-        if (upstream.status === 302 || upstream.status === 301) {
-            const location = upstream.headers.get('location');
-            if (!location) {
-                console.error(`[cloud] Spawner returned ${upstream.status} but no Location header`);
-                return {
-                    status: 502,
-                    response: { error: 'Spawner returned redirect with no Location header' }
-                };
-            }
-
-            // The pod may not be ready yet — probe it for the health +
-            // models listing AND whether it is a direct ComfyUI.
-            let statusData: any;
-            let isDirect: boolean;
-            try {
-                const podUrl = new URL(location);
-                const probe = await probePod(podUrl);
-                statusData = probe.statusData ?? { error: `Status probe failed: ${probe.error}` };
-                isDirect = probe.isDirect;
-            } catch (err: any) {
-                console.error(`[cloud] Initial status probe failed for ${location}:`, err.message);
-                statusData = { error: `Status probe failed: ${err.message}` };
-                isDirect = false;
-            }
-
-            console.log('[cloud] spawn status response:', JSON.stringify(statusData, null, 2), `is_direct=${isDirect}`);
-
-            return {
-                status: 200,
-                response: {
-                    pod_url: location,
-                    ...statusData,
-                    is_direct: isDirect
-                }
-            };
+    if (upstream.status === 302 || upstream.status === 301) {
+        const location = upstream.headers.get('location');
+        if (!location) {
+            throw new Error(`Spawner returned ${upstream.status} but no Location header`);
         }
-
-        // Non-redirect response is unexpected
-        const errorBody = await upstream.text().catch(() => '');
-        console.error(`[cloud] Spawner returned ${upstream.status} (expected 302): ${errorBody}`);
-        return {
-            status: 502,
-            response: {
-                error: `Spawner returned HTTP ${upstream.status} (expected 302 redirect)`,
-                detail: errorBody || undefined
-            }
-        };
-    } catch (err: any) {
-        console.error(`[cloud] Failed to reach spawner at ${spawnUrl}:`, err.message);
-        return {
-            status: 502,
-            response: {
-                error: `Failed to reach spawner: ${err.message}`
-            }
-        };
+        return location;
     }
-});
+
+    // Non-redirect response is unexpected — include a body hint when there
+    // is one (an error page, a plain-text refusal).
+    const errorBody = await upstream.text().catch(() => '');
+    throw new Error(
+        `Spawner returned HTTP ${upstream.status} (expected 302 redirect)` + (errorBody ? `: ${errorBody}` : '')
+    );
+}
 
 // ── Pod probing (dispatch across the comfy server shapes) ────────────
 

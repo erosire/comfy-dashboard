@@ -33,6 +33,16 @@
 export type CloudCreateResult = {
     pod_url: string;
     /**
+     * The GPU the pod was spawned on (echoed back from the request) — the
+     * pod button's label ("4090", "B300", …).
+     */
+    gpu?: string;
+    /**
+     * Name of the spawner server (within the GPU's server list) that
+     * produced this pod — the fallback chain's winner.
+     */
+    spawner?: string;
+    /**
      * True when the pod_url fronts a DIRECT ComfyUI server (native
      * websocket reachable at /ws); false for the Tier 2 ComfyProxy shape.
      * Feed this back as `is_direct` when prompting the pod.
@@ -73,7 +83,10 @@ export type CloudStreamEvent = {
 // ── Request types ─────────────────────────────────────────────────────
 
 export type CloudRequest =
-    | { type: 'create'; name?: string }
+    // Create REQUIRES the GPU — the server picks the spawner list keyed by
+    // it (comfyCloudServiceEndpoint) and falls through the servers in
+    // order, answering 503 when no server can spawn the requested GPU.
+    | { type: 'create'; gpu: string; name?: string }
     | { type: 'status'; pod_url: string };
 
 /**
@@ -115,7 +128,7 @@ export type CloudPromptBody = {
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-function isCreateRequest(req: CloudRequest): req is { type: 'create'; name?: string } {
+function isCreateRequest(req: CloudRequest): req is { type: 'create'; gpu: string; name?: string } {
     return req.type === 'create';
 }
 
@@ -130,8 +143,9 @@ function isStatusRequest(req: CloudRequest): req is { type: 'status'; pod_url: s
  *
  * All requests go through the server proxy at `baseUrl`.
  *
- * - `{ type: 'create', name? }` → `POST <baseUrl>/cloud` with `{}` or `{name}`.
- *   The server hits the Beam spawner (302 redirect) and returns `{ pod_url }`.
+ * - `{ type: 'create', gpu, name? }` → `POST <baseUrl>/cloud` with `{gpu}` or `{gpu, name}`.
+ *   The server tries the GPU's spawner servers in order (302 redirect)
+ *   and returns `{ pod_url }`, or 503 when none could spawn it.
  *
  * - `{ type: 'status', pod_url }` → `POST <baseUrl>/cloud` with `{pod_url}`.
  *   The server probes the pod's Tier 2 proxy and returns
@@ -156,9 +170,9 @@ export async function cloud(
 
 async function cloudCreate(
     baseUrl: string,
-    request: { type: 'create'; name?: string }
+    request: { type: 'create'; gpu: string; name?: string }
 ): Promise<CloudCreateResult> {
-    const body: Record<string, string> = {};
+    const body: Record<string, string> = { gpu: request.gpu };
     if (request.name) {
         body.name = request.name;
     }
@@ -174,6 +188,13 @@ async function cloudCreate(
         try {
             const data = await response.json();
             if (data?.error) message = data.error;
+            // 503 "no server available" carries the per-server attempts
+            // trail — surface it so the user sees WHY each spawner failed.
+            if (Array.isArray(data?.attempts)) {
+                message += data.attempts
+                    .map((a: { server?: string; error?: string }) => `\n• ${a.server}: ${a.error}`)
+                    .join('');
+            }
         } catch { /* ignore */ }
         throw new Error(message);
     }

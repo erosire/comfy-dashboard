@@ -14,10 +14,19 @@ export type PodEntry = {
     pod_url: string;
     status: 'spawning' | 'ready' | 'error';
     /**
+     * The GPU the pod was spawned on ("4090", "B300", …) — chosen in the
+     * New-pod dialog and sent to POST /v1/comfy/cloud as `gpu`. Drives the
+     * pod button's label ("4090x3" = a 4090 pod with 3 jobs queued).
+     * Undefined only for pods predating GPU selection.
+     */
+    gpu?: string;
+    /**
      * What the pod_url fronts: true = a DIRECT ComfyUI server (native
      * websocket at /ws — prompt over POST /cloud/prompt with
      * `is_direct: true`), false = Tier 2 ComfyProxy. Learned from the
      * create/status responses' `is_direct` (undefined until detected).
+     * Renders as the pod button's border style: solid = direct, dashed =
+     * proxy.
      */
     is_direct?: boolean;
     /**

@@ -1,10 +1,12 @@
-// Cloud pod lifecycle — pod creation/reuse for the New / "#N" / Auto
-// buttons, run-state sync from polled generations, and the keepalive
+// Cloud pod lifecycle — pod creation/reuse for the New / GPU-labeled pod
+// / Auto buttons, run-state sync from polled generations, and the keepalive
 // heartbeat that detects dead pod_urls.
 //
 // Extracted from the original CloudTab.tsx. Behaviour notes preserved:
-//   - New is NEVER blocked: every click spawns a fresh pod, as fast
-//     as the user can click. Per-pod status lives on the "#N" button.
+//   - New is NEVER blocked: the GPU picker dialog (GpuSelectDialog) asks
+//     for the GPU ("4090" / "B300", see GPU_OPTIONS), and every pick
+//     spawns a fresh pod for that GPU. Per-pod status lives on the pod
+//     button (labeled e.g. "4090x3" = a 4090 pod with 3 jobs queued).
 //   - Pods accept concurrent jobs: each "#N" click queues another job; the
 //     server scopes each submission with its own client_id. "Auto" queues
 //     on the least-loaded ready pod (see pickLeastLoadedPod).
@@ -209,29 +211,37 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
 
     // ── New workflow ───────────────────────────────────────────────
     // Creates a cloud pod first, then runs a new generation snapshot on it
-    // via POST /v1/comfy/cloud/prompt. The "#N" button appears
-    // IMMEDIATELY on click — in "spawning" state (spinner) while the
+    // via POST /v1/comfy/cloud/prompt. The GPU is picked by the user in
+    // the New-pod dialog (GpuSelectDialog) — the button appears
+    // IMMEDIATELY on pick — in "spawning" state (spinner) while the
     // pod_url is being resolved — then flips to ready. Clicking a ready
-    // #N does the same thing but reuses that pod (skipping pod creation).
+    // pod button does the same thing but reuses that pod (skipping pod
+    // creation).
     //
-    // New is NEVER blocked: every click spawns a fresh pod, as fast
+    // New is NEVER blocked: every pick spawns a fresh pod, as fast
     // as the user can click. Per-pod status (spawning, running, done/error)
-    // lives on the individual "#N" button, not on New.
+    // lives on the individual pod button, not on New.
     //
+    // gpu: the GPU key chosen in the dialog ("4090", "B300", …) — sent to
+    // POST /v1/comfy/cloud, whose server walks that GPU's spawner server
+    // list (comfyCloudServiceEndpoint) in order.
     // generationOverride: rerun with a stored generation snapshot (result
     // viewer) instead of building from the editor tree.
 
-    const handleGenerate = React.useCallback(async (generationOverride?: GenerationSnapshot) => {
+    const handleGenerate = React.useCallback(async (gpu: string, generationOverride?: GenerationSnapshot) => {
         if (!editingWorkflowId || (!generationOverride && nodes.length === 0)) return;
 
-        // Step 1 — register the pod entry immediately so the "#N"
-        // button shows up while the pod_url is still being resolved.
+        // Step 1 — register the pod entry immediately so the pod
+        // button shows up while the pod_url is still being resolved. The
+        // requested GPU is stored right away — the button labels itself
+        // from it even before the server answers.
         podCounterRef.current += 1;
         const podNumber = podCounterRef.current;
         const podEntry: PodEntry = {
             id: `gen-pod-${Date.now()}-${podNumber}`,
             podNumber,
             name: podLetter(podNumber),
+            gpu,
             pod_url: '',
             status: 'spawning',
             failCount: 0,
@@ -240,12 +250,14 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         };
         setPods((prev) => [...prev, podEntry]);
 
-        // Step 2 — create the cloud pod
-        console.log(`[Generate] Spawning Pod#${podNumber}...`);
+        // Step 2 — create the cloud pod on the requested GPU (the server
+        // falls through that GPU's spawner list and 503s when none can
+        // spawn it — the error text carries the per-server attempts).
+        console.log(`[Generate] Spawning Pod#${podNumber} on gpu=${gpu}...`);
         let podUrl: string;
         let isDirect: boolean | undefined;
         try {
-            const result = await cloud(baseUrl, { type: 'create' });
+            const result = await cloud(baseUrl, { type: 'create', gpu });
             if (!('pod_url' in result)) {
                 throw new Error('Pod spawn response did not contain pod_url');
             }
@@ -256,7 +268,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         } catch (err: any) {
             // Spawn failed — no pod_url ever existed; remove the button.
             setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
-            alert(`Failed to spawn pod ${podLetter(podNumber)}: ${err.message ?? String(err)}`);
+            alert(`Failed to spawn ${gpu} pod: ${err.message ?? String(err)}`);
             return;
         }
         console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl} (${isDirect ? 'direct ComfyUI' : 'proxy'})`);

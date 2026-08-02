@@ -22,13 +22,14 @@
 //     with "Default", a verbatim copy of the viewed image's snapshotted
 //     prompt; with an Input workflow selected, a copy of THAT workflow
 //     with the viewed image fed into its Input fields.
-//   - New + "#N" pod buttons + Auto (bottom bar): rerun — New spawns a
-//     fresh pod, each pod button queues the job on an existing pod, Auto
-//     (right end, visible only while a pod is ready) queues it on the
-//     least-loaded ready pod. They mirror the footer's generation
-//     controls; with a dropdown target armed they run the fed copy
-//     instead of the viewed image's own prompt, and the generation saves
-//     on the workflow being viewed.
+//   - New + GPU-labeled pod buttons + Auto (bottom bar): rerun — New opens
+//     the GPU picker dialog and the picked GPU spawns a fresh pod, each
+//     pod button queues the job on an existing pod, Auto (right end,
+//     visible only while a pod is ready) queues it on the least-loaded
+//     ready pod. They mirror the footer's generation controls; with a
+//     dropdown target armed they run the fed copy instead of the viewed
+//     image's own prompt, and the generation saves on the workflow being
+//     viewed.
 //
 // Extracted from the original CloudTab.tsx viewer modal.
 
@@ -58,9 +59,10 @@ export type ResultViewerProps = {
     mediaUrl: string | null;
     onClose: () => void;
     onNavigate: (delta: 1 | -1) => void;
-    /** Spawned cloud pods — each renders as a "#N" rerun button. */
+    /** Spawned cloud pods — each renders as a GPU-labeled rerun button. */
     pods?: PodEntry[];
-    /** Rerun the viewed image's prompt on a freshly spawned pod. */
+    /** Open the GPU picker — the picked GPU spawns a fresh pod rerunning
+     *  the viewed image's prompt. */
     onGenerate?: () => void;
     /** Rerun the viewed image's prompt on an existing pod. */
     onPodGenerate?: (pod: PodEntry) => void;
@@ -452,13 +454,14 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                 </div>
             )}
 
-            {/* Rerun controls — bottom bar: New (spawns a fresh pod), one
-                "#N" button per spawned pod to New's right (queues the
-                viewed image's prompt on that pod), then Auto at the right
-                end (queues it on the least-loaded ready pod; visible only
-                while such a pod exists). Mirrors the footer's New/pod/Auto
-                styling: loading ring while spawning / jobs in flight,
-                settled-state border colors. */}
+            {/* Rerun controls — bottom bar: New (opens the GPU picker; the
+                picked GPU spawns a fresh pod), one GPU-labeled button per
+                spawned pod to New's right (queues the viewed image's prompt
+                on that pod), then Auto at the right end (queues it on the
+                least-loaded ready pod; visible only while such a pod
+                exists). Mirrors the footer's New/pod/Auto styling: loading
+                ring while spawning / jobs in flight, settled-state border
+                colors, solid border = direct ComfyUI / dashed = proxy. */}
             {onGenerate && (
                 <div
                     onClick={(e) => e.stopPropagation()}
@@ -510,7 +513,7 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                 disabled={isDisabled}
                                 title={
                                     isSpawning
-                                        ? `Pod ${letter} — starting up…`
+                                        ? `Pod ${letter}${p.gpu ? ` (${p.gpu})` : ''} — starting up…`
                                         : p.status !== 'ready'
                                           ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
                                             `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
@@ -527,6 +530,9 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                 }
                                 style={{
                                     fontFamily: theme.fontMono,
+                                    // Direct vs proxy: SOLID border = direct
+                                    // ComfyUI, DASHED border = Tier 2 proxy.
+                                    borderStyle: p.is_direct === false ? 'dashed' : 'solid',
                                     borderColor: isLoading
                                         ? POD_RING_TRACK
                                         : p.run.status === 'error'
@@ -537,7 +543,7 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                 }}
                                 data-testid={`viewer-pod-generate-${p.podNumber}`}
                             >
-                                {podButtonLabel(p.podNumber, inFlight)}
+                                {podButtonLabel(p, inFlight)}
                             </Btn>
                         );
                     })}

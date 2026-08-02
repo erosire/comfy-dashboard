@@ -22,6 +22,7 @@ import {
     DeleteWorkflowDialog,
     FooterActions,
     GenerationLogDialog,
+    GpuSelectDialog,
     RenameWorkflowDialog,
     ResultViewer,
     WorkflowEditorContent,
@@ -222,10 +223,29 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             ]
         );
 
+        // ── GPU selection dialog state ──────────────────────────────
+        // Footer "New" and viewer "New" both open this picker; the chosen
+        // GPU is forwarded to usePods.handleGenerate.
+        const [gpuPickerTarget, setGpuPickerTarget] = React.useState<null | 'footer' | 'viewer'>(null);
+
+        const handleGpuSelected = React.useCallback(
+            (gpu: string) => {
+                if (gpuPickerTarget === 'footer') {
+                    // Fire and forget — the spawned pod button reports state.
+                    void handleGenerate(gpu);
+                } else if (gpuPickerTarget === 'viewer') {
+                    // Fire and forget — the spawned pod button reports state.
+                    void runViewerGeneration((snapshot) => void handleGenerate(gpu, snapshot));
+                }
+                setGpuPickerTarget(null);
+            },
+            [gpuPickerTarget, handleGenerate, runViewerGeneration]
+        );
+
         const handleViewerGenerate = React.useCallback(() => {
-            // Fire and forget — the spawned "#N" button reports state.
-            void runViewerGeneration((snapshot) => void handleGenerate(snapshot));
-        }, [runViewerGeneration, handleGenerate]);
+            // Viewer "New" now routes through the same GPU picker.
+            setGpuPickerTarget('viewer');
+        }, []);
 
         const handleViewerPodGenerate = React.useCallback(
             (pod: PodEntry) => {
@@ -424,13 +444,22 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             pods={pods}
                             nodeCount={editor.nodes.length}
                             onPodGenerate={handlePodGenerate}
-                            onGenerate={handleGenerate}
+                            onGenerate={() => setGpuPickerTarget('footer')}
                             onAutoGenerate={handleAutoGenerate}
                             outputView={outputView}
                             onOutputViewChange={setOutputView}
                         />
                     }
                 />
+
+                {/* GPU picker dialog — opened by the footer/viewer "New"
+                    buttons; choosing a GPU triggers the actual spawn. */}
+                {gpuPickerTarget && (
+                    <GpuSelectDialog
+                        onSelect={handleGpuSelected}
+                        onCancel={() => setGpuPickerTarget(null)}
+                    />
+                )}
 
                 {/* Rename dialog */}
                 {actions.renameOpen && (

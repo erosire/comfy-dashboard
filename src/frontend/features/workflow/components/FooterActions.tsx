@@ -4,18 +4,22 @@
 //   Left  — a single OUTPUT view toggle ("List" ⇄ "Thumbs") for the
 //           generations pane.
 //   Right — the generation controls, now shown on EVERY tab (PROMPT /
-//           JSON / OUTPUT): the primary New button (spawns a fresh pod),
-//           a "#N" button per spawned pod (queue another generation on an
+//           JSON / OUTPUT): the primary New button (opens the GPU picker
+//           dialog — the picked GPU spawns a fresh pod), one GPU-labeled
+//           button per spawned pod (queue another generation on an
 //           existing pod, skipping pod creation), then the "Auto" load
 //           balancer at the very end (queues onto the least-loaded ready
-//           pod; visible only while such a pod exists).
+//           pod; visible only while such a pod exists). Example row:
+//           [New][4090][4090x3][B300x1][Auto].
 //
-// Pod buttons appear the moment New is clicked (loading border ring
-// while the pod_url resolves). Never disabled while running — pods accept
-// concurrent jobs; the two-digit label suffix counts the queued jobs
-// (A03 = pod A with 3 in flight). They carry their own status: circular
-// loading border while spawning / while jobs are in flight, colored border
-// for the last settled result, heartbeat removal when the pod_url dies.
+// Pod buttons appear the moment a GPU is picked (loading border ring
+// while the pod_url resolves), labeled with the GPU name plus the queued
+// job count while busy ("4090x3" = a 4090 pod with 3 in flight). The
+// border style marks what the pod_url fronts: SOLID a DIRECT ComfyUI
+// server (native websocket + /prompt), DASHED a Tier 2 proxy. They carry
+// their own status: circular loading border while spawning / while jobs
+// are in flight, colored border for the last settled result, heartbeat
+// removal when the pod_url dies.
 
 import React from 'react';
 import { theme } from '../../../styles';
@@ -35,6 +39,7 @@ export type FooterActionsProps = {
     /** The loaded node count — New, Auto and pod buttons need a workflow. */
     nodeCount: number;
     onPodGenerate: (pod: PodEntry) => void;
+    /** Open the GPU picker (GpuSelectDialog) — the picked GPU spawns a pod. */
     onGenerate: () => void;
     /** Queue on the least-loaded ready pod (no-op target when none ready). */
     onAutoGenerate: () => void;
@@ -75,12 +80,12 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
             <div style={{ flex: '1 1 auto' }} />
 
             {/* Right: New, the pod buttons, then Auto — generation controls
-                are available on every tab. New spawns a fresh cloud pod,
+                are available on every tab. New opens the GPU picker dialog
+                (GpuSelectDialog); the picked GPU spawns a fresh cloud pod,
                 snapshots the workflow, and streams the run back via POST
-                /v1/comfy/cloud/prompt. Never blocked — every click spawns
-                another pod. Wrapped in an arrow — the handler's optional
-                first param is a rerun prompt override, NOT the click
-                event. */}
+                /v1/comfy/cloud/prompt. Never blocked — every pick spawns
+                another pod. Wrapped in an arrow — the handler takes NO
+                argument (the click event is not a rerun prompt override). */}
             <BtnPrimary
                 className="sg-primary"
                 onClick={() => onGenerate()}
@@ -90,10 +95,12 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 New
             </BtnPrimary>
 
-            {/* A00: queue another generation on an existing pod (skips pod
-                creation). Sits immediately right of New. The small dot marks
-                what the pod_url fronts: filled ● a DIRECT ComfyUI server
-                (native websocket + /prompt), hollow ○ a Tier 2 proxy. */}
+            {/* 4090 / B300xN: queue another generation on an existing pod
+                (skips pod creation). Sits immediately right of New. The
+                label is the pod's GPU name with the queued job count while
+                busy; the border STYLE marks what the pod_url fronts: solid
+                a DIRECT ComfyUI server (native websocket + /prompt), dashed
+                a Tier 2 proxy. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';
                 const inFlight = p.activeGenerationIds.length;
@@ -110,7 +117,7 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                         disabled={isDisabled}
                         title={
                             isSpawning
-                                ? `Pod ${letter} — starting up…`
+                                ? `Pod ${letter}${p.gpu ? ` (${p.gpu})` : ''} — starting up…`
                                 : p.status !== 'ready'
                                   ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
                                     `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
@@ -121,6 +128,10 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                         }
                         style={{
                             fontFamily: theme.fontMono,
+                            // Direct vs proxy: SOLID border = direct ComfyUI,
+                            // DASHED border = Tier 2 proxy. Undetected pods
+                            // keep the base solid border.
+                            borderStyle: p.is_direct === false ? 'dashed' : 'solid',
                             borderColor: isLoading
                                 ? POD_RING_TRACK
                                 : p.run.status === 'error'
@@ -132,20 +143,7 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                         data-testid={`pod-generate-${p.podNumber}`}
                         data-direct={p.is_direct === undefined ? 'unknown' : p.is_direct ? 'direct' : 'proxy'}
                     >
-                        {podButtonLabel(p.podNumber, inFlight)}
-                        {p.is_direct !== undefined && (
-                            <span
-                                style={{
-                                    marginLeft: 4,
-                                    fontSize: 7,
-                                    verticalAlign: 'super',
-                                    color: p.is_direct ? theme.accent2 : theme.textDim
-                                }}
-                                data-testid={`pod-link-${p.podNumber}`}
-                            >
-                                {p.is_direct ? '●' : '○'}
-                            </span>
-                        )}
+                        {podButtonLabel(p, inFlight)}
                     </Btn>
                 );
             })}

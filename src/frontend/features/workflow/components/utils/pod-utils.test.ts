@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, expect, it } from 'vitest';
-import { shouldHeartbeatPod } from './pod-utils';
+import { podButtonLabel, shouldHeartbeatPod } from './pod-utils';
 import type { PodEntry } from './types';
 
 function pod(overrides: Partial<PodEntry> = {}): PodEntry {
@@ -49,5 +49,33 @@ describe('shouldHeartbeatPod', () => {
 
     it('probes proxy pods in an error state so they can recover or collect their final strike', () => {
         expect(shouldHeartbeatPod(pod({ is_direct: false, status: 'error', failCount: 1 }))).toBe(true);
+    });
+});
+
+// =============================================================================
+// Pod button label tests.
+//
+// The button row looks like [New][4090][4090x3][B300x1][Auto]: the label is
+// the pod's GPU name, suffixed with "xN" only while N jobs are queued on it.
+// Pods predating GPU selection keep the legacy letter label (A00 / A03).
+// =============================================================================
+
+describe('podButtonLabel', () => {
+    it('shows the bare GPU name when nothing is queued', () => {
+        expect(podButtonLabel(pod({ gpu: '4090' }), 0)).toBe('4090');
+        expect(podButtonLabel(pod({ gpu: 'B300' }), 0)).toBe('B300');
+    });
+
+    it('suffixes the queued job count with an "x" while jobs are in flight', () => {
+        expect(podButtonLabel(pod({ gpu: '4090' }), 3)).toBe('4090x3');
+        expect(podButtonLabel(pod({ gpu: 'B300' }), 1)).toBe('B300x1');
+        // Large counts are never clamped.
+        expect(podButtonLabel(pod({ gpu: '4090' }), 100)).toBe('4090x100');
+    });
+
+    it('falls back to the legacy letter label for pods without a GPU', () => {
+        expect(podButtonLabel(pod({}), 0)).toBe('A00');
+        expect(podButtonLabel(pod({}), 3)).toBe('A03');
+        expect(podButtonLabel(pod({ podNumber: 2 }), 12)).toBe('B12');
     });
 });

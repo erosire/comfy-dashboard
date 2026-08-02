@@ -35,12 +35,14 @@ export function podLetter(podNumber: number): string {
 }
 
 /**
- * Pod button label — pod letter followed by the two-digit in-flight
- * queue count: A00 when idle, A03 with three jobs queued. Counts past
- * 99 simply widen the label (never clamped).
+ * Pod button label — the pod's GPU name, suffixed with the in-flight
+ * queue count only while jobs are queued: "4090" when idle, "4090x3"
+ * with three jobs queued. Pods predating GPU selection (gpu undefined)
+ * fall back to the old letter label (A00 / A03).
  */
-export function podButtonLabel(podNumber: number, inFlight: number): string {
-    return `${podLetter(podNumber)}${String(inFlight).padStart(2, '0')}`;
+export function podButtonLabel(pod: PodEntry, inFlight: number): string {
+    if (pod.gpu) return inFlight > 0 ? `${pod.gpu}x${inFlight}` : pod.gpu;
+    return `${podLetter(pod.podNumber)}${String(inFlight).padStart(2, '0')}`;
 }
 
 /**

@@ -646,11 +646,18 @@ paths:
       description: >-
         Dual-purpose endpoint for Beam cloud pod management:
 
-        **Create a pod** — Send an empty body `{}` or `{"name": "my-pod"}`.
-        Sends a GET to the Beam spawner URL which returns a 302 redirect to
-        the spawned pod's public proxy URL. The pod runs ComfyUI with a
-        FastAPI proxy on its public port and scales to zero ~120s after the
-        last active connection.
+        **Create a pod** — Send `{"gpu": "4090"}` (required) plus an
+        optional `{"name": "my-pod"}`. The GPU key selects the spawner
+        server list registered under `comfyCloudServiceEndpoint`
+        (gpu → {serverName: spawnerUrl}); the servers are tried IN ORDER:
+        a GET to the spawner URL returns a 302 redirect to the spawned
+        pod's public proxy URL. A failed attempt (unreachable server,
+        non-redirect status, redirect without Location) falls through to
+        the next server; when every server for the GPU has failed, the
+        endpoint answers 503 — no server is available to spawn the
+        requested GPU. The pod runs ComfyUI with a FastAPI proxy on its
+        public port and scales to zero ~120s after the last active
+        connection.
 
         **Check pod status** — Send `{"pod_url": "<pod_url>"}`. Probes the
         Tier 2 proxy of an existing pod and returns its health, system stats,
@@ -679,11 +686,13 @@ paths:
               $ref: '#/components/schemas/CloudPodRequest'
             examples:
               create_pod:
-                summary: Spawn a new pod
-                value: {}
-              create_named_pod:
-                summary: Spawn a pod with a custom name
+                summary: Spawn a new pod on a 4090 GPU
                 value:
+                  gpu: "4090"
+              create_named_pod:
+                summary: Spawn a B300 pod with a custom name
+                value:
+                  gpu: B300
                   name: my-comfy-pod
               check_status:
                 summary: Check the status of an existing pod
@@ -748,6 +757,22 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            No server available to spawn the requested GPU — every spawner
+            in the GPU's server list was tried and failed. The `attempts`
+            array reports each server's failure in order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: "No server available to spawn gpu=4090 — every spawner failed"
+                attempts:
+                  - server: lancer
+                    error: "fetch failed"
+                  - server: backup
+                    error: "Spawner returned HTTP 500 (expected 302 redirect)"
 
   /v1/comfy/cloud/prompt:
     post:
@@ -1666,9 +1691,19 @@ components:
       type: object
       description: >-
         Request body for POST /v1/comfy/cloud.
-        - Empty `{}` or `{"name": "..."}` → spawns a new pod.
+        - `{"gpu": "4090"}` or `{"gpu": "...", "name": "..."}` → spawns a
+          new pod on that GPU (the GPU's spawner servers are tried in
+          order; 503 when none can spawn it).
         - `{"pod_url": "<url>"}` → checks status of an existing pod.
       properties:
+        gpu:
+          type: string
+          description: >-
+            GPU to spawn the pod on (create mode, required). Must be a key
+            of the server's comfyCloudServiceEndpoint registry — currently
+            "4090" and "B300". Unknown keys are rejected with 400 and the
+            list of available GPUs.
+          example: "4090"
         name:
           type: string
           description: Optional name for the spawned pod (create mode only).
@@ -1703,6 +1738,16 @@ components:
             server when is_direct is true. Use this URL for status checks
             and prompt submission.
           example: https://test-pod-abc123.beam.cloud:8188
+        gpu:
+          type: string
+          description: Echo of the requested GPU the pod was spawned on.
+          example: "4090"
+        spawner:
+          type: string
+          description: >-
+            Name of the spawner server (within the GPU's server list) that
+            won the fallback chain and produced this pod.
+          example: lancer
         is_direct:
           type: boolean
           description: >-
