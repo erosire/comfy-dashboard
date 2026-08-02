@@ -28,6 +28,7 @@
 //   - front / number: forwarded to ComfyUI POST /prompt
 
 import { randomUUID } from 'node:crypto';
+import { Agent } from 'undici';
 import { asHandlerMethod } from '@underload/service';
 import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
 import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
@@ -47,6 +48,25 @@ import {
 function newClientId(): string {
     return randomUUID().replace(/-/g, '');
 }
+
+/**
+ * Shared dispatcher for pod-facing fetches with ALL undici timeouts disabled.
+ *
+ * Why this exists: fetch()'s RequestInit silently DROPS unknown keys (per
+ * WebIDL), so the previous `bodyTimeout: 0` init option never reached undici
+ * and the global Agent's default 300 s body timeout stayed in force. That
+ * timeout measures the gap BETWEEN response body chunks — and a queued
+ * ComfyUI prompt's NDJSON stream legitimately emits nothing for its
+ * prompt_id until it starts executing, so exactly ~305 s after enqueue the
+ * body read died with `TypeError: terminated` while the pod kept processing.
+ * Timeouts live on the Dispatcher (Agent/Client), and `dispatcher` is the
+ * one undici-specific fetch init key that IS honored. 0 = disabled: the
+ * stream ends when the pod ends it, never at a client-side deadline.
+ */
+const podAgent = new Agent({
+    headersTimeout: 0,
+    bodyTimeout: 0,
+});
 
 export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variables) => {
     const body = _parameters.body as {
@@ -157,8 +177,10 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             method: 'POST',
             headers: forwardedHeaders,
             body: JSON.stringify(promptPayload),
-            // @ts-expect-error -- Node.js fetch extension for disabling body timeout on streams
-            bodyTimeout: 0,
+            // @ts-expect-error -- undici-specific fetch init key (omitted from
+            // the DOM RequestInit type): route through the timeout-free
+            // dispatcher, see podAgent above.
+            dispatcher: podAgent,
         });
 
         if (!upstream.ok && upstream.headers.get('content-type')?.includes('application/json')) {
@@ -246,8 +268,11 @@ async function processPodPromptInBackground(
             method: 'POST',
             headers,
             body: JSON.stringify(promptPayload),
-            // @ts-expect-error -- Node.js fetch extension for disabling body timeout on streams
-            bodyTimeout: 0,
+            // @ts-expect-error -- undici-specific fetch init key (omitted from
+            // the DOM RequestInit type): a prompt may sit in ComfyUI's queue
+            // for minutes with zero stream bytes — that must never fail the
+            // generation. See podAgent above.
+            dispatcher: podAgent,
         });
         log(`Pod responded HTTP ${upstream.status}`);
 
