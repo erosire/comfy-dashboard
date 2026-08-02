@@ -662,11 +662,13 @@ paths:
         this by attempting the native ComfyUI websocket handshake at
         `<pod_url>/ws?clientId=<id>`: a completed handshake means direct
         (`is_direct: true`), a refused/failed one means proxy
-        (`is_direct: false`). A direct ComfyUI serves its frontend HTML at
-        GET / instead of the JSON status document, so its health is rebuilt
-        from the native GET /system_stats and the models listing stays
-        empty. Feed the `is_direct` flag back into POST
-        /v1/comfy/cloud/prompt to drive the pod over its native websocket.
+        (`is_direct: false`). A direct ComfyUI has NO health JSON — its
+        GET / serves the frontend HTML — so its health check is simply
+        "base URL answered HTTP 200" plus "websocket available"; the
+        synthesized report is enriched with the native GET /system_stats
+        when it answers, and the models listing stays empty. Feed the
+        `is_direct` flag back into POST /v1/comfy/cloud/prompt to drive
+        the pod over its native websocket.
       tags:
         - Cloud
       requestBody:
@@ -778,7 +780,11 @@ paths:
 
         - `is_direct` omitted/false → **proxy branch**: the payload is
           POSTed to the Tier 2 ComfyProxy at pod_url and its NDJSON stream
-          is consumed.
+          is consumed. Self-healing: if pod_url answers the POST with
+          HTTP 405 (a native ComfyUI server has no POST / route — i.e. a
+          stale is_direct flag, e.g. the create-time probe raced a booting
+          pod), the submission is transparently retried over the direct
+          websocket flow instead of failing.
         - `is_direct: true` → **direct ComfyUI branch**: a websocket is
           opened at `<pod_url>/ws` and the prompt is POSTed to the native
           `<pod_url>/prompt`. EVERY request gets a FRESH client_id
@@ -1724,8 +1730,10 @@ components:
         Returned when POST /v1/comfy/cloud is called with a pod_url.
         Mirrors the Tier 2 proxy GET / response from the Beam ComfyUI
         service; for a direct ComfyUI pod (is_direct: true) the health is
-        rebuilt from the native GET /system_stats and the models listing
-        stays empty.
+        the successful HTTP 200 base-URL answer plus the completed
+        websocket handshake (health.checked records both signals),
+        enriched with the native GET /system_stats when it answers, and
+        the models listing stays empty.
       properties:
         health:
           $ref: '#/components/schemas/ProxyHealthResponse'

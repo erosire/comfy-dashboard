@@ -8,8 +8,9 @@
 //   - Pods accept concurrent jobs: each "#N" click queues another job; the
 //     server scopes each submission with its own client_id. "Auto" queues
 //     on the least-loaded ready pod (see pickLeastLoadedPod).
-//   - Heartbeat probes every POD_HEARTBEAT_MS keep pods warm and accrue
-//     strikes; MAX_POD_FAILURES consecutive failures remove the pod.
+//   - Heartbeat probes every POD_HEARTBEAT_MS keep PROXY pods warm and
+//     accrue strikes; MAX_POD_FAILURES consecutive failures remove the
+//     pod. Direct ComfyUI pods are exempt — see shouldHeartbeatPod.
 
 import React from 'react';
 import type { CloudCreateResult, CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
@@ -17,7 +18,7 @@ import { cloud, cloudPrompt } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
 import { MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
-import { podLetter, pickLeastLoadedPod } from './pod-utils';
+import { podLetter, pickLeastLoadedPod, shouldHeartbeatPod } from './pod-utils';
 
 /**
  * Local-timestamp suffix for default generation names: YYYYMMDD-HHMMSS
@@ -327,8 +328,9 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     );
 
     // ── Keepalive heartbeat ─────────────────────────────────────────
-    // Pods scale to zero ~120s after the last active connection, so probing
-    // periodically both resets that idle timer AND detects dead pods.
+    // Tier 2 PROXY pods scale to zero ~120s after the last active
+    // connection, so probing periodically both resets that idle timer AND
+    // detects dead pods.
     //
     // Every probe resets the pod's strike counter on success. A failure
     // (pod unreachable, or health.healthy === false) records a strike:
@@ -336,6 +338,11 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // visible in case it recovers); once strikes reach MAX_POD_FAILURES
     // the pod's pod_url is considered dead and the pod is removed
     // entirely — its "#N" button disappears.
+    //
+    // DIRECT ComfyUI pods are EXEMPT (see shouldHeartbeatPod): they are
+    // standalone servers with no scale-to-zero timer to reset and no
+    // proxy health document to poll, so both purposes are meaningless —
+    // their reachability surfaces at prompt-submission time instead.
     //
     // Skips the tick if the previous one is still in flight (cold start).
 
@@ -370,7 +377,8 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                 for (const p of currentPods) {
                     // Probe ready AND previously-failed pods so they can
                     // either recover or accumulate the final strike.
-                    if (p.status === 'spawning' || !p.pod_url) continue;
+                    // Direct ComfyUI pods are exempt from the heartbeat.
+                    if (!shouldHeartbeatPod(p)) continue;
                     try {
                         const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
                         const statusResult = result as CloudPodStatusResult;

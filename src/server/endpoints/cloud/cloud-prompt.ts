@@ -20,7 +20,12 @@
 //
 // - `is_direct: false | omitted` — PROXY flow (current implementation):
 //   the whole prompt payload is POSTed to the Tier 2 ComfyProxy (the
-//   pod_url itself) and its NDJSON response is consumed.
+//   pod_url itself) and its NDJSON response is consumed. SELF-HEALING: a
+//   native ComfyUI server has no POST / route and answers HTTP 405 — a
+//   proxy accepts prompt POSTs at / by design, so a 405 means the
+//   caller's is_direct flag was stale (e.g. the create-time probe raced a
+//   still-booting pod); the submission is then retried transparently
+//   through the direct websocket flow instead of failing the run.
 //
 // - `is_direct: true` — DIRECT ComfyUI flow: the pod_url fronts a native
 //   ComfyUI server. A websocket is opened at <pod_url>/ws and the prompt
@@ -158,9 +163,16 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         promptPayload.client_id = directClientId;
     }
 
-    const origin = isDirect ? `${podUrl.toString()} (direct websocket)` : podUrl.toString();
+    // Mutable submission plan — the 405 fallback below can correct a stale
+    // is_direct flag mid-flight and rewrites these fields; the background
+    // processor reads them at log time.
+    const submission = {
+        origin: isDirect ? `${podUrl.toString()} (direct websocket)` : podUrl.toString(),
+        clientId: directClientId as string | undefined,
+        retried405: false
+    };
 
-    const submit = (): Promise<Response> => {
+    const submit = async (): Promise<Response> => {
         if (directClientId) {
             // Open <pod_url>/ws first, POST the native <pod_url>/prompt,
             // and translate the socket back into the proxy's NDJSON event
@@ -181,7 +193,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             forwardedHeaders['Authorization'] = authorization;
         }
 
-        return fetch(podUrl.toString(), {
+        const upstream = await fetch(podUrl.toString(), {
             method: 'POST',
             headers: forwardedHeaders,
             body: JSON.stringify(promptPayload),
@@ -190,6 +202,47 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             // dispatcher, see podAgent above.
             dispatcher: podAgent,
         });
+
+        // ── Stale-detection self-heal ─────────────────────────────
+        // A native ComfyUI server has no POST / route — it answers HTTP
+        // 405 Method Not Allowed. A Tier 2 proxy ACCEPTS prompt POSTs at
+        // / by design, so a 405 only ever means "this pod is actually
+        // direct and the caller's is_direct flag was stale" (e.g. the
+        // create-time probe raced a still-booting pod). Retry the same
+        // submission through the direct websocket flow so the run isn't
+        // stranded; the next status probe (UI heartbeat) corrects the
+        // flag going forward.
+        if (upstream.status !== 405) {
+            return upstream;
+        }
+
+        submission.retried405 = true;
+        // Reuse the submission's client_id when it's already a valid
+        // ComfyUI id (server-side processing mode always sets one) —
+        // the 202 response and stream scoping stay consistent.
+        submission.clientId =
+            typeof promptPayload.client_id === 'string' && /^[0-9a-f]{32}$/i.test(promptPayload.client_id)
+                ? promptPayload.client_id
+                : newDirectClientId();
+        promptPayload.client_id = submission.clientId;
+        submission.origin = `${podUrl.toString()} (direct websocket — retried after HTTP 405)`;
+        try {
+            return await submitDirectPrompt({
+                podUrl,
+                clientId: submission.clientId,
+                promptPayload,
+                authorization
+            });
+        } catch (err: any) {
+            // The 405 said native ComfyUI yet the websocket won't open —
+            // report the original 405 response; it is the accurate failure.
+            console.warn(
+                `[cloud/prompt] ${body.pod_url} answered HTTP 405 but the direct websocket retry failed: ` +
+                    (err?.message ?? String(err))
+            );
+            submission.retried405 = false;
+            return upstream;
+        }
     };
 
     // ── Mode 1: server-side processing ──────────────────────────────
@@ -213,6 +266,9 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
                 ? body.client_id
                 : newClientId());
         promptPayload.client_id = clientId;
+        // Keep the traced plan in sync (the 405 fallback then reuses this
+        // id for its retry, keeping logs/202 consistent).
+        submission.clientId = clientId;
 
         // Fire-and-forget — intentionally not awaited. The function never
         // rejects; all failures land in the generation file.
@@ -220,8 +276,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             root,
             body.workflow_id,
             body.generation_id,
-            origin,
-            clientId,
+            submission,
             submit
         );
 
@@ -283,14 +338,16 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
  * The pod-facing submission is injected as `submit`: the proxy branch
  * POSTs to the Tier 2 proxy, the direct branch opens the ComfyUI
  * websocket and POSTs the native /prompt — both resolve to a Response
- * whose NDJSON body this function consumes identically.
+ * whose NDJSON body this function consumes identically. `submission` is
+ * the handler's mutable plan — it is read at log time so the 405-fallback
+ * mid-flight corrections (direct origin, fresh client id) are traced
+ * accurately.
  */
 async function processPodPromptInBackground(
     root: string,
     workflowId: string,
     generationId: string,
-    origin: string,
-    clientId: string | undefined,
+    submission: { origin: string; clientId?: string; retried405: boolean },
     submit: () => Promise<Response>
 ): Promise<void> {
     const startedAt = Date.now();
@@ -306,7 +363,7 @@ async function processPodPromptInBackground(
     const log = (message: string) =>
         void appendGenerationLog(root, workflowId, generationId, message);
 
-    log(`Generation started — submitting to ${origin} (client_id: ${clientId ?? 'n/a'})`);
+    log(`Generation started — submitting to ${submission.origin} (client_id: ${submission.clientId ?? 'n/a'})`);
 
     try {
         // Mark the generation as picked up so pollers see live progress
@@ -318,6 +375,9 @@ async function processPodPromptInBackground(
         }
 
         const upstream = await submit();
+        if (submission.retried405) {
+            log(`POST / answered HTTP 405 — native ComfyUI detected (stale is_direct flag); retried over the direct websocket (client_id: ${submission.clientId})`);
+        }
         log(`Pod responded HTTP ${upstream.status}`);
 
         if (!upstream.ok) {
@@ -373,7 +433,7 @@ async function processPodPromptInBackground(
         });
         log(`Generation COMPLETED in ${elapsed} — ${eventCount} event(s), ${results.length} result(s)`);
         console.log(
-            `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${clientId}) completed ` +
+            `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${submission.clientId}) completed ` +
             `in ${elapsed} — ${eventCount} stream event(s), ${results.length} result(s)`
         );
     }

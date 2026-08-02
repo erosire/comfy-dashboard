@@ -44,6 +44,26 @@ export function podButtonLabel(podNumber: number, inFlight: number): string {
 }
 
 /**
+ * Heartbeat eligibility for the keepalive/strike probe. The heartbeat
+ * exists for Tier 2 PROXY pods: they scale to zero ~120s after the last
+ * active connection (the probe resets that idle timer) and a dead proxy
+ * pod_url should garbage-collect itself after MAX_POD_FAILURES strikes.
+ *
+ * A DIRECT ComfyUI pod is a standalone server — there is no idle
+ * scale-to-zero timer to reset and no proxy health document to poll, so
+ * the keepalive heartbeat makes no sense: skip it outright. Reachability
+ * problems surface at prompt-submission time (the run error lands on the
+ * pod button) instead of via background strikes.
+ *
+ * Pods whose shape isn't detected yet stay eligible — the probe is what
+ * resolves is_direct for a misdetected pod, after which it drops out.
+ */
+export function shouldHeartbeatPod(p: PodEntry): boolean {
+    if (p.status === 'spawning' || !p.pod_url) return false;
+    return p.is_direct !== true;
+}
+
+/**
  * "Auto" load-balancer pick — the eligible pod with the SMALLEST in-flight
  * queue. Eligibility mirrors the pod buttons themselves: status 'ready'
  * with a resolved pod_url and no heartbeat strikes blocking it. Ties go to
