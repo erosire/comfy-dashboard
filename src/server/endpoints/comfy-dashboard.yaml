@@ -3,8 +3,9 @@ info:
   title: ComfyUI Dashboard API
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
-    CRUD for workflows, generation snapshots, and a unified endpoint for
-    spawning/checking Beam cloud pods. Prompt processing happens
+    CRUD for workflows, generation snapshots, a unified endpoint for
+    spawning/checking Beam cloud pods, and persistent direct ComfyUI
+    connections. Prompt processing happens
     server-side: POST /v1/comfy/cloud/prompt (with workflow_id +
     generation_id) consumes the pod's NDJSON stream in the background and
     keeps the generation json updated — clients poll
@@ -18,7 +19,7 @@ info:
     Multiple generations may be queued on the same pod
     concurrently; each submission is scoped by its own client_id so only
     its job's events land in its generation json.
-  version: 0.7.0
+  version: 0.8.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -29,6 +30,8 @@ tags:
     description: CRUD for ComfyUI workflows
   - name: Cloud
     description: Beam cloud pod management — spawn pods and check pod status
+  - name: Connect
+    description: Long-lived direct ComfyUI websocket connections and client logs
 paths:
   # ── Workflows ──────────────────────────────────────────────────────
 
@@ -891,6 +894,149 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  # ── Direct persistent connections ───────────────────────────────────
+
+  /v1/comfy/connect:
+    post:
+      operationId: connectComfyPod
+      summary: Open a persistent direct ComfyUI connection
+      description: >-
+        Opens a native ComfyUI websocket at
+        `<pod_url>/ws?clientId=<client_id>` and keeps it open in the server.
+        The server continuously records websocket messages in an individual
+        JSON file for the websocket client id. The returned connectId is used
+        to submit native ComfyUI prompts and read the resulting client log.
+      tags:
+        - Connect
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectRequest'
+            example:
+              pod_url: 'https://test-pod-abc123.beam.cloud:8188'
+      responses:
+        '200':
+          description: Persistent websocket connection opened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectResponse'
+        '400':
+          description: Missing or invalid pod_url
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: The pod websocket could not be opened
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/comfy/connect/{connect_id}:
+    post:
+      operationId: sendConnectedComfyPrompt
+      summary: Send a native prompt through a persistent connection
+      description: >-
+        Opens or reuses the websocket subscription for client_id, then sends
+        the prompt to the connected pod's native POST /prompt endpoint. The
+        websocket remains open and all events for client_id are appended to
+        its individual JSON log file.
+      tags:
+        - Connect
+      parameters:
+        - name: connect_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Identifier returned by POST /v1/comfy/connect.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectPromptRequest'
+            example:
+              prompt:
+                '3':
+                  class_type: KSampler
+                  inputs:
+                    seed: 123456789012345
+                    steps: 20
+              client_id: abc123def4567890fedcba0987654321
+      responses:
+        '200':
+          description: Native ComfyUI prompt response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectPromptResponse'
+        '400':
+          description: Invalid connect_id, prompt, or client_id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: connect_id is not active in this server process
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: The pod websocket or prompt endpoint could not be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/comfy/cloud/connect/{connect_id}/request/{client_id}:
+    get:
+      operationId: getConnectedClientLog
+      summary: Read one persistent connection client log
+      description: >-
+        Returns the JSON file containing all websocket messages received for
+        client_id. The file is stored at
+        `<root>/connect/<connect_id>/<client_id>.json`, so this endpoint can
+        still read completed logs after the live websocket has closed.
+      tags:
+        - Connect
+      parameters:
+        - name: connect_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: client_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-fA-F]{32}$'
+      responses:
+        '200':
+          description: Client-specific websocket event log
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectClientLog'
+        '400':
+          description: Missing or invalid path parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Client log file not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 # =============================================================================
 #  COMPONENTS
 # =============================================================================
@@ -1291,6 +1437,122 @@ components:
       properties:
         error:
           type: string
+
+    # ── Direct persistent connections ────────────────────────────────
+
+    ConnectRequest:
+      type: object
+      description: Request body for POST /v1/comfy/connect.
+      required:
+        - pod_url
+      properties:
+        pod_url:
+          type: string
+          format: uri
+          description: >-
+            Direct HTTP(S) base URL of the ComfyUI pod. The server derives the
+            native websocket URL by appending /ws.
+          example: https://test-pod-abc123.beam.cloud:8188
+
+    ConnectResponse:
+      type: object
+      description: Identifiers for the newly opened persistent connection.
+      required: [connectId, client_id]
+      properties:
+        connectId:
+          type: string
+          description: Process-local id used by the prompt endpoint.
+          example: 0123456789abcdef0123456789abcdef
+        client_id:
+          type: string
+          pattern: '^[0-9a-fA-F]{32}$'
+          description: >-
+            The client id used by the persistent websocket. Use this id in the
+            request-log URL or omit client_id when submitting a prompt.
+          example: abc123def4567890fedcba0987654321
+
+    ConnectPromptRequest:
+      type: object
+      description: >-
+        Native ComfyUI prompt request. The server adds the connection's
+        websocket client_id when it is omitted.
+      required:
+        - prompt
+      properties:
+        prompt:
+          type: object
+          additionalProperties: true
+          description: ComfyUI API prompt graph keyed by node id.
+        client_id:
+          type: string
+          pattern: '^[0-9a-fA-F]{32}$'
+          description: >-
+            Optional 32-character hexadecimal id. Supplying a new id opens a
+            second persistent websocket subscription under the same connectId.
+        extra_data:
+          type: object
+          additionalProperties: true
+        front:
+          type: boolean
+        number:
+          type: number
+
+    ConnectPromptResponse:
+      type: object
+      description: >-
+        Native ComfyUI POST /prompt response with connection and client ids
+        appended for locating the websocket event log.
+      additionalProperties: true
+      required: [connectId, client_id]
+      properties:
+        connectId:
+          type: string
+        client_id:
+          type: string
+          pattern: '^[0-9a-fA-F]{32}$'
+        prompt_id:
+          type: string
+        number:
+          type: number
+        node_errors:
+          type: object
+          additionalProperties: true
+
+    ConnectClientLog:
+      type: object
+      description: >-
+        One persisted JSON document for a ComfyUI websocket client id. The
+        server appends one event object for every received websocket message.
+      required: [connectId, clientId, podUrl, createdAt, updatedAt, events]
+      properties:
+        connectId:
+          type: string
+        clientId:
+          type: string
+          pattern: '^[0-9a-fA-F]{32}$'
+        podUrl:
+          type: string
+          format: uri
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectLogEvent'
+
+    ConnectLogEvent:
+      type: object
+      required: [receivedAt, message]
+      properties:
+        receivedAt:
+          type: string
+          format: date-time
+        message:
+          description: Raw parsed JSON websocket message, or a raw-message envelope.
 
     CloudPodRequest:
       type: object
