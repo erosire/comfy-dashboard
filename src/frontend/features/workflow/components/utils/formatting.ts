@@ -2,7 +2,23 @@
 //
 // Extracted verbatim from the original CloudTab.tsx.
 
-import type { CloudStreamEvent } from '../../../../api';
+import type { CloudStreamEvent, GenerationSummary } from '../../../../api';
+import type { MediaKind } from './types';
+
+/**
+ * The dominant media kind of a generation's results, by priority
+ * video > audio > image. A generation can emit several kinds at once
+ * (e.g. video + audio + image out of one graph); the OUTPUT tab badges
+ * it with the "highest" kind present. Returns null when the run produced
+ * nothing (pending/failed/no-output) — those rows show no badge.
+ */
+export function generationMediaKind(gen: Pick<GenerationSummary, 'resultItems'>): MediaKind | null {
+    const items = gen.resultItems ?? [];
+    if (items.some((item) => item.type === 'video')) return 'video';
+    if (items.some((item) => item.type === 'audio')) return 'audio';
+    if (items.length > 0) return 'image';
+    return null;
+}
 
 /** Format an ISO timestamp as a relative time string (e.g. "2m ago"). */
 export function formatRelativeTime(isoString: string | null): string {

@@ -16,6 +16,11 @@
 //     with output, red = failed OR completed but produced no items,
 //     grey = pending/processing), with the generation time in brackets
 //     next to the id when known.
+//   - Every generation WITH results carries a media-kind badge (VIDEO /
+//     AUDIO / IMAGE) next to the id — the dominant kind of its result
+//     items by priority video > audio > image, so a mixed run (a graph
+//     emitting an image AND its video interpolation, say) is marked by
+//     the highest kind. Runs with no output yet show no badge.
 //   - Click behavior: a generation WITH results opens the full-screen
 //     result viewer; a FAILED/ERRORED generation (red — including a
 //     "completed" run that produced no output) opens its .log event trail
@@ -39,7 +44,8 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
-import type { OutputViewMode } from './utils';
+import type { MediaKind, OutputViewMode } from './utils';
+import { generationMediaKind } from './utils';
 import { EmptyHint } from './ui';
 
 // ── List view ─────────────────────────────────────────────────────────
@@ -208,6 +214,45 @@ const ThumbName = styled('span')({
     minWidth: 0
 });
 
+// ── Media-kind badge ──────────────────────────────────────────────────
+
+// KindBadge — the generation's dominant media kind (see
+// generationMediaKind: video > audio > image) as a small uppercase chip,
+// colored per kind so the OUTPUT list reads at a glance. The soft-tint +
+// colored-border recipe mirrors the theme's semantic treatments
+// (danger/dangerSoft/dangerBorder); translucent fills stay readable both
+// on a list row and over thumb media.
+const MEDIA_KIND_STYLE: Record<MediaKind, { color: string; bg: string; border: string }> = {
+    video: { color: theme.accent, bg: theme.accentSoft, border: theme.accentRing },
+    audio: { color: theme.warning, bg: theme.warningSoft, border: 'rgba(251, 191, 36, 0.35)' },
+    image: { color: theme.success, bg: theme.successSoft, border: 'rgba(110, 231, 183, 0.35)' }
+};
+
+const KindBadge = styled('span', {
+    shouldForwardProp: (prop) => prop !== 'kind'
+})<{ kind: MediaKind }>(({ kind }) => ({
+    flex: '0 0 auto',
+    fontSize: theme.fontSize.xs,
+    fontWeight: 700,
+    lineHeight: 1,
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.05em',
+    padding: '3px 5px',
+    borderRadius: theme.radiusSm,
+    color: MEDIA_KIND_STYLE[kind].color,
+    backgroundColor: MEDIA_KIND_STYLE[kind].bg,
+    border: `1px solid ${MEDIA_KIND_STYLE[kind].border}`
+}));
+
+// GenKindBadge — the badge as rendered against a generation: null kind
+// (no results) renders nothing.
+const GenKindBadge: React.FC<{ kind: MediaKind | null; genId: string }> = ({ kind, genId }) =>
+    kind ? (
+        <KindBadge kind={kind} title={`${kind} output`} data-testid={`gen-kind-${genId}`}>
+            {kind}
+        </KindBadge>
+    ) : null;
+
 const MEDIA_STYLE: React.CSSProperties = { display: 'block', width: '100%' };
 
 export type GenerationsPaneProps = {
@@ -252,6 +297,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                         const hasResults = !!first;
                         const noOutput = gen.status === 'completed' && !hasResults;
                         const failed = gen.status === 'failed' || noOutput;
+                        const mediaKind = generationMediaKind(gen);
                         const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
                         // Failed/error generations open the .log dialog;
                         // successful ones with results open the viewer.
@@ -297,6 +343,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                             <span style={{ color: theme.textFaint, fontWeight: 400 }}> ({gen.generatedTime})</span>
                                         )}
                                     </ThumbName>
+                                    <GenKindBadge kind={mediaKind} genId={gen.id} />
                                     <GenDeleteBtn
                                         className="sg-danger"
                                         title="Delete this generation"
@@ -328,6 +375,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                 // tooltip since there's no status text anymore.
                 const noOutput = gen.status === 'completed' && !hasResults;
                 const failed = gen.status === 'failed' || noOutput;
+                const mediaKind = generationMediaKind(gen);
                 // Status by color alone: green = completed (with output),
                 // red = failed or output-less "completion", grey =
                 // pending/processing.
@@ -380,6 +428,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                 </span>
                             )}
                         </QueueItemName>
+                        <GenKindBadge kind={mediaKind} genId={gen.id} />
                         <GenDivider />
                         {/* Delete — stopPropagation so the click doesn't fall
                             through to the row's open-viewer handler. */}

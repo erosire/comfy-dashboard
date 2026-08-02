@@ -74,3 +74,11 @@ export type EditorContentTab = 'json' | 'prompt' | 'results';
  * which swaps its New/Auto/pod controls for it on the results tab.
  */
 export type OutputViewMode = 'list' | 'thumbs';
+
+/**
+ * A generation's dominant media kind — what the OUTPUT tab badges each
+ * generation with. A multi-output graph can emit several kinds at once
+ * (e.g. an image AND its video interpolation); the badge marks the
+ * "highest" kind present by priority video > audio > image.
+ */
+export type MediaKind = GenerationResultMeta['type'];
