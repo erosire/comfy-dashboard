@@ -1,6 +1,9 @@
 // =============================================================================
-// Direct-ComfyUI pod support tests (endpoints/cloud/direct-comfy.ts + the
-// is_direct detection wired into endpoints/cloud/cloud.ts).
+// Direct-ComfyUI pod support tests (endpoints/cloud/direct-comfy.ts), plus
+// the shape dispatch wired around the two per-shape modules: the is_direct
+// detection in endpoints/cloud/cloud.ts and the stale-flag 405 self-heal in
+// endpoints/cloud/cloud-prompt.ts. The sibling shape's tests live in
+// ./proxy-comfy.test.ts.
 //
 // The websocket is replaced with a deterministic EventTarget fake (same
 // pattern as connect.test.ts) and fetch is stubbed, so detection and the

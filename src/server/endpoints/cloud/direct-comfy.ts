@@ -1,21 +1,27 @@
 // Direct-ComfyUI pod support for the cloud endpoints.
 //
-// A pod_url handed back by the spawner (or probed via POST /v1/comfy/cloud)
-// can point at one of two backend shapes:
+// One of the two comfy server shapes a pod_url handed back by the spawner
+// (or probed via POST /v1/comfy/cloud) can point at (see ./proxy-comfy.ts
+// for the other; ./cloud.ts probes both shapes and ./cloud-prompt.ts
+// dispatches the submission by `is_direct`):
 //
-//   - Tier 2 proxy (ComfyProxy): GET / returns a JSON
+//   - Direct ComfyUI (this module): the pod_url IS the ComfyUI server.
+//     GET / serves the ComfyUI frontend HTML (not JSON), but it answers
+//     the native endpoints: GET /system_stats, POST /prompt, and the
+//     websocket at /ws?clientId=<id>.
+//
+//   - Tier 2 proxy (./proxy-comfy.ts): GET / returns a JSON
 //     {health, models_dir, models} document and POST / executes a prompt
 //     while streaming progress back as NDJSON. There is no reachable
 //     ComfyUI websocket on that URL — the handshake is refused.
 //
-//   - Direct ComfyUI: the pod_url IS the ComfyUI server. GET / serves the
-//     ComfyUI frontend HTML (not JSON), but it answers the native
-//     endpoints: GET /system_stats, POST /prompt, and the websocket at
-//     /ws?clientId=<id>.
-//
 // Detection (probeDirectComfyUI) is exactly that websocket handshake:
 // if the connection can be opened the pod is a direct ComfyUI; a refused /
-// failed / timed-out handshake means it is not.
+// failed / timed-out handshake means it is not. probeDirectHealth then
+// synthesizes the proxy-shaped status document for the direct shape —
+// the native server has NO health JSON, so "base URL answered HTTP 200"
+// plus "websocket available" are its health signals, enriched with the
+// native GET /system_stats when it answers (models stay empty).
 //
 // Prompt submission (submitDirectPrompt) drives the native protocol —
 // open /ws under a FRESH client_id per request (ComfyUI routes a prompt's
@@ -54,6 +60,13 @@ import type { StreamEvent } from '../workflows/generation-store';
  */
 export const DIRECT_WS_PROBE_TIMEOUT_MS = 5_000;
 
+/**
+ * Per-attempt budget for the /system_stats enrichment in
+ * probeDirectHealth. A hung pod must not stall the endpoint on undici's
+ * 300 s default.
+ */
+export const DIRECT_STATS_PROBE_TIMEOUT_MS = 10_000;
+
 // ComfyUI binary preview image kinds (server.py send_image header).
 const PREVIEW_IMAGE_JPEG = 1;
 const PREVIEW_IMAGE_PNG = 2;
@@ -89,6 +102,46 @@ export async function probeDirectComfyUI(podUrl: URL, timeoutMs: number = DIRECT
             // Probe cleanup is best-effort only.
         }
     }
+}
+
+/**
+ * Synthesize the proxy-shaped status document for a DIRECT ComfyUI pod —
+ * the direct shape's half of the status answer POST /v1/comfy/cloud
+ * returns (the proxy shape's half is the JSON status document itself, see
+ * ./proxy-comfy.ts probeProxyStatus). The health signal is already
+ * established by the caller — base URL answered HTTP 200 and the
+ * websocket handshake completed — so this only enriches the report with
+ * the native GET /system_stats when it answers. Models are not listed on
+ * the native server; the listing stays empty.
+ */
+export async function probeDirectHealth(podUrl: URL, http: { ok: boolean }): Promise<any> {
+    let system_stats: unknown;
+    try {
+        const upstream = await fetch(serverRoute(podUrl, '/system_stats').toString(), {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            signal: AbortSignal.timeout(DIRECT_STATS_PROBE_TIMEOUT_MS)
+        });
+        if (upstream.ok) {
+            system_stats = await upstream.json().catch(() => undefined);
+        } else {
+            console.warn(`[cloud] Direct pod /system_stats returned HTTP ${upstream.status}`);
+        }
+    } catch (err: any) {
+        console.warn(`[cloud] Direct pod /system_stats probe failed: ${err?.message ?? String(err)}`);
+    }
+
+    return {
+        health: {
+            // healthy := HTTP 200 on the base URL AND the websocket
+            // handshake succeeded (checked by the caller).
+            healthy: true,
+            checked: { http_ok: http.ok, websocket: true },
+            ...(system_stats !== undefined ? { system_stats } : {})
+        },
+        models_dir: '',
+        models: {}
+    };
 }
 
 export type DirectPromptAck = {

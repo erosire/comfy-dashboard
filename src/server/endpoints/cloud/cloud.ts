@@ -4,41 +4,36 @@
 //   1. Create mode: body = {} or {"name": "..."} → GET the Beam spawner URL,
 //      which returns a 302 redirect to the spawned pod's public proxy URL.
 //      Returns { pod_url } to the UI.
-//   2. Status mode: body = {"pod_url": "..."} → probe the Tier 2 proxy of
-//      an existing pod and return { health, models_dir, models }.
+//   2. Status mode: body = {"pod_url": "..."} → probe an existing pod and
+//      return { health, models_dir, models }.
 //
-// Both modes also DETECT what the pod_url actually fronts, with two
-// independent probes:
+// Both modes DETECT what kind of comfy server the pod_url fronts. Each
+// pod shape owns a sibling module here (add a new one in the same style
+// when a shape appears, then wire its probe into probePod below):
 //
-//   1. GET / — a Tier 2 ComfyProxy answers its JSON status document
-//      (health + models) here; a DIRECT ComfyUI server has NO health JSON
-//      and answers its frontend HTML with plain HTTP 200 instead. So for
-//      the direct shape the health check is literally "did the base URL
-//      answer HTTP 200".
-//   2. Websocket — the native ComfyUI handshake at
-//      <pod_url>/ws?clientId=<id>. When it completes the pod is a direct
-//      ComfyUI (is_direct: true); when the connection is refused (or
-//      fails/times out) it is not. A completed handshake is itself proof
-//      the HTTP server processes requests.
+//   - Proxy (./proxy-comfy.ts) — the Tier 2 ComfyProxy. Detection: GET /
+//     answers its JSON status document (health + models) — that document
+//     IS the health report.
+//   - Direct ComfyUI (./direct-comfy.ts) — the pod_url IS the ComfyUI
+//     server. Detection: the native websocket handshake at
+//     <pod_url>/ws?clientId=<id> (is_direct: true when it completes; a
+//     completed handshake is itself proof the HTTP server processes
+//     requests). The direct shape has NO health JSON — GET / serves the
+//     frontend HTML — so its health check is literally "did the base URL
+//     answer HTTP 200" plus "websocket available", synthesized and
+//     enriched with the native GET /system_stats when it answers.
 //
 // The response carries the result as `is_direct`, which POST
 // /v1/comfy/cloud/prompt then accepts to pick the native websocket flow
-// over the proxy flow. A direct pod's health report is synthesized as
-// { healthy: true } (HTTP 200 + websocket available), enriched with the
-// native GET /system_stats when it answers; models are not listed on the
-// native server — the listing stays empty.
+// over the proxy flow.
 
 import { asHandlerMethod } from '@underload/service';
 import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
-import { serverRoute } from '../connect';
-import { probeDirectComfyUI } from './direct-comfy';
+import { probeDirectComfyUI, probeDirectHealth } from './direct-comfy';
+import { probeProxyStatus } from './proxy-comfy';
 
 // This is the spawner URL
 const DEFAULT_SPAWNER_URL = comfyCloudServiceEndpoint.standard;
-
-// Per-attempt budget for the pod status GET and the /system_stats fallback.
-// A hung pod must not stall the endpoint on undici's 300 s default.
-const STATUS_PROBE_TIMEOUT_MS = 10_000;
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
     const spawnerUrl: string = _variables?.spawnerUrl ?? DEFAULT_SPAWNER_URL;
@@ -161,10 +156,10 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
     }
 });
 
-// ── Pod probing ───────────────────────────────────────────────────
+// ── Pod probing (dispatch across the comfy server shapes) ────────────
 
 type PodProbe = {
-    /** Status document to return — null when the pod answered neither probe. */
+    /** Status document to return — null when the pod answered neither shape's probe. */
     statusData: any | null;
     /** True when the pod's native ComfyUI websocket accepted a connection. */
     isDirect: boolean;
@@ -175,25 +170,28 @@ type PodProbe = {
 };
 
 /**
- * Probe one pod_url: run the base-URL GET and the direct ComfyUI websocket
- * handshake CONCURRENTLY (their outcomes are independent — a proxy won't
- * answer the socket, a direct ComfyUI won't answer a JSON status document).
+ * Probe one pod_url: run every shape's detection probe CONCURRENTLY (their
+ * outcomes are independent — a proxy won't answer the direct websocket, a
+ * direct ComfyUI won't answer a JSON status document), then pick the
+ * status document of whichever shape answered. A THIRD comfy server shape
+ * adds its own probe here (from its own module) plus its selection rule.
  */
 async function probePod(podUrl: URL): Promise<PodProbe> {
-    const [http, isDirect] = await Promise.all([probeHttp(podUrl), probeDirectComfyUI(podUrl)]);
+    const [proxy, isDirect] = await Promise.all([probeProxyStatus(podUrl), probeDirectComfyUI(podUrl)]);
 
-    // Tier 2 proxy — its JSON status document is the authoritative health
-    // report.
-    if (http.json !== undefined) {
-        return { statusData: http.json, isDirect };
+    // Tier 2 proxy (./proxy-comfy.ts) — its JSON status document is the
+    // authoritative health report.
+    if (proxy.json !== undefined) {
+        return { statusData: proxy.json, isDirect };
     }
 
-    // Direct ComfyUI — there is NO health JSON on the native server. The
-    // health check is exactly "base URL answered HTTP 200" + "websocket
-    // available" (the completed handshake is itself proof the HTTP server
-    // processes requests); synthesize the report from those signals.
+    // Direct ComfyUI (./direct-comfy.ts) — there is NO health JSON on the
+    // native server. The health check is exactly "base URL answered
+    // HTTP 200" + "websocket available" (the completed handshake is itself
+    // proof the HTTP server processes requests); synthesize the report from
+    // those signals.
     if (isDirect) {
-        return { statusData: await probeDirectHealth(podUrl, http), isDirect: true };
+        return { statusData: await probeDirectHealth(podUrl, proxy), isDirect: true };
     }
 
     // Neither a ComfyProxy (no JSON status document) nor a direct ComfyUI
@@ -202,89 +200,8 @@ async function probePod(podUrl: URL): Promise<PodProbe> {
         statusData: null,
         isDirect,
         error:
-            http.error ??
-            `Pod returned HTTP ${http.status ?? 200} without a status document and refused the ComfyUI websocket`,
-        detail: http.detail
-    };
-}
-
-type HttpProbe = {
-    /** True when the base URL answered any 2xx — the server is alive. */
-    ok: boolean;
-    /** Parsed JSON body when the answer WAS a JSON document (Tier 2 proxy). */
-    json?: any;
-    /** Fetch-level failure (unreachable / connection refused / timed out). */
-    error?: string;
-    /** Non-2xx answer's status. */
-    status?: number;
-    /** Non-2xx answer's body hint. */
-    detail?: string;
-};
-
-/**
- * GET the pod_url itself — the base health check. A Tier 2 proxy answers
- * its JSON status document here; a direct ComfyUI answers its frontend
- * HTML with HTTP 200 (no JSON), so the JSON body is optional.
- */
-async function probeHttp(podUrl: URL): Promise<HttpProbe> {
-    let upstream: Response;
-    try {
-        upstream = await fetch(podUrl.toString(), {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
-            signal: AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS)
-        });
-    } catch (err: any) {
-        return { ok: false, error: `Failed to reach pod: ${err?.message ?? String(err)}` };
-    }
-
-    if (!upstream.ok) {
-        const detail = await upstream.text().catch(() => '');
-        return { ok: false, status: upstream.status, detail: detail || undefined };
-    }
-
-    try {
-        return { ok: true, json: await upstream.json() };
-    } catch {
-        // HTTP 200 but no JSON body — the signature of a direct ComfyUI
-        // (its web app HTML is served here).
-        return { ok: true };
-    }
-}
-
-/**
- * Synthesize the proxy-shaped status document for a DIRECT ComfyUI pod.
- * The health signal is already established by the caller — base URL
- * answered HTTP 200 and the websocket handshake completed — so this only
- * enriches the report with the native GET /system_stats when it answers.
- * Models are not listed on the native server; the listing stays empty.
- */
-async function probeDirectHealth(podUrl: URL, http: HttpProbe): Promise<any> {
-    let system_stats: unknown;
-    try {
-        const upstream = await fetch(serverRoute(podUrl, '/system_stats').toString(), {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
-            signal: AbortSignal.timeout(STATUS_PROBE_TIMEOUT_MS)
-        });
-        if (upstream.ok) {
-            system_stats = await upstream.json().catch(() => undefined);
-        } else {
-            console.warn(`[cloud] Direct pod /system_stats returned HTTP ${upstream.status}`);
-        }
-    } catch (err: any) {
-        console.warn(`[cloud] Direct pod /system_stats probe failed: ${err?.message ?? String(err)}`);
-    }
-
-    return {
-        health: {
-            // healthy := HTTP 200 on the base URL AND the websocket
-            // handshake succeeded (checked by the caller).
-            healthy: true,
-            checked: { http_ok: http.ok, websocket: true },
-            ...(system_stats !== undefined ? { system_stats } : {})
-        },
-        models_dir: '',
-        models: {}
+            proxy.error ??
+            `Pod returned HTTP ${proxy.status ?? 200} without a status document and refused the ComfyUI websocket`,
+        detail: proxy.detail
     };
 }

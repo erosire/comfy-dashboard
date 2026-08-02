@@ -16,9 +16,12 @@
 //    The pod's NDJSON stream is proxied back to the caller as-is
 //    (application/x-ndjson) for the client to consume.
 //
-// Two pod branches (orthogonal to the modes above):
+// Two pod branches (orthogonal to the modes above) — each comfy server
+// shape owns a sibling module here; this file just DISPATCHES between
+// them (add a third shape's module in the same style and wire its branch
+// into `submit` below):
 //
-// - `is_direct: false | omitted` — PROXY flow (current implementation):
+// - `is_direct: false | omitted` — PROXY flow (./proxy-comfy.ts):
 //   the whole prompt payload is POSTed to the Tier 2 ComfyProxy (the
 //   pod_url itself) and its NDJSON response is consumed. SELF-HEALING: a
 //   native ComfyUI server has no POST / route and answers HTTP 405 — a
@@ -27,15 +30,15 @@
 //   still-booting pod); the submission is then retried transparently
 //   through the direct websocket flow instead of failing the run.
 //
-// - `is_direct: true` — DIRECT ComfyUI flow: the pod_url fronts a native
-//   ComfyUI server. A websocket is opened at <pod_url>/ws and the prompt
-//   is POSTed to the native <pod_url>/prompt. EVERY prompt request gets a
-//   FRESH client_id — ComfyUI routes a prompt's execution events only to
-//   the websocket whose client_id submitted it, so each request owns its
-//   stream and no cross-talk between jobs is possible. The received
-//   websocket messages are translated back into the proxy's NDJSON event
-//   vocabulary (see ./direct-comfy.ts), so BOTH modes consume the result
-//   with the exact same logic as `is_direct: false`.
+// - `is_direct: true` — DIRECT ComfyUI flow (./direct-comfy.ts): the
+//   pod_url fronts a native ComfyUI server. A websocket is opened at
+//   <pod_url>/ws and the prompt is POSTed to the native <pod_url>/prompt.
+//   EVERY prompt request gets a FRESH client_id — ComfyUI routes a
+//   prompt's execution events only to the websocket whose client_id
+//   submitted it, so each request owns its stream and no cross-talk
+//   between jobs is possible. The received websocket messages are
+//   translated back into the proxy's NDJSON event vocabulary, so BOTH
+//   modes consume the result with the exact same logic.
 //
 // Common request fields (mirrors beam_comfy_service PromptRequest schema):
 //   - pod_url:   the pod URL (Tier 2 proxy, or direct ComfyUI)
@@ -51,9 +54,9 @@
 //   - is_direct: optional — true selects the direct ComfyUI branch
 
 import { randomUUID } from 'node:crypto';
-import { Agent } from 'undici';
 import { asHandlerMethod } from '@underload/service';
 import { newDirectClientId, submitDirectPrompt } from './direct-comfy';
+import { submitProxyPrompt } from './proxy-comfy';
 import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
 import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
@@ -72,25 +75,6 @@ import {
 function newClientId(): string {
     return randomUUID().replace(/-/g, '');
 }
-
-/**
- * Shared dispatcher for pod-facing fetches with ALL undici timeouts disabled.
- *
- * Why this exists: fetch()'s RequestInit silently DROPS unknown keys (per
- * WebIDL), so the previous `bodyTimeout: 0` init option never reached undici
- * and the global Agent's default 300 s body timeout stayed in force. That
- * timeout measures the gap BETWEEN response body chunks — and a queued
- * ComfyUI prompt's NDJSON stream legitimately emits nothing for its
- * prompt_id until it starts executing, so exactly ~305 s after enqueue the
- * body read died with `TypeError: terminated` while the pod kept processing.
- * Timeouts live on the Dispatcher (Agent/Client), and `dispatcher` is the
- * one undici-specific fetch init key that IS honored. 0 = disabled: the
- * stream ends when the pod ends it, never at a client-side deadline.
- */
-const podAgent = new Agent({
-    headersTimeout: 0,
-    bodyTimeout: 0,
-});
 
 export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variables) => {
     const body = _parameters.body as {
@@ -185,23 +169,9 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             });
         }
 
-        const forwardedHeaders: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/x-ndjson',
-        };
-        if (authorization) {
-            forwardedHeaders['Authorization'] = authorization;
-        }
-
-        const upstream = await fetch(podUrl.toString(), {
-            method: 'POST',
-            headers: forwardedHeaders,
-            body: JSON.stringify(promptPayload),
-            // @ts-expect-error -- undici-specific fetch init key (omitted from
-            // the DOM RequestInit type): route through the timeout-free
-            // dispatcher, see podAgent above.
-            dispatcher: podAgent,
-        });
+        // Tier 2 proxy shape — POST the payload to the pod_url itself and
+        // consume its NDJSON stream (see ./proxy-comfy.ts).
+        const upstream = await submitProxyPrompt({ podUrl, promptPayload, authorization });
 
         // ── Stale-detection self-heal ─────────────────────────────
         // A native ComfyUI server has no POST / route — it answers HTTP
