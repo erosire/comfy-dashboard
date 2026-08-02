@@ -7,7 +7,7 @@
 //
 // Verifies:
 //   1. The dialog renders exactly the hardcoded GPU options and reports the
-//      picked GPU key; Cancel and the backdrop dismiss it.
+//      picked GPU key; the backdrop dismisses it without a separate cancel button.
 //   2. Pod buttons are labeled by GPU — "4090" idle, "4090x3" / "B300x1"
 //      while jobs are queued (per-pod predicate: activeGenerationIds).
 //   3. The pod button border STYLE carries the pod shape: solid = direct
@@ -83,16 +83,17 @@ describe('GpuSelectDialog', () => {
         expect(onSelect).toHaveBeenCalledWith('B300');
     });
 
-    it('dismisses from Cancel and from the backdrop', () => {
+    it('does not render a cancel button and dismisses from the backdrop', () => {
         const onCancel = vi.fn();
         render(<GpuSelectDialog onSelect={vi.fn()} onCancel={onCancel} />);
 
-        click([...container.querySelectorAll('button')].find((b) => b.textContent === 'Cancel')!);
-        expect(onCancel).toHaveBeenCalledTimes(1);
+        const labels = [...container.querySelectorAll('button')].map((button) => button.textContent);
+        expect(labels).toEqual([...GPU_OPTIONS]);
+        expect(labels).not.toContain('Cancel');
 
         // Backdrop is the outermost fixed overlay.
         click(container.firstElementChild);
-        expect(onCancel).toHaveBeenCalledTimes(2);
+        expect(onCancel).toHaveBeenCalledTimes(1);
     });
 });
 

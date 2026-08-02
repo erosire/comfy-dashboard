@@ -9,7 +9,7 @@
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { Btn, BtnPrimary } from './ui';
+import { BtnPrimary } from './ui';
 import { GPU_OPTIONS } from './utils';
 
 export type GpuSelectDialogProps = {
@@ -59,7 +59,6 @@ export const GpuSelectDialog: React.FC<GpuSelectDialogProps> = ({ onSelect, onCa
                 Select the GPU to spawn the pod on.
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 14 }}>
-                <Btn onClick={onCancel}>Cancel</Btn>
                 {GPU_OPTIONS.map((gpu, index) => (
                     <BtnPrimary
                         key={gpu}
