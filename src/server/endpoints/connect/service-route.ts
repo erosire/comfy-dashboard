@@ -1,11 +1,11 @@
-// Route registration for opening a persistent direct ComfyUI connection.
+// Route registration for establishing a managed ComfyUI server connection.
 
 import { asServiceHandler } from '@underload/service';
-import { connectPod } from './connect';
+import { connectServer } from './connect';
 
 export default {
     route: '/v1/comfy/connect',
     handler: asServiceHandler({
-        POST: connectPod
+        POST: connectServer
     })
 };

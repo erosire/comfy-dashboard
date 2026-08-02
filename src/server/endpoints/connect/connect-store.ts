@@ -1,54 +1,60 @@
 // Persistent storage for the long-lived ComfyUI connection logs.
 //
-// Every websocket client identifier gets its own JSON file at:
-//   <root>/connect/<connect_id>/<client_id>.json
-// Keeping the files separate prevents one busy prompt from making every
-// request log unreadable and lets the GET endpoint address a single client.
+// Every ComfyUI prompt identifier gets its own JSON file at:
+//   <root>/connect/<connect_id>/<prompt_id>.json
+// The server records every websocket message it receives for a connection:
+// messages carrying `data.prompt_id` land in that prompt's file; messages
+// without one (status broadcasts, binary preview frames) are attributed to
+// the connection's session log or the prompt currently in flight (see
+// connect.ts). Keeping the files separate lets GET
+// /v1/comfy/connect/:connect_id/:prompt_id address exactly one prompt's
+// stream of events.
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-// A client identifier is used as a path segment, so only URL/file-safe values
-// are accepted. ComfyUI's generated ids are 32-character hexadecimal strings.
+// A prompt/connection identifier is used as a path segment, so only
+// URL/file-safe values are accepted. ComfyUI prompt ids are UUIDs (with
+// dashes) and connect ids are generated the same way.
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;
 
 // Writes for one file are serialized so simultaneous websocket messages cannot
 // overwrite one another after both have read the same previous JSON document.
 const writeQueues = new Map<string, Promise<void>>();
 
-/** One timestamped raw websocket message stored in a client log file. */
+/** One timestamped raw websocket message stored in a prompt log file. */
 export type ConnectLogEvent = {
     receivedAt: string;
     message: unknown;
 };
 
-/** The complete JSON document persisted for one websocket client identifier. */
-export type ConnectClientLog = {
+/** The complete JSON document persisted for one ComfyUI prompt identifier. */
+export type ConnectPromptLog = {
     connectId: string;
-    clientId: string;
+    promptId: string;
     podUrl: string;
     createdAt: string;
     updatedAt: string;
     events: ConnectLogEvent[];
 };
 
-/** Metadata required when a new client log file is first created. */
-export type ConnectClientLogMetadata = Pick<ConnectClientLog, 'connectId' | 'clientId' | 'podUrl'>;
+/** Metadata required when a new prompt log file is first created. */
+export type ConnectPromptLogMetadata = Pick<ConnectPromptLog, 'connectId' | 'promptId' | 'podUrl'>;
 
 /** Return whether a caller-controlled id is safe to use as a file name. */
 export function isSafeConnectPathSegment(value: unknown): value is string {
     return typeof value === 'string' && SAFE_PATH_SEGMENT.test(value);
 }
 
-/** Resolve the individual JSON file for a connect/client pair. */
-export function connectClientLogPath(root: string, connectId: string, clientId: string): string {
+/** Resolve the individual JSON file for a connect/prompt pair. */
+export function connectPromptLogPath(root: string, connectId: string, promptId: string): string {
     if (!isSafeConnectPathSegment(connectId)) {
         throw new Error(`Invalid connect_id: ${connectId}`);
     }
-    if (!isSafeConnectPathSegment(clientId)) {
-        throw new Error(`Invalid client_id: ${clientId}`);
+    if (!isSafeConnectPathSegment(promptId)) {
+        throw new Error(`Invalid prompt_id: ${promptId}`);
     }
-    return path.join(root, 'connect', connectId, `${clientId}.json`);
+    return path.join(root, 'connect', connectId, `${promptId}.json`);
 }
 
 /** Run a file operation after all earlier operations for that same file. */
@@ -79,8 +85,8 @@ function cleanupQueuedWrite(filePath: string, operation: Promise<void>): void {
 }
 
 /** Read a previously persisted log, returning null for missing/invalid files. */
-export async function readClientLog(root: string, connectId: string, clientId: string): Promise<ConnectClientLog | null> {
-    const filePath = connectClientLogPath(root, connectId, clientId);
+export async function readPromptLog(root: string, connectId: string, promptId: string): Promise<ConnectPromptLog | null> {
+    const filePath = connectPromptLogPath(root, connectId, promptId);
     const pending = writeQueues.get(filePath);
     if (pending) {
         // Reads observe the latest completed append, while a failed append is
@@ -90,21 +96,21 @@ export async function readClientLog(root: string, connectId: string, clientId: s
 
     try {
         const raw = await fs.readFile(filePath, 'utf8');
-        const parsed = JSON.parse(raw) as Partial<ConnectClientLog>;
+        const parsed = JSON.parse(raw) as Partial<ConnectPromptLog>;
         if (!parsed || !Array.isArray(parsed.events)) return null;
-        return parsed as ConnectClientLog;
+        return parsed as ConnectPromptLog;
     } catch {
         return null;
     }
 }
 
-/** Ensure a client file exists before the first websocket event arrives. */
-export async function ensureClientLog(
+/** Ensure a prompt file exists before the first websocket event arrives. */
+export async function ensurePromptLog(
     root: string,
-    metadata: ConnectClientLogMetadata,
+    metadata: ConnectPromptLogMetadata,
     now: string = new Date().toISOString()
 ): Promise<void> {
-    const filePath = connectClientLogPath(root, metadata.connectId, metadata.clientId);
+    const filePath = connectPromptLogPath(root, metadata.connectId, metadata.promptId);
     await enqueueFileWrite(filePath, async () => {
         try {
             await fs.access(filePath);
@@ -113,7 +119,7 @@ export async function ensureClientLog(
             // The file is created below when this is the first observation.
         }
 
-        const document: ConnectClientLog = {
+        const document: ConnectPromptLog = {
             ...metadata,
             createdAt: now,
             updatedAt: now,
@@ -124,18 +130,18 @@ export async function ensureClientLog(
     });
 }
 
-/** Append one websocket message to its client-specific JSON file. */
-export async function appendClientLogEvent(
+/** Append one websocket message to its prompt-specific JSON file. */
+export async function appendPromptLogEvent(
     root: string,
-    metadata: ConnectClientLogMetadata,
+    metadata: ConnectPromptLogMetadata,
     message: unknown,
     receivedAt: string = new Date().toISOString()
 ): Promise<void> {
-    const filePath = connectClientLogPath(root, metadata.connectId, metadata.clientId);
+    const filePath = connectPromptLogPath(root, metadata.connectId, metadata.promptId);
     await enqueueFileWrite(filePath, async () => {
-        let document: ConnectClientLog;
+        let document: ConnectPromptLog;
         try {
-            document = JSON.parse(await fs.readFile(filePath, 'utf8')) as ConnectClientLog;
+            document = JSON.parse(await fs.readFile(filePath, 'utf8')) as ConnectPromptLog;
             if (!Array.isArray(document.events)) throw new Error('Invalid connect log');
         } catch {
             // Recreate a missing/corrupt file instead of dropping the live log.
@@ -155,6 +161,6 @@ export async function appendClientLogEvent(
 }
 
 /** Wait for currently queued writes; exported for deterministic unit tests. */
-export async function flushClientLogWrites(): Promise<void> {
+export async function flushPromptLogWrites(): Promise<void> {
     await Promise.all([...writeQueues.values()].map((pending) => pending.catch(() => undefined)));
 }

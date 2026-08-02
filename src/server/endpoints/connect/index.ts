@@ -1,23 +1,35 @@
-// Public barrel for the direct ComfyUI connection endpoint module.
+// Public barrel for the managed ComfyUI connection endpoint module.
 
 export {
     closeAllConnections,
     closeConnection,
-    connectPod,
+    connectServer,
     extractWebSocketClientId,
-    getConnectedRequest,
+    extractWebSocketPromptId,
+    getConnectedPromptLog,
+    isTerminalPromptEvent,
     newComfyClientId,
     newConnectId,
-    parsePodUrl,
+    parseServerUrl,
+    resolveServerEntries,
     sendConnectedPrompt,
-    websocketUrl
+    streamPromptLogEvents,
+    waitForServerReady,
+    websocketUrl,
+    CONNECT_READY_ATTEMPT_TIMEOUT_MS,
+    CONNECT_READY_POLL_MS,
+    CONNECT_READY_TIMEOUT_MS,
+    CONNECT_SOCKET_TIMEOUT_MS,
+    CONNECT_STREAM_POLL_MS,
+    SESSION_LOG_ID
 } from './connect';
+export type { ConnectServerEntry } from './connect';
 export {
-    appendClientLogEvent,
-    connectClientLogPath,
-    ensureClientLog,
-    flushClientLogWrites,
+    appendPromptLogEvent,
+    connectPromptLogPath,
+    ensurePromptLog,
+    flushPromptLogWrites,
     isSafeConnectPathSegment,
-    readClientLog
+    readPromptLog
 } from './connect-store';
-export type { ConnectClientLog, ConnectClientLogMetadata, ConnectLogEvent } from './connect-store';
+export type { ConnectLogEvent, ConnectPromptLog, ConnectPromptLogMetadata } from './connect-store';

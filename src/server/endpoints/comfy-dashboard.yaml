@@ -31,7 +31,7 @@ tags:
   - name: Cloud
     description: Beam cloud pod management — spawn pods and check pod status
   - name: Connect
-    description: Long-lived direct ComfyUI websocket connections and client logs
+    description: Managed ComfyUI server connections and per-prompt event logs
 paths:
   # ── Workflows ──────────────────────────────────────────────────────
 
@@ -898,39 +898,67 @@ paths:
 
   /v1/comfy/connect:
     post:
-      operationId: connectComfyPod
-      summary: Open a persistent direct ComfyUI connection
+      operationId: connectComfyServer
+      summary: Establish a managed ComfyUI server connection
       description: >-
-        Opens a native ComfyUI websocket at
-        `<pod_url>/ws?clientId=<client_id>` and keeps it open in the server.
-        The server continuously records websocket messages in an individual
-        JSON file for the websocket client id. The returned connectId is used
-        to submit native ComfyUI prompts and read the resulting client log.
+        Picks a ComfyUI server from the server's configured list
+        (auto-start endpoints — contacting one cold-boots its ComfyUI),
+        polls the server's native GET /system_stats until ComfyUI has
+        finished starting, then opens a native websocket at
+        `<pod_url>/ws?clientId=<client_id>` and keeps it open in the
+        background. Only after the server is confirmed up does the response
+        return the connect_id (uuid).
+
+        Without a body (or `{}`), candidates are tried in round-robin order
+        across the whole list: each server gets one startup window before
+        the next is tried. Sending `{"server": "<name>"}` pins the
+        connection to a specific list entry.
+
+        From this moment until the ComfyUI server terminates, the server
+        records EVERY websocket message to disk: messages carrying
+        `data.prompt_id` land in
+        `<root>/connect/<connect_id>/<prompt_id>.json`; messages without one
+        (status broadcasts, binary preview frames) are attributed to the
+        prompt currently in flight, or to the connection's session log when
+        no prompt is active yet. The returned connect_id submits prompts and
+        reads the resulting per-prompt logs.
       tags:
         - Connect
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/ConnectRequest'
-            example:
-              pod_url: 'https://test-pod-abc123.beam.cloud:8188'
+            examples:
+              any_server:
+                summary: Pick any server from the list (round-robin)
+                value: {}
+              named_server:
+                summary: Pin a specific server from the list
+                value:
+                  server: devonshire2
       responses:
         '200':
-          description: Persistent websocket connection opened
+          description: ComfyUI server started and persistent connection established
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ConnectResponse'
         '400':
-          description: Missing or invalid pod_url
+          description: Unknown server name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: No ComfyUI servers configured
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '502':
-          description: The pod websocket could not be opened
+          description: No server in the list started within its window
           content:
             application/json:
               schema:
@@ -939,12 +967,14 @@ paths:
   /v1/comfy/connect/{connect_id}:
     post:
       operationId: sendConnectedComfyPrompt
-      summary: Send a native prompt through a persistent connection
+      summary: Send a native prompt through a managed connection
       description: >-
         Opens or reuses the websocket subscription for client_id, then sends
-        the prompt to the connected pod's native POST /prompt endpoint. The
-        websocket remains open and all events for client_id are appended to
-        its individual JSON log file.
+        the prompt to the connected server's native POST /prompt endpoint.
+        The response is ComfyUI's native prompt response (prompt_id, number,
+        node_errors) with connect_id and client_id appended. The prompt's
+        websocket event log (`<root>/connect/<connect_id>/<prompt_id>.json`)
+        is created as soon as ComfyUI assigns the prompt_id.
       tags:
         - Connect
       parameters:
@@ -988,21 +1018,31 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '502':
-          description: The pod websocket or prompt endpoint could not be reached
+          description: The server websocket or prompt endpoint could not be reached
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /v1/comfy/cloud/connect/{connect_id}/request/{client_id}:
+  /v1/comfy/connect/{connect_id}/{prompt_id}:
     get:
-      operationId: getConnectedClientLog
-      summary: Read one persistent connection client log
+      operationId: getConnectedPromptLog
+      summary: Read one prompt's recorded websocket event list
       description: >-
-        Returns the JSON file containing all websocket messages received for
-        client_id. The file is stored at
-        `<root>/connect/<connect_id>/<client_id>.json`, so this endpoint can
-        still read completed logs after the live websocket has closed.
+        Returns the streaming list of websocket data recorded for one
+        prompt_id. The file is stored at
+        `<root>/connect/<connect_id>/<prompt_id>.json`, so the whole event
+        trail remains readable after the live websocket has closed and even
+        after the ComfyUI server has terminated.
+
+        **JSON snapshot (default)** — the full recorded event list so far;
+        poll this for progress.
+
+        **Live stream** — pass `?stream=true` to receive a Server-Sent
+        Events stream instead: the recorded history is replayed first, then
+        each new event appended by the websocket recorder is pushed live.
+        The stream ends after the prompt's terminal event
+        (execution_success / execution_error / execution_interrupted).
       tags:
         - Connect
       parameters:
@@ -1011,19 +1051,33 @@ paths:
           required: true
           schema:
             type: string
-        - name: client_id
+        - name: prompt_id
           in: path
           required: true
           schema:
             type: string
-            pattern: '^[0-9a-fA-F]{32}$'
+          description: >-
+            The prompt_id returned by POST /v1/comfy/connect/{connect_id}
+            (or `session` for the connection-wide catch-all log).
+        - name: stream
+          in: query
+          required: false
+          description: 'true (or 1) switches the response to a live SSE stream.'
+          schema:
+            type: string
+            enum: ['true', '1']
       responses:
         '200':
-          description: Client-specific websocket event log
+          description: >-
+            The prompt's recorded event list — JSON snapshot by default,
+            text/event-stream when `?stream=true`.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ConnectClientLog'
+                $ref: '#/components/schemas/ConnectPromptLog'
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ConnectLogEvent'
         '400':
           description: Missing or invalid path parameter
           content:
@@ -1031,7 +1085,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Client log file not found
+          description: Prompt log file not found
           content:
             application/json:
               schema:
@@ -1442,34 +1496,45 @@ components:
 
     ConnectRequest:
       type: object
-      description: Request body for POST /v1/comfy/connect.
-      required:
-        - pod_url
+      description: >-
+        Request body for POST /v1/comfy/connect. Omitting the body (or
+        sending {}) lets the server pick from its configured ComfyUI server
+        list in round-robin order.
       properties:
-        pod_url:
+        server:
           type: string
-          format: uri
           description: >-
-            Direct HTTP(S) base URL of the ComfyUI pod. The server derives the
-            native websocket URL by appending /ws.
-          example: https://test-pod-abc123.beam.cloud:8188
+            Optional name of a specific entry in the server's configured
+            ComfyUI server list. When provided, only that server is tried.
+          example: devonshire2
 
     ConnectResponse:
       type: object
-      description: Identifiers for the newly opened persistent connection.
-      required: [connectId, client_id]
+      description: Identifiers for the newly established managed connection.
+      required: [connect_id, client_id, server, pod_url]
       properties:
-        connectId:
+        connect_id:
           type: string
-          description: Process-local id used by the prompt endpoint.
-          example: 0123456789abcdef0123456789abcdef
+          format: uuid
+          description: >-
+            Identifier (uuid) used by the prompt and log endpoints.
+          example: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
         client_id:
           type: string
           pattern: '^[0-9a-fA-F]{32}$'
           description: >-
-            The client id used by the persistent websocket. Use this id in the
-            request-log URL or omit client_id when submitting a prompt.
+            The client id used by the persistent websocket. Omit client_id
+            when submitting a prompt to reuse it.
           example: abc123def4567890fedcba0987654321
+        server:
+          type: string
+          description: Name of the server-list entry this connection uses.
+          example: devonshire2
+        pod_url:
+          type: string
+          format: uri
+          description: Base URL of the ComfyUI server behind this connection.
+          example: https://devonshire2-shine--comfy-playground-snapshot-comfy.modal.run
 
     ConnectPromptRequest:
       type: object
@@ -1501,35 +1566,41 @@ components:
       type: object
       description: >-
         Native ComfyUI POST /prompt response with connection and client ids
-        appended for locating the websocket event log.
+        appended for locating the prompt's websocket event log.
       additionalProperties: true
-      required: [connectId, client_id]
+      required: [connect_id, client_id]
       properties:
-        connectId:
+        connect_id:
           type: string
+          format: uuid
         client_id:
           type: string
           pattern: '^[0-9a-fA-F]{32}$'
         prompt_id:
           type: string
+          description: >-
+            ComfyUI's prompt identifier — addresses this prompt's recorded
+            event list at GET /v1/comfy/connect/{connect_id}/{prompt_id}.
         number:
           type: number
         node_errors:
           type: object
           additionalProperties: true
 
-    ConnectClientLog:
+    ConnectPromptLog:
       type: object
       description: >-
-        One persisted JSON document for a ComfyUI websocket client id. The
-        server appends one event object for every received websocket message.
-      required: [connectId, clientId, podUrl, createdAt, updatedAt, events]
+        One persisted JSON document per ComfyUI prompt id. The server
+        appends one event object for every websocket message recorded for
+        the prompt (plus the unmarked status/broadcast/binary frames
+        attributed to it while it was in flight).
+      required: [connectId, promptId, podUrl, createdAt, updatedAt, events]
       properties:
         connectId:
           type: string
-        clientId:
+          format: uuid
+        promptId:
           type: string
-          pattern: '^[0-9a-fA-F]{32}$'
         podUrl:
           type: string
           format: uri
