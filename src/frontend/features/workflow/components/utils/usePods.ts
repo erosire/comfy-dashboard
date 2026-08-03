@@ -17,11 +17,12 @@
 
 import React from 'react';
 import type { CloudCreateResult, CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
-import { cloud, cloudPrompt } from '../../../../api';
+import { cloud, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
 import { DIRECT_POD_IDLE_MS, MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
 import { isDirectPodIdle, podLetter, pickLeastLoadedPod, shouldHeartbeatPod } from './pod-utils';
+import { replacePreferenceVariables } from './workflow-prompt';
 
 /**
  * Local-timestamp suffix for default generation names: YYYYMMDD-HHMMSS
@@ -215,16 +216,29 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             }
 
             try {
-                // Step 1+2 — snapshot the original workflow json into a
+                // Resolve the default preference profile at the UI boundary so
+                // the server receives a self-contained workflow document rather
+                // than a second preference payload. A preference API outage is
+                // treated as an empty profile, which still removes every token.
+                let preferences: Record<string, unknown> = {};
+                try {
+                    preferences = await fetchPreferenceVariables(baseUrl);
+                } catch {
+                    preferences = {};
+                }
+                const preparedSnapshot = replacePreferenceVariables(snapshot, preferences);
+
+                // Step 1+2 — snapshot the already-prepared workflow json into a
                 // generation file. The generation is named after the workflow +
                 // current local timestamp by default (the server falls back to
                 // its own timestamp id when no name is passed).
                 const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
-                const generation = await generateWorkflow(editingWorkflowId, snapshot, generationName);
+                const generation = await generateWorkflow(editingWorkflowId, preparedSnapshot, generationName);
                 console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
 
                 try {
-                    // Step 3 — submit and be done. The server processes the
+                    // Step 3 — submit the already-prepared workflow and be done.
+                    // The server processes the
                     // pod stream in the background from here (scoped to this
                     // job via a per-submission client_id). A direct ComfyUI pod
                     // is flagged is_direct so the server drives its native

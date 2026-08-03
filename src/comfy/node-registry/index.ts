@@ -94,9 +94,13 @@ import { KSamplerSelect } from './KSamplerSelect';
 import { ManualSigmas } from './ManualSigmas';
 import { CFGGuider } from './CFGGuider';
 import { SamplerCustomAdvanced } from './SamplerCustomAdvanced';
+import { BasicScheduler } from './BasicScheduler';
+import { BasicGuider } from './BasicGuider';
 
 // Math
 import { ComfyMathExpression } from './ComfyMathExpression';
+import { MiniMaxH3ImageToVideo } from './MiniMaxH3ImageToVideo';
+import { VAEDecodeAudio } from './VAEDecodeAudio';
 
 // LTXV nodes
 import { LTXVPreprocess } from './LTXVPreprocess';
@@ -253,9 +257,13 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     ManualSigmas,
     CFGGuider,
     SamplerCustomAdvanced,
+    BasicScheduler,
+    BasicGuider,
 
     // Math
     ComfyMathExpression,
+    MiniMaxH3ImageToVideo,
+    VAEDecodeAudio,
 
     // LTXV nodes
     LTXVPreprocess,

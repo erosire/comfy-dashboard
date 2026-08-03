@@ -11,13 +11,15 @@
 //   3. Falls back to the widget value when a converted-widget connection
 //      was removed (e.g. an unconnected subgraph input port whose -10
 //      sentinel was filtered out during flattening).
-//   4. Provides a best-effort fallback for truly unregistered nodes by
+//   4. Resolves versioned Preferences values in every compiled JSON string and
+//      replaces missing variables with an empty string.
+//   5. Provides a best-effort fallback for truly unregistered nodes by
 //      inferring widget names from the workflow's converted-to-input
 //      slots (the `widget.name` field).
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { workflowToApiPrompt, parseWorkflowJson } from './components/utils';
+import { parseWorkflowJson, replacePreferenceVariables, workflowToApiPrompt } from './components/utils';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -71,6 +73,103 @@ function makeSinkLink(sourceId: number, sourceSlot: number, type: string): Recor
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
+
+describe('frontend preference variable preparation', () => {
+    it('replaces repeated, embedded, complete, and missing preference tokens', () => {
+        // API prompt input avoids parser concerns and exercises the exact
+        // send-time JSON shape that the cloud endpoint forwards to ComfyUI.
+        const raw = {
+            '1': {
+                class_type: 'TextBox',
+                inputs: {
+                    embedded: 'Hello {{name}} — {{name}}.',
+                    completeNumber: '{{count}}',
+                    completeBoolean: '{{enabled}}',
+                    missing: 'before{{missing}}after',
+                    array: ['{{name}}', '{{unknown}}']
+                }
+            }
+        };
+
+        const prepared = replacePreferenceVariables(raw, {
+            name: { current: 'Ada' },
+            count: { current: 3 },
+            enabled: { current: true }
+        });
+
+        expect(prepared).toEqual({
+            '1': {
+                class_type: 'TextBox',
+                inputs: {
+                    embedded: 'Hello Ada — Ada.',
+                    completeNumber: 3,
+                    completeBoolean: true,
+                    missing: 'beforeafter',
+                    array: ['Ada', '']
+                }
+            }
+        });
+        // The server receives this prepared JSON and only converts its
+        // already-resolved workflow/API shape; it does not receive preferences.
+        expect(workflowToApiPrompt(prepared)).toEqual(prepared);
+    });
+
+    it('resolves nested preference values, object keys, and custom-only versions', () => {
+        // Nested references are resolved before insertion, while the cycle is
+        // cut to an empty string so the final serialized JSON has no tokens.
+        const raw = {
+            '1': {
+                class_type: 'TextBox',
+                inputs: {
+                    nested: '{{greeting}}',
+                    object: '{{payload}}',
+                    '{{key}}': 'value',
+                    cycle: '{{cycle}}'
+                }
+            }
+        };
+
+        const compiled = replacePreferenceVariables(raw, {
+            greeting: { current: 'Hello {{name}}' },
+            name: { current: 'Ada' },
+            payload: { current: { enabled: true, count: 2 } },
+            key: { current: 'resolved' },
+            customOnly: { release: 'fallback' },
+            cycle: { current: '{{cycle}}' }
+        });
+
+        expect(compiled).toEqual({
+            '1': {
+                class_type: 'TextBox',
+                inputs: {
+                    nested: 'Hello Ada',
+                    object: { enabled: true, count: 2 },
+                    resolved: 'value',
+                    cycle: ''
+                }
+            }
+        });
+        expect(JSON.stringify(compiled)).not.toContain('{{');
+        expect(replacePreferenceVariables({
+            '1': { class_type: 'TextBox', inputs: { value: '{{customOnly}}' } }
+        }, { customOnly: { release: 'fallback' } })).toEqual({
+            '1': { class_type: 'TextBox', inputs: { value: 'fallback' } }
+        });
+    });
+
+    it('removes unresolved tokens when no preference profile is available', () => {
+        // The server uses the empty preference map when the profile is absent
+        // or unavailable; this assertion guards the no-unescaped-braces rule.
+        const compiled = replacePreferenceVariables({
+            '1': { class_type: 'TextBox', inputs: { value: '{{notConfigured}}' } }
+        });
+
+        expect(compiled).toEqual({
+            '1': { class_type: 'TextBox', inputs: { value: '' } }
+        });
+        expect(JSON.stringify(compiled)).not.toContain('{{notConfigured}}');
+    });
+});
 
 describe('workflowToApiPrompt — widget preservation for previously-unregistered nodes', () => {
     it('includes the widget value for a registered PrimitiveBoolean node', () => {
@@ -1301,4 +1400,3 @@ describe('workflowToApiPrompt — Power Lora Loader (rgthree) dynamic widgets', 
         expect(node!.inputs.lora_2).toBeUndefined();
     });
 });
-

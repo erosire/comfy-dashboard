@@ -105,9 +105,10 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         return { status: 400, response: { error: `Invalid pod_url: ${body.pod_url}` } };
     }
 
-    // Convert the stored/original workflow json into the flat API prompt
-    // ComfyUI's POST /prompt expects. Idempotent for documents already in
-    // API prompt format — one conversion point, whatever the caller stored.
+    // Convert the already-prepared workflow json into the flat API prompt
+    // ComfyUI's POST /prompt expects. Preference replacement happens in the UI
+    // before this request, so this server boundary performs only format
+    // conversion and never needs a second preference payload.
     const apiPrompt = workflowToApiPrompt(body.prompt);
 
     // Build the prompt payload per beam_comfy_service PromptRequest schema
