@@ -17,7 +17,11 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 
-export const WidgetTextarea = styled('textarea')({
+// maxRows is consumed by Emotion to keep the prop out of the textarea DOM
+// element while allowing compact editors to choose a smaller visible cap.
+export const WidgetTextarea = styled('textarea', {
+    shouldForwardProp: (prop) => prop !== 'maxRows'
+})<{ maxRows?: number }>(({ maxRows = 8 }) => ({
     flex: '1 1 auto',
     padding: '3px 6px',
     fontSize: theme.fontSize.xs,
@@ -33,20 +37,28 @@ export const WidgetTextarea = styled('textarea')({
     overflowY: 'auto' as const,
     lineHeight: 1.4,
     height: 'auto',
-    // 8 rows × 1.4em line-height + 6px vertical padding (border-box).
-    maxHeight: 'calc(8 * 1.4em + 6px)'
-});
+    // The default remains eight rows for workflow widgets; preference values
+    // pass maxRows={6} so they stay compact while still accepting new lines.
+    maxHeight: `calc(${maxRows} * 1.4em + 6px)`
+}));
 
-export const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAreaElement>> = (props) => {
+export type AutoGrowTextareaProps = React.TextareaHTMLAttributes<HTMLTextAreaElement> & {
+    maxRows?: number;
+};
+
+export const AutoGrowTextarea: React.FC<AutoGrowTextareaProps> = (props) => {
+    // maxRows controls the visual cap and must not be passed to the native
+    // textarea, where it would become an invalid DOM attribute.
+    const { maxRows, ...textareaProps } = props;
     const ref = React.useRef<HTMLTextAreaElement | null>(null);
     const lastWidthRef = React.useRef(0);
 
     // Keep the latest onChange/onPaste in refs so the (stable) paste handler
     // always invokes the freshest callbacks without re-attaching listeners.
-    const onChangeRef = React.useRef(props.onChange);
-    onChangeRef.current = props.onChange;
-    const onPasteRef = React.useRef(props.onPaste);
-    onPasteRef.current = props.onPaste;
+    const onChangeRef = React.useRef(textareaProps.onChange);
+    onChangeRef.current = textareaProps.onChange;
+    const onPasteRef = React.useRef(textareaProps.onPaste);
+    onPasteRef.current = textareaProps.onPaste;
 
     const resize = React.useCallback(() => {
         const el = ref.current;
@@ -60,7 +72,7 @@ export const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAre
     // Re-fit on every value change: typing, external updates, workflow swap.
     React.useLayoutEffect(() => {
         resize();
-    }, [props.value, resize]);
+    }, [textareaProps.value, resize]);
 
     // Re-fit when the field's width changes (sidebar toggle, window resize),
     // since wrapped line counts change with width. Ignore height-only changes
@@ -117,5 +129,5 @@ export const AutoGrowTextarea: React.FC<React.TextareaHTMLAttributes<HTMLTextAre
         onPasteRef.current?.(e);
     }, []);
 
-    return <WidgetTextarea ref={ref} rows={1} {...props} onPaste={handlePaste} />;
+    return <WidgetTextarea ref={ref} rows={1} maxRows={maxRows} {...textareaProps} onPaste={handlePaste} />;
 };

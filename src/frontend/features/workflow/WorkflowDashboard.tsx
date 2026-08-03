@@ -23,6 +23,7 @@ import {
     FooterActions,
     GenerationLogDialog,
     GpuSelectDialog,
+    PreferencesDialog,
     RenameWorkflowDialog,
     ResultViewer,
     WorkflowEditorContent,
@@ -352,6 +353,12 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
         });
         const toggleSidebar = React.useCallback(() => setSidebarOpen((prev) => !prev), []);
 
+        // Preferences are kept as a modal session so opening the person icon
+        // always reloads the selected runtime profile from the API.
+        const [preferencesOpen, setPreferencesOpen] = React.useState(false);
+        const openPreferences = React.useCallback(() => setPreferencesOpen(true), []);
+        const closePreferences = React.useCallback(() => setPreferencesOpen(false), []);
+
         const { searchText, handleSearchChange } = useDebouncedSearch(store.searchQuery, searchWorkflows);
 
         // Poll generations for the selected workflow
@@ -395,6 +402,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             titleClickable={isEditingSaved}
                             onTitleClick={actions.openRename}
                             loadWarning={store.loadWarning}
+                            onPreferencesClick={openPreferences}
                         />
                     }
                     sidebar={
@@ -500,6 +508,15 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                         copied={generationLog.copied}
                         onCopy={generationLog.copyGenerationLog}
                         onClose={generationLog.closeGenerationLog}
+                    />
+                )}
+
+                {/* Runtime preference profile editor — mounted only while open
+                    so every new session fetches the currently selected profile. */}
+                {preferencesOpen && (
+                    <PreferencesDialog
+                        baseUrl={store.config.baseUrl}
+                        onClose={closePreferences}
                     />
                 )}
 
