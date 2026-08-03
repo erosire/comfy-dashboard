@@ -3,7 +3,7 @@
 //
 // persistResultAssets moves inline `data:` base64 payloads out of the
 // generation json into plain asset files:
-//   temporary/database/comfy-workflows/<wf>/generation/<gen>/<index>.<ext>
+//   <database-root>/comfy-workflows/<wf>/generation/<gen>/<index>.<ext>
 // and returns result items carrying `file:` references instead. The result
 // endpoint 302-redirects those to the static /v1/comfy/media mount.
 //
@@ -213,7 +213,7 @@ describe('file-backed round trip (persist → json → result endpoint)', () => 
         const out = await workflowGenerateResultGet(makeContext(), makeParams(0), { root: tmpRoot });
         expect(out.status).toBe(302);
         expect(out.raw!.headers.get('location')).toBe(
-            `/v1/comfy/media/${WORKFLOW_ID}/generation/${GENERATION_ID}/0.mp4`
+            `/v1/comfy/media/comfy-workflows/${WORKFLOW_ID}/generation/${GENERATION_ID}/0.mp4`
         );
     });
 });

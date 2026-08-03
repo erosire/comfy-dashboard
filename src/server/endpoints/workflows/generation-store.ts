@@ -1,12 +1,12 @@
 // Shared generation-file store.
 //
 // A generation json lives at:
-//   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>.json
+//   <database-root>/comfy-workflows/<workflowId>/generation/<generateId>.json
 //
 // Result media payloads (image/video/audio, often megabytes each) are NOT
 // stored inside the json. At write time (cloud prompt endpoint, generation
 // PUT) they are persisted as plain files:
-//   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>/<index>.<ext>
+//   <database-root>/comfy-workflows/<workflowId>/generation/<generateId>/<index>.<ext>
 // and the json's result items reference them with a `file:` url (see
 // persistResultAssets). The result endpoint answers those with a 302 to the
 // static /v1/comfy/media mount, so the bytes are served off disk by the OS —
@@ -46,11 +46,16 @@ export type GenerationResultItem = {
  * the generation's assets folder) instead of inline base64. The value after
  * the prefix is the file name within that folder — always `<index>.<ext>`,
  * written by persistResultAssets. Never an absolute path, never absolute
- * URL: the result endpoint turns it into a root-relative /v1/comfy/media
- * redirect, so whatever host a (LAN) client used to reach the server stays
- * the host the media comes from.
+ * URL: the result endpoint turns it into a root-relative
+ * /v1/comfy/media/comfy-workflows redirect, so whatever host a (LAN) client
+ * used to reach the server stays the host the media comes from.
  */
 export const FILE_URL_PREFIX = 'file:';
+
+// The Comfy dashboard owns this child directory below the service-provided
+// temporary/database root. The same segment is included in media redirects so
+// the shared static mount resolves files from the correct distribution folder.
+export const COMFY_WORKFLOWS_DIRECTORY = 'comfy-workflows';
 
 /**
  * Best-known file extension per result MIME type — the asset files get
@@ -157,7 +162,7 @@ export function toGenerationSummary(entry: GenerationEntry): GenerationSummary {
 export function generationFilePath(root: string, workflowId: string, generateId: string): string {
     return path.join(
         root,
-        'temporary/database/comfy-workflows',
+        COMFY_WORKFLOWS_DIRECTORY,
         workflowId,
         'generation',
         `${generateId}.json`
@@ -167,7 +172,7 @@ export function generationFilePath(root: string, workflowId: string, generateId:
 /**
  * Path of the human-readable log file kept next to a generation json.
  *
- *   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>.log
+ *   <database-root>/comfy-workflows/<workflowId>/generation/<generateId>.log
  *
  * The cloud prompt endpoint appends a timestamped line per status change
  * and per streamed event while it processes a generation server-side, so
@@ -177,7 +182,7 @@ export function generationFilePath(root: string, workflowId: string, generateId:
 export function generationLogPath(root: string, workflowId: string, generateId: string): string {
     return path.join(
         root,
-        'temporary/database/comfy-workflows',
+        COMFY_WORKFLOWS_DIRECTORY,
         workflowId,
         'generation',
         `${generateId}.log`
@@ -188,7 +193,7 @@ export function generationLogPath(root: string, workflowId: string, generateId: 
  * Directory holding a generation's media asset files — a sibling folder of
  * its .json/.log named after the generation:
  *
- *   <root>/temporary/database/comfy-workflows/<workflowId>/generation/<generateId>/
+ *   <database-root>/comfy-workflows/<workflowId>/generation/<generateId>/
  *
  * Each file is named `<resultIndex>.<ext>` (see persistResultAssets), which
  * keeps the json result array's `file:` references and the on-disk names in
@@ -199,7 +204,7 @@ export function generationLogPath(root: string, workflowId: string, generateId: 
 export function generationAssetsDirPath(root: string, workflowId: string, generateId: string): string {
     return path.join(
         root,
-        'temporary/database/comfy-workflows',
+        COMFY_WORKFLOWS_DIRECTORY,
         workflowId,
         'generation',
         generateId

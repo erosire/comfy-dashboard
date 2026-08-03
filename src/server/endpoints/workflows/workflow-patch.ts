@@ -90,7 +90,9 @@ export const workflowPatch = asHandlerMethod(async (_, parameters, variables) =>
         return { status: 400, response: { error: 'At least one field (name, description, raw, tags) must be provided' } };
     }
 
-    const baseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
+    // The shared root is temporary/database; keep the distribution-specific
+    // namespace local to the Comfy dashboard.
+    const baseDir = path.join(projectRoot, 'comfy-workflows');
     const metaPath = path.join(baseDir, workflowId, 'meta.json');
     const workflowJsonPath = path.join(baseDir, workflowId, 'workflow.json');
 

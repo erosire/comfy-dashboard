@@ -72,7 +72,7 @@ function makeParams(index: string | number) {
 
 /** Seed a generation file holding a single video result with the given url. */
 function seedGeneration(url: string, mimeType = 'video/mp4') {
-    const dir = path.join(tmpRoot, 'temporary/database/comfy-workflows', WORKFLOW_ID, 'generation');
+    const dir = path.join(tmpRoot, 'comfy-workflows', WORKFLOW_ID, 'generation');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
         path.join(dir, `${GENERATION_ID}.json`),
@@ -97,7 +97,7 @@ function readStoredJson(): { result: { url: string }[] } {
 }
 
 const MEDIA_LOCATION = (file: string) =>
-    `/v1/comfy/media/${WORKFLOW_ID}/generation/${GENERATION_ID}/${file}`;
+    `/v1/comfy/media/comfy-workflows/${WORKFLOW_ID}/generation/${GENERATION_ID}/${file}`;
 
 beforeEach(() => {
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'workflow-result-test-'));

@@ -19,7 +19,9 @@ export const workflowGet = asHandlerMethod(async (_, parameters, variables) => {
         return { status: 400, response: { error: 'id is required' } };
     }
 
-    const baseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
+    // The injected root is temporary/database, so only the distribution
+    // namespace belongs in this path.
+    const baseDir = path.join(projectRoot, 'comfy-workflows');
     const metaPath = path.join(baseDir, workflowId, 'meta.json');
     const workflowJsonPath = path.join(baseDir, workflowId, 'workflow.json');
 

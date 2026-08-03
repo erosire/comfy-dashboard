@@ -11,7 +11,7 @@
 //
 //   result json ("file:0.mp4")
 //     → GET …/result/0                       → 302, root-relative Location
-//     → GET /v1/comfy/media/…/0.mp4          → 200, streamed bytes
+//     → GET /v1/comfy/media/comfy-workflows/…/0.mp4 → 200, streamed bytes
 //     → GET …/result/0 + Range (followed)    → 206, exact slice (video seeking)
 //
 // This is the regression test for "results live as FILES, the endpoint only
@@ -122,7 +122,10 @@ beforeAll(async () => {
         staticRoutes: [
             {
                 route: '/v1/comfy/media',
-                root: path.join(tmpRoot, 'temporary', 'database', 'comfy-workflows'),
+                // The static mount receives the shared database root; the
+                // Comfy distribution's comfy-workflows child is appended by
+                // generation-store and the result endpoint.
+                root: tmpRoot,
                 extensions: MEDIA_EXTENSIONS
             }
         ],
@@ -141,7 +144,7 @@ describe('file-backed result — endpoint → 302 → static mount', () => {
         const res = await fetch(resultUrl(0), { redirect: 'manual' });
         expect(res.status).toBe(302);
         expect(res.headers.get('location')).toBe(
-            `/v1/comfy/media/${WORKFLOW_ID}/generation/${GENERATION_ID}/0.mp4`
+            `/v1/comfy/media/comfy-workflows/${WORKFLOW_ID}/generation/${GENERATION_ID}/0.mp4`
         );
     });
 
@@ -182,7 +185,7 @@ describe('legacy inline-base64 generation — migrated on first read', () => {
         const redirect = await fetch(resultUrl(0, LEGACY_GENERATION_ID), { redirect: 'manual' });
         expect(redirect.status).toBe(302);
         expect(redirect.headers.get('location')).toBe(
-            `/v1/comfy/media/${WORKFLOW_ID}/generation/${LEGACY_GENERATION_ID}/0.mp4`
+            `/v1/comfy/media/comfy-workflows/${WORKFLOW_ID}/generation/${LEGACY_GENERATION_ID}/0.mp4`
         );
 
         // …the json is rewritten with file references (no base64 left)…

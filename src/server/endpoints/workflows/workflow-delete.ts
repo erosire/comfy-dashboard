@@ -17,7 +17,9 @@ export const workflowDelete = asHandlerMethod(async (_, parameters, variables) =
         return { status: 400, response: { error: 'id is required' } };
     }
 
-    const folderPath = path.join(projectRoot, 'temporary/database/comfy-workflows', workflowId);
+    // Resolve below the shared database root; the distribution owns this
+    // comfy-workflows namespace.
+    const folderPath = path.join(projectRoot, 'comfy-workflows', workflowId);
 
     try {
         const stats = await fs.stat(folderPath);

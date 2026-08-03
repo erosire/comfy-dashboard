@@ -1,7 +1,7 @@
 // Workflow generate endpoint
 //
 // POST — Creates a generation snapshot with metadata:
-//   temporary/database/comfy-workflows/YYYYMMDD-HHMMSS/
+//   <database-root>/comfy-workflows/YYYYMMDD-HHMMSS/
 //     ├── workflow.json
 //     ├── meta.json
 //     └── generation/
@@ -105,7 +105,7 @@ export const workflowGenerateList = asHandlerMethod(async (_, parameters, variab
     }
 
     const generationDir = path.join(
-        projectRoot, 'temporary/database/comfy-workflows', workflowId, 'generation'
+        projectRoot, 'comfy-workflows', workflowId, 'generation'
     );
 
     // Async readdir — a missing folder is just an empty list.
@@ -179,7 +179,7 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
     }
 
     const workflowDir = path.join(
-        projectRoot, 'temporary/database/comfy-workflows', workflowId
+        projectRoot, 'comfy-workflows', workflowId
     );
     const workflowJsonPath = path.join(workflowDir, 'workflow.json');
 

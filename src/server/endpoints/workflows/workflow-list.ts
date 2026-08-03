@@ -1,7 +1,7 @@
 // Workflow list endpoint — GET /v1/comfy/workflows
 //
 // Returns all stored workflows from the local workflow database directory.
-// Each workflow is a folder under temporary/database/comfy-workflows/:
+// Each workflow is a folder under <database-root>/comfy-workflows/:
 //   YYYYMMDD-HHMMSS/
 //     ├── workflow.json   (ComfyUI-compatible workflow JSON)
 //     └── meta.json       (dashboard metadata)
@@ -48,7 +48,9 @@ async function readMeta(databaseDir: string, folderName: string): Promise<Workfl
 
 export const workflowList = asHandlerMethod(async (_, parameters, variables) => {
     const projectRoot = variables.root;
-    const databaseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
+    // The shared service root is temporary/database; this distribution owns
+    // the comfy-workflows child directory.
+    const databaseDir = path.join(projectRoot, 'comfy-workflows');
     const searchQuery: string | undefined = parameters.query?.q;
 
     // Async readdir — a missing database dir is just an empty list.

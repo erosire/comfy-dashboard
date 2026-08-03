@@ -38,7 +38,7 @@ function makeParams(overrides: { id?: string; generate_id?: string } = {}) {
 }
 
 function seedGeneration(entry: Record<string, unknown>, logContent?: string) {
-    const dir = path.join(tmpRoot, 'temporary/database/comfy-workflows', WORKFLOW_ID, 'generation');
+    const dir = path.join(tmpRoot, 'comfy-workflows', WORKFLOW_ID, 'generation');
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
         path.join(dir, `${GENERATION_ID}.json`),

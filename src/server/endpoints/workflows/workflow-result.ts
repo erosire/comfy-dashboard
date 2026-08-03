@@ -31,6 +31,7 @@
 import { asHandlerMethod } from '@underload/service';
 import {
     FILE_URL_PREFIX,
+    COMFY_WORKFLOWS_DIRECTORY,
     RESULT_MIME_EXTENSIONS,
     migrateGenerationAssets,
     readGenerationFile
@@ -43,8 +44,10 @@ const RESULT_CACHE_CONTROL = 'private, max-age=3600';
  * Route prefix of the static media mount (see the staticRoutes registration
  * in @underload/service's server.ts). Files are addressed as
  * `<MEDIA_ROUTE_PREFIX>/<workflowId>/generation/<generateId>/<index>.<ext>`.
+ * The distribution directory is part of this child URL below the shared
+ * /v1/comfy/media mount, matching the service's database-root static mount.
  */
-const MEDIA_ROUTE_PREFIX = '/v1/comfy/media';
+const MEDIA_ROUTE_PREFIX = `/v1/comfy/media/${COMFY_WORKFLOWS_DIRECTORY}`;
 
 /**
  * The only file names this server ever writes into an assets folder

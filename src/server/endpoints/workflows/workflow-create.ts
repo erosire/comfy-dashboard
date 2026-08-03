@@ -1,7 +1,7 @@
 // Workflow create endpoint — POST /v1/comfy/workflows
 //
 // Creates a new workflow entry. Stores the workflow in a timestamped folder:
-//   temporary/database/comfy-workflows/YYYYMMDD-HHMMSS/
+//   <database-root>/comfy-workflows/YYYYMMDD-HHMMSS/
 //     ├── workflow.json   (ComfyUI-compatible workflow JSON)
 //     └── meta.json       (dashboard metadata: name, description, tags, etc.)
 
@@ -123,7 +123,9 @@ export const workflowCreate = asHandlerMethod(async (_, parameters, variables) =
 
     // Generate folder name from timestamp; handle collisions with a counter suffix
     const baseFolder = timestampFolder(now);
-    const databaseDir = path.join(projectRoot, 'temporary/database/comfy-workflows');
+    // The service injects temporary/database as projectRoot; this distribution
+    // owns the comfy-workflows child directory.
+    const databaseDir = path.join(projectRoot, 'comfy-workflows');
     await fs.mkdir(databaseDir, { recursive: true });
 
     let folderName = baseFolder;
