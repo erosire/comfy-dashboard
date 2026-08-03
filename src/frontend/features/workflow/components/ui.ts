@@ -33,6 +33,42 @@ export const BtnPrimary = styled('button')({
     transition: `background-color ${theme.transition}`
 });
 
+// PodButton keeps the queue badge anchored to the button's top-right corner
+// while forwarding only native button attributes to the DOM.
+export const PodButton = styled(Btn, {
+    shouldForwardProp: (prop) => prop !== 'borderStyle' && prop !== 'borderColor'
+})<{ borderStyle: 'solid' | 'dashed'; borderColor: string }>(({ borderStyle, borderColor }) => ({
+    position: 'relative',
+    fontFamily: theme.fontMono,
+    borderStyle,
+    borderColor
+}));
+
+// PodQueueBadge mirrors a compact Material-style status badge: it overlaps
+// the control corner and expands horizontally for larger queue counts.
+export const PodQueueBadge = styled('span')({
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    minWidth: 18,
+    height: 18,
+    padding: '0 4px',
+    boxSizing: 'border-box',
+    borderRadius: 999,
+    border: `1px solid ${theme.bg}`,
+    backgroundColor: theme.accent,
+    color: '#ffffff',
+    fontFamily: theme.fontSans,
+    fontSize: theme.fontSize.xs,
+    fontWeight: 700,
+    lineHeight: 1,
+    pointerEvents: 'none',
+    zIndex: 1
+});
+
 export const BtnDanger = styled('button')({
     padding: '5px 14px',
     fontSize: theme.fontSize.sm,

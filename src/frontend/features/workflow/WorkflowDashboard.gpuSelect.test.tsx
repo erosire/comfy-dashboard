@@ -8,8 +8,8 @@
 // Verifies:
 //   1. The dialog renders exactly the hardcoded GPU options and reports the
 //      picked GPU key; the backdrop dismisses it without a separate cancel button.
-//   2. Pod buttons are labeled by GPU — "4090" idle, "4090x3" / "B300x1"
-//      while jobs are queued (per-pod predicate: activeGenerationIds).
+//   2. Pod buttons show the GPU name and a numeric top-right badge while jobs
+//      are queued (per-pod predicate: activeGenerationIds).
 //   3. The pod button border STYLE carries the pod shape: solid = direct
 //      ComfyUI, dashed = Tier 2 proxy.
 // =============================================================================
@@ -106,6 +106,7 @@ describe('FooterActions — GPU-labeled pod buttons', () => {
                 onPodGenerate={vi.fn()}
                 onGenerate={onGenerate}
                 onAutoGenerate={vi.fn()}
+                contentTab="results"
                 outputView="list"
                 onOutputViewChange={vi.fn()}
             />
@@ -113,23 +114,66 @@ describe('FooterActions — GPU-labeled pod buttons', () => {
         return onGenerate;
     }
 
-    it('opening the GPU picker is what the New button does', () => {
+    it('opening the GPU picker is what the plus button does', () => {
         const onGenerate = renderFooter([]);
-        click([...container.querySelectorAll('button')].find((b) => b.textContent === 'New')!);
+        click([...container.querySelectorAll('button')].find((b) => b.textContent === '+')!);
         expect(onGenerate).toHaveBeenCalledTimes(1);
     });
 
-    it('labels each pod with its GPU and the queued job count while busy', () => {
+    it('shows the list/thumbnail toggle only on the OUTPUT tab', () => {
+        renderFooter([]);
+        expect(container.querySelector('[data-testid="output-view-toggle"]')).toBeTruthy();
+
+        render(
+            <FooterActions
+                pods={[]}
+                nodeCount={1}
+                onPodGenerate={vi.fn()}
+                onGenerate={vi.fn()}
+                onAutoGenerate={vi.fn()}
+                contentTab="prompt"
+                outputView="list"
+                onOutputViewChange={vi.fn()}
+            />
+        );
+        expect(container.querySelector('[data-testid="output-view-toggle"]')).toBeNull();
+
+        render(
+            <FooterActions
+                pods={[]}
+                nodeCount={1}
+                onPodGenerate={vi.fn()}
+                onGenerate={vi.fn()}
+                onAutoGenerate={vi.fn()}
+                contentTab="json"
+                outputView="list"
+                onOutputViewChange={vi.fn()}
+            />
+        );
+        expect(container.querySelector('[data-testid="output-view-toggle"]')).toBeNull();
+    });
+
+    it('shows queued job counts as top-right badges on GPU buttons', () => {
         renderFooter([
             makePod({ id: 'p1', podNumber: 1, gpu: '4090' }),
             makePod({ id: 'p2', podNumber: 2, gpu: '4090', activeGenerationIds: ['g1', 'g2', 'g3'] }),
             makePod({ id: 'p3', podNumber: 3, gpu: 'B300', activeGenerationIds: ['g4'] })
         ]);
 
-        const labels = [1, 2, 3].map(
-            (n) => container.querySelector(`[data-testid="pod-generate-${n}"]`)!.textContent
-        );
-        expect(labels).toEqual(['4090', '4090x3', 'B300x1']);
+        expect(container.querySelector('[data-testid="pod-generate-1"]')?.textContent).toBe('4090');
+        expect(container.querySelector('[data-testid="pod-generate-2"]')?.firstChild?.textContent).toBe('4090');
+        expect(container.querySelector('[data-testid="pod-generate-3"]')?.firstChild?.textContent).toBe('B300');
+
+        const idleBadge = container.querySelector('[data-testid="pod-queue-badge-1"]');
+        const firstBusyBadge = container.querySelector('[data-testid="pod-queue-badge-2"]') as HTMLElement;
+        const secondBusyBadge = container.querySelector('[data-testid="pod-queue-badge-3"]') as HTMLElement;
+        expect(idleBadge).toBeNull();
+        expect(firstBusyBadge.textContent).toBe('3');
+        expect(secondBusyBadge.textContent).toBe('1');
+        expect(firstBusyBadge.parentElement?.getAttribute('data-testid')).toBe('pod-generate-2');
+        expect(getComputedStyle(firstBusyBadge).position).toBe('absolute');
+        expect(getComputedStyle(firstBusyBadge).top).toBe('-8px');
+        expect(getComputedStyle(firstBusyBadge).right).toBe('-8px');
     });
 
     it('draws a solid border for direct pods and a dashed border for proxy pods', () => {
@@ -140,8 +184,8 @@ describe('FooterActions — GPU-labeled pod buttons', () => {
 
         const direct = container.querySelector('[data-testid="pod-generate-1"]') as HTMLElement;
         const proxy = container.querySelector('[data-testid="pod-generate-2"]') as HTMLElement;
-        expect(direct.style.borderStyle).toBe('solid');
-        expect(proxy.style.borderStyle).toBe('dashed');
+        expect(getComputedStyle(direct).borderStyle).toBe('solid');
+        expect(getComputedStyle(proxy).borderStyle).toBe('dashed');
         expect(direct.getAttribute('data-direct')).toBe('direct');
         expect(proxy.getAttribute('data-direct')).toBe('proxy');
     });

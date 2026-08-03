@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, expect, it } from 'vitest';
-import { podButtonLabel, shouldHeartbeatPod } from './pod-utils';
+import { podButtonLabel, podButtonQueueBadge, shouldHeartbeatPod } from './pod-utils';
 import type { PodEntry } from './types';
 
 function pod(overrides: Partial<PodEntry> = {}): PodEntry {
@@ -55,9 +55,8 @@ describe('shouldHeartbeatPod', () => {
 // =============================================================================
 // Pod button label tests.
 //
-// The button row looks like [New][4090][4090x3][B300x1][Auto]: the label is
-// the pod's GPU name, suffixed with "xN" only while N jobs are queued on it.
-// Pods predating GPU selection keep the legacy letter label (A00 / A03).
+// The button row shows each GPU name with a numeric queue badge when N jobs
+// are queued. Pods predating GPU selection keep the legacy letter label.
 // =============================================================================
 
 describe('podButtonLabel', () => {
@@ -66,11 +65,13 @@ describe('podButtonLabel', () => {
         expect(podButtonLabel(pod({ gpu: 'B300' }), 0)).toBe('B300');
     });
 
-    it('suffixes the queued job count with an "x" while jobs are in flight', () => {
-        expect(podButtonLabel(pod({ gpu: '4090' }), 3)).toBe('4090x3');
-        expect(podButtonLabel(pod({ gpu: 'B300' }), 1)).toBe('B300x1');
-        // Large counts are never clamped.
-        expect(podButtonLabel(pod({ gpu: '4090' }), 100)).toBe('4090x100');
+    it('keeps the GPU label separate from its numeric queue badge', () => {
+        expect(podButtonLabel(pod({ gpu: '4090' }), 3)).toBe('4090');
+        expect(podButtonQueueBadge(pod({ gpu: '4090' }), 3)).toBe('3');
+        expect(podButtonQueueBadge(pod({ gpu: 'B300' }), 1)).toBe('1');
+        // Large counts are never clamped or prefixed with an x.
+        expect(podButtonQueueBadge(pod({ gpu: '4090' }), 100)).toBe('100');
+        expect(podButtonQueueBadge(pod({ gpu: '4090' }), 0)).toBeNull();
     });
 
     it('falls back to the legacy letter label for pods without a GPU', () => {

@@ -446,6 +446,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             onPodGenerate={handlePodGenerate}
                             onGenerate={() => setGpuPickerTarget('footer')}
                             onAutoGenerate={handleAutoGenerate}
+                            contentTab={editor.contentTab}
                             outputView={outputView}
                             onOutputViewChange={setOutputView}
                         />

@@ -35,13 +35,14 @@
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { Btn, BtnPrimary } from './ui';
+import { Btn, BtnPrimary, PodButton, PodQueueBadge } from './ui';
 import {
     MAX_POD_FAILURES,
     POD_RING_TRACK,
     VIEWER_SWIPE_THRESHOLD_PX,
     pickLeastLoadedPod,
     podButtonLabel,
+    podButtonQueueBadge,
     podLetter,
     type PodEntry,
     type ViewerEntry
@@ -496,7 +497,7 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         }
                         data-testid="viewer-generate"
                     >
-                        New
+                        +
                     </BtnPrimary>
                     {pods.map((p) => {
                         const isSpawning = p.status === 'spawning';
@@ -505,8 +506,17 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         const letter = podLetter(p.podNumber);
                         const isDisabled =
                             actionBusy || isSpawning || !p.pod_url || p.status !== 'ready';
+                        // Match the footer's run-state border colors while
+                        // the overlaid badge carries the separate queue count.
+                        const borderColor = isLoading
+                            ? POD_RING_TRACK
+                            : p.run.status === 'error'
+                              ? theme.dangerBorder
+                              : p.run.status === 'done'
+                                ? theme.success
+                                : theme.border;
                         return (
-                            <Btn
+                            <PodButton
                                 key={p.id}
                                 className={isLoading ? 'sg-hover sg-ring-loading' : 'sg-hover'}
                                 onClick={() => onPodGenerate?.(p)}
@@ -528,23 +538,17 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                                 `queue the run on ${p.pod_url} (the generation saves on this workflow)`
                                               : `Queue this image's prompt on ${p.pod_url}`
                                 }
-                                style={{
-                                    fontFamily: theme.fontMono,
-                                    // Direct vs proxy: SOLID border = direct
-                                    // ComfyUI, DASHED border = Tier 2 proxy.
-                                    borderStyle: p.is_direct === false ? 'dashed' : 'solid',
-                                    borderColor: isLoading
-                                        ? POD_RING_TRACK
-                                        : p.run.status === 'error'
-                                          ? theme.dangerBorder
-                                          : p.run.status === 'done'
-                                            ? theme.success
-                                            : theme.border
-                                }}
+                                borderStyle={p.is_direct === false ? 'dashed' : 'solid'}
+                                borderColor={borderColor}
                                 data-testid={`viewer-pod-generate-${p.podNumber}`}
                             >
                                 {podButtonLabel(p, inFlight)}
-                            </Btn>
+                                {podButtonQueueBadge(p, inFlight) && (
+                                    <PodQueueBadge data-testid={`viewer-pod-queue-badge-${p.podNumber}`}>
+                                        {podButtonQueueBadge(p, inFlight)}
+                                    </PodQueueBadge>
+                                )}
+                            </PodButton>
                         );
                     })}
                     {/* Auto — same load balancer as the footer, rendered

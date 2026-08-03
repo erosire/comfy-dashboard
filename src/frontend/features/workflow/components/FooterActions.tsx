@@ -10,11 +10,11 @@
 //           existing pod, skipping pod creation), then the "Auto" load
 //           balancer at the very end (queues onto the least-loaded ready
 //           pod; visible only while such a pod exists). Example row:
-//           [New][4090][4090x3][B300x1][Auto].
+//           [+][4090][4090 + badge 3][B300 + badge 1][Auto].
 //
 // Pod buttons appear the moment a GPU is picked (loading border ring
 // while the pod_url resolves), labeled with the GPU name plus the queued
-// job count while busy ("4090x3" = a 4090 pod with 3 in flight). The
+// job count badge while busy ("3" = three jobs in flight). The
 // border style marks what the pod_url fronts: SOLID a DIRECT ComfyUI
 // server (native websocket + /prompt), DASHED a Tier 2 proxy. They carry
 // their own status: circular loading border while spawning / while jobs
@@ -23,13 +23,15 @@
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { Btn, BtnPrimary } from './ui';
+import { Btn, BtnPrimary, PodButton, PodQueueBadge } from './ui';
 import {
     MAX_POD_FAILURES,
     POD_RING_TRACK,
     pickLeastLoadedPod,
     podButtonLabel,
+    podButtonQueueBadge,
     podLetter,
+    type EditorContentTab,
     type OutputViewMode,
     type PodEntry
 } from './utils';
@@ -43,6 +45,8 @@ export type FooterActionsProps = {
     onGenerate: () => void;
     /** Queue on the least-loaded ready pod (no-op target when none ready). */
     onAutoGenerate: () => void;
+    /** Active content tab controls whether the OUTPUT-only view toggle renders. */
+    contentTab: EditorContentTab;
     /** OUTPUT-tab presentation mode (list vs thumbnail grid). */
     outputView: OutputViewMode;
     onOutputViewChange: (view: OutputViewMode) => void;
@@ -54,28 +58,30 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
     onPodGenerate,
     onGenerate,
     onAutoGenerate,
+    contentTab,
     outputView,
     onOutputViewChange
 }) => {
     const autoTarget = pickLeastLoadedPod(pods);
     return (
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
-            {/* Left: the single OUTPUT view toggle — one button that flips
-                between list rows and the thumbnail grid (it shows the
-                CURRENT mode). */}
-            <Btn
-                className="sg-hover"
-                onClick={() => onOutputViewChange(outputView === 'list' ? 'thumbs' : 'list')}
-                title={outputView === 'list' ? 'Switch to thumbnail grid view' : 'Switch to list view'}
-                data-testid="output-view-toggle"
-                style={{
-                    padding: '3px 10px',
-                    fontSize: theme.fontSize.xs,
-                    fontWeight: 600
-                }}
-            >
-                {outputView === 'list' ? 'List' : 'Thumbs'}
-            </Btn>
+            {/* The list/thumbnail control belongs only to the OUTPUT page;
+                PROMPT and JSON use the footer space exclusively for generation actions. */}
+            {contentTab === 'results' && (
+                <Btn
+                    className="sg-hover"
+                    onClick={() => onOutputViewChange(outputView === 'list' ? 'thumbs' : 'list')}
+                    title={outputView === 'list' ? 'Switch to thumbnail grid view' : 'Switch to list view'}
+                    data-testid="output-view-toggle"
+                    style={{
+                        padding: '3px 10px',
+                        fontSize: theme.fontSize.xs,
+                        fontWeight: 600
+                    }}
+                >
+                    {outputView === 'list' ? 'List' : 'Thumbs'}
+                </Btn>
+            )}
 
             <div style={{ flex: '1 1 auto' }} />
 
@@ -92,10 +98,10 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 disabled={nodeCount === 0}
                 title={nodeCount === 0 ? 'Load a workflow first' : 'Spawn a new cloud pod and generate'}
             >
-                New
+                +
             </BtnPrimary>
 
-            {/* 4090 / B300xN: queue another generation on an existing pod
+            {/* 4090 / B300 with a numeric queue badge: queue another generation on an existing pod
                 (skips pod creation). Sits immediately right of New. The
                 label is the pod's GPU name with the queued job count while
                 busy; the border STYLE marks what the pod_url fronts: solid
@@ -109,8 +115,17 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 const isDisabled = isSpawning || nodeCount === 0 || !p.pod_url || p.status !== 'ready';
                 const linkDesc =
                     p.is_direct === undefined ? '' : p.is_direct ? 'direct ComfyUI' : 'via proxy';
+                // Keep the settled run state and active queue state visible in
+                // the styled button while leaving the badge to show only N.
+                const borderColor = isLoading
+                    ? POD_RING_TRACK
+                    : p.run.status === 'error'
+                      ? theme.dangerBorder
+                      : p.run.status === 'done'
+                        ? theme.success
+                        : theme.border;
                 return (
-                    <Btn
+                    <PodButton
                         key={p.id}
                         className={isLoading ? 'sg-hover sg-ring-loading' : 'sg-hover'}
                         onClick={() => onPodGenerate(p)}
@@ -124,27 +139,20 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                                   : inFlight > 0
                                     ? `Pod ${letter}${linkDesc ? ` (${linkDesc})` : ''} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
                                       `in flight on ${p.pod_url} — click to queue another`
-                                    : `Queue a new generation on ${p.pod_url}${linkDesc ? ` — ${linkDesc}` : ''}`
+                                   : `Queue a new generation on ${p.pod_url}${linkDesc ? ` — ${linkDesc}` : ''}`
                         }
-                        style={{
-                            fontFamily: theme.fontMono,
-                            // Direct vs proxy: SOLID border = direct ComfyUI,
-                            // DASHED border = Tier 2 proxy. Undetected pods
-                            // keep the base solid border.
-                            borderStyle: p.is_direct === false ? 'dashed' : 'solid',
-                            borderColor: isLoading
-                                ? POD_RING_TRACK
-                                : p.run.status === 'error'
-                                  ? theme.dangerBorder
-                                  : p.run.status === 'done'
-                                    ? theme.success
-                                    : theme.border
-                        }}
+                        borderStyle={p.is_direct === false ? 'dashed' : 'solid'}
+                        borderColor={borderColor}
                         data-testid={`pod-generate-${p.podNumber}`}
                         data-direct={p.is_direct === undefined ? 'unknown' : p.is_direct ? 'direct' : 'proxy'}
                     >
                         {podButtonLabel(p, inFlight)}
-                    </Btn>
+                        {podButtonQueueBadge(p, inFlight) && (
+                            <PodQueueBadge data-testid={`pod-queue-badge-${p.podNumber}`}>
+                                {podButtonQueueBadge(p, inFlight)}
+                            </PodQueueBadge>
+                        )}
+                    </PodButton>
                 );
             })}
 

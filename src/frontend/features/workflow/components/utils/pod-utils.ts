@@ -35,14 +35,22 @@ export function podLetter(podNumber: number): string {
 }
 
 /**
- * Pod button label — the pod's GPU name, suffixed with the in-flight
- * queue count only while jobs are queued: "4090" when idle, "4090x3"
- * with three jobs queued. Pods predating GPU selection (gpu undefined)
- * fall back to the old letter label (A00 / A03).
+ * Pod button label — the pod's GPU name. Pods predating GPU selection
+ * (gpu undefined) fall back to the old letter label (A00 / A03), because
+ * they do not have a GPU name that can be displayed separately from a badge.
  */
 export function podButtonLabel(pod: PodEntry, inFlight: number): string {
-    if (pod.gpu) return inFlight > 0 ? `${pod.gpu}x${inFlight}` : pod.gpu;
+    if (pod.gpu) return pod.gpu;
     return `${podLetter(pod.podNumber)}${String(inFlight).padStart(2, '0')}`;
+}
+
+/**
+ * Queue badge text — GPU-backed buttons show only the numeric in-flight count
+ * in the corner badge; idle buttons and legacy pods do not render a badge.
+ */
+export function podButtonQueueBadge(pod: PodEntry, inFlight: number): string | null {
+    if (!pod.gpu || inFlight <= 0) return null;
+    return String(inFlight);
 }
 
 /**
