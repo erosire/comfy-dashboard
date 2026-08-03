@@ -23,7 +23,9 @@ export const GpuSelectDialog: React.FC<GpuSelectDialogProps> = ({ onSelect, onCa
         style={{
             position: 'fixed',
             inset: 0,
-            zIndex: 1000,
+            // The generation preview uses z-index 2000; keep this picker above
+            // the preview so its GPU buttons remain reachable when opened there.
+            zIndex: 3000,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',

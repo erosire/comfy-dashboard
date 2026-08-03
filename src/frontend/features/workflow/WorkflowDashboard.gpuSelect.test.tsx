@@ -72,6 +72,14 @@ describe('GpuSelectDialog', () => {
         expect(options).toEqual(['gpu-select-4090', 'gpu-select-B300']);
     });
 
+    it('renders above the generation preview stacking layer', () => {
+        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={vi.fn()} />);
+
+        // ResultViewer uses z-index 2000, so the picker must use a higher
+        // layer to keep its GPU controls selectable over the preview media.
+        expect(getComputedStyle(container.firstElementChild as HTMLElement).zIndex).toBe('3000');
+    });
+
     it('reports the picked GPU key', () => {
         const onSelect = vi.fn();
         render(<GpuSelectDialog onSelect={onSelect} onCancel={vi.fn()} />);
