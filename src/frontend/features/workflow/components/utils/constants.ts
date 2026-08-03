@@ -12,6 +12,9 @@ export const POD_HEARTBEAT_MS = 30_000;
 /** Consecutive heartbeat failures before a dead pod removes itself. */
 export const MAX_POD_FAILURES = 2;
 
+/** Direct ComfyUI pod idle window before its local UI button is removed. */
+export const DIRECT_POD_IDLE_MS = 60_000;
+
 /**
  * Dim accent track for the pod button's circular loading border — the
  * static border color while the sg-ring-loading arc sweeps over it.

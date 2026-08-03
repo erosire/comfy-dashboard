@@ -12,15 +12,16 @@
 //     on the least-loaded ready pod (see pickLeastLoadedPod).
 //   - Heartbeat probes every POD_HEARTBEAT_MS keep PROXY pods warm and
 //     accrue strikes; MAX_POD_FAILURES consecutive failures remove the
-//     pod. Direct ComfyUI pods are exempt — see shouldHeartbeatPod.
+//     pod. Direct ComfyUI pods are exempt from that heartbeat and are removed
+//     after DIRECT_POD_IDLE_MS with no accepted generation queue.
 
 import React from 'react';
 import type { CloudCreateResult, CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
 import { cloud, cloudPrompt } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
-import { MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
-import { podLetter, pickLeastLoadedPod, shouldHeartbeatPod } from './pod-utils';
+import { DIRECT_POD_IDLE_MS, MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
+import { isDirectPodIdle, podLetter, pickLeastLoadedPod, shouldHeartbeatPod } from './pod-utils';
 
 /**
  * Local-timestamp suffix for default generation names: YYYYMMDD-HHMMSS
@@ -76,7 +77,22 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
     const podsRef = React.useRef(pods);
+    // One timer is kept per direct pod so unrelated pod updates cannot reset
+    // another pod's exact 60-second idle deadline.
+    const directIdleTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+    // A generation request is considered pending before the server accepts it;
+    // this prevents a slow snapshot/submission from being removed as "idle".
+    const pendingGenerationPodIdsRef = React.useRef<Set<string>>(new Set());
     podsRef.current = pods;
+
+    // Cancel an idle timer immediately when the user starts another job on a
+    // direct pod, before the asynchronous generation request can be accepted.
+    const cancelDirectIdleTimer = React.useCallback((podId: string) => {
+        const timer = directIdleTimersRef.current.get(podId);
+        if (timer === undefined) return;
+        clearTimeout(timer);
+        directIdleTimersRef.current.delete(podId);
+    }, []);
 
     // ── Sync pod buttons from polled generations ────────────────────
     // Pod processing lives on the server; polling the generation list is
@@ -118,6 +134,53 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         });
     }, [generations]);
 
+    // Arm the exact idle deadline for every direct pod whose accepted queue is
+    // empty. The callback rechecks current state, so a completion race or a
+    // newly accepted job can never remove a busy button.
+    React.useEffect(() => {
+        const timers = directIdleTimersRef.current;
+        const eligibleIds = new Set(
+            pods
+                .filter((pod) => isDirectPodIdle(pod) && !pendingGenerationPodIdsRef.current.has(pod.id))
+                .map((pod) => pod.id)
+        );
+
+        for (const [podId, timer] of timers) {
+            if (!eligibleIds.has(podId)) {
+                clearTimeout(timer);
+                timers.delete(podId);
+            }
+        }
+
+        for (const podId of eligibleIds) {
+            if (timers.has(podId)) continue;
+            const pod = pods.find((entry) => entry.id === podId)!;
+            const timer = setTimeout(() => {
+                timers.delete(podId);
+                setPods((previous) => {
+                    const current = previous.find((entry) => entry.id === podId);
+                    if (!current || !isDirectPodIdle(current) || pendingGenerationPodIdsRef.current.has(podId)) {
+                        return previous;
+                    }
+                    console.log(
+                        `[Idle] Removing direct Pod#${current.podNumber} after ${DIRECT_POD_IDLE_MS / 1000}s with no queued jobs`
+                    );
+                    return previous.filter((entry) => entry.id !== podId);
+                });
+            }, DIRECT_POD_IDLE_MS);
+            timers.set(pod.id, timer);
+        }
+    }, [pods]);
+
+    // Timers are process-local UI resources and must not survive hook unmount.
+    React.useEffect(() => {
+        return () => {
+            for (const timer of directIdleTimersRef.current.values()) clearTimeout(timer);
+            directIdleTimersRef.current.clear();
+            pendingGenerationPodIdsRef.current.clear();
+        };
+    }, []);
+
     // ── Run a generation on a cloud pod ────────────────────────────
     // Shared by "New" (spawns a fresh pod), "#N" (reuses a pod), "Auto"
     // (load-balances onto the least-loaded pod) and the result viewer's
@@ -144,69 +207,87 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             const snapshot = generationOverride ?? getCurrentRaw?.() ?? null;
             if (!editingWorkflowId || !snapshot) return;
 
-            // Step 1+2 — snapshot the original workflow json into a
-            // generation file. The generation is named after the workflow +
-            // current local timestamp by default (the server falls back to
-            // its own timestamp id when no name is passed).
-            const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
-            const generation = await generateWorkflow(editingWorkflowId, snapshot, generationName);
-            console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
+            // Reserve the direct pod before any asynchronous snapshot work so
+            // a slow server request cannot be mistaken for an idle queue.
+            if (podId) {
+                pendingGenerationPodIdsRef.current.add(podId);
+                cancelDirectIdleTimer(podId);
+            }
 
             try {
-                // Step 3 — submit and be done. The server processes the
-                // pod stream in the background from here (scoped to this
-                // job via a per-submission client_id). A direct ComfyUI pod
-                // is flagged is_direct so the server drives its native
-                // websocket + /prompt instead of the Tier 2 proxy. The flag
-                // is handed in by the caller (creation/heartbeat are the
-                // authoritative sources); fall back to the freshest pod
-                // state through the ref when it wasn't.
-                const directFlag =
-                    isDirect ?? (podId ? podsRef.current.find((p) => p.id === podId)?.is_direct : undefined);
-                await cloudPrompt(baseUrl, {
-                    pod_url: podUrl,
-                    prompt: generation.prompt,
-                    workflow_id: editingWorkflowId,
-                    generation_id: generation.id,
-                    ...(directFlag !== undefined ? { is_direct: directFlag } : {}),
-                    extra_data: {
+                // Step 1+2 — snapshot the original workflow json into a
+                // generation file. The generation is named after the workflow +
+                // current local timestamp by default (the server falls back to
+                // its own timestamp id when no name is passed).
+                const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
+                const generation = await generateWorkflow(editingWorkflowId, snapshot, generationName);
+                console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
+
+                try {
+                    // Step 3 — submit and be done. The server processes the
+                    // pod stream in the background from here (scoped to this
+                    // job via a per-submission client_id). A direct ComfyUI pod
+                    // is flagged is_direct so the server drives its native
+                    // websocket + /prompt instead of the Tier 2 proxy. The flag
+                    // is handed in by the caller (creation/heartbeat are the
+                    // authoritative sources); fall back to the freshest pod
+                    // state through the ref when it wasn't.
+                    const directFlag =
+                        isDirect ?? (podId ? podsRef.current.find((p) => p.id === podId)?.is_direct : undefined);
+                    await cloudPrompt(baseUrl, {
+                        pod_url: podUrl,
+                        prompt: generation.prompt,
                         workflow_id: editingWorkflowId,
-                        generation_id: generation.id
+                        generation_id: generation.id,
+                        ...(directFlag !== undefined ? { is_direct: directFlag } : {}),
+                        extra_data: {
+                            workflow_id: editingWorkflowId,
+                            generation_id: generation.id
+                        }
+                    });
+                    // Accepted — add to the pod's in-flight set; polling
+                    // settles each entry. Pods accept concurrent jobs, so an
+                    // existing run does not block this one.
+                    if (podId) {
+                        setPods((prev) =>
+                            prev.map((p) =>
+                                p.id === podId
+                                    ? {
+                                          ...p,
+                                          run: { status: 'running', events: [] },
+                                          activeGenerationIds: [...p.activeGenerationIds, generation.id]
+                                      }
+                                    : p
+                            )
+                        );
                     }
-                });
-                // Accepted — add to the pod's in-flight set; polling
-                // settles each entry. Pods accept concurrent jobs, so an
-                // existing run does not block this one.
+                } catch (err: any) {
+                    const message = err.message ?? String(err);
+                    // Submission itself failed — only surface an error on the
+                    // button when nothing else is still running on this pod.
+                    if (podId) {
+                        setPods((prev) =>
+                            prev.map((p) =>
+                                p.id === podId && p.activeGenerationIds.length === 0
+                                    ? { ...p, run: { status: 'error', events: [], message } }
+                                    : p
+                            )
+                        );
+                    }
+                    throw err;
+                }
+            } finally {
                 if (podId) {
+                    pendingGenerationPodIdsRef.current.delete(podId);
+                    // A snapshot failure does not otherwise mutate pod state;
+                    // clone the matching entry to let the idle effect re-arm.
                     setPods((prev) =>
-                        prev.map((p) =>
-                            p.id === podId
-                                ? {
-                                      ...p,
-                                      run: { status: 'running', events: [] },
-                                      activeGenerationIds: [...p.activeGenerationIds, generation.id]
-                                  }
-                                : p
-                        )
+                        prev.map((p) => (p.id === podId ? { ...p } : p))
                     );
                 }
-            } catch (err: any) {
-                const message = err.message ?? String(err);
-                // Submission itself failed — only surface an error on the
-                // button when nothing else is still running on this pod.
-                if (podId) {
-                    setPods((prev) =>
-                        prev.map((p) =>
-                            p.id === podId && p.activeGenerationIds.length === 0
-                                ? { ...p, run: { status: 'error', events: [], message } }
-                                : p
-                        )
-                    );
-                }
-                throw err;
             }
         },
-        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow]
+        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow, cancelDirectIdleTimer]
     );
 
     // ── New workflow ───────────────────────────────────────────────

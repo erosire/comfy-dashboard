@@ -5,8 +5,8 @@
 // endpoints/cloud/cloud-prompt.ts. The sibling shape's tests live in
 // ./proxy-comfy.test.ts.
 //
-// The websocket is replaced with a deterministic EventTarget fake (same
-// pattern as connect.test.ts) and fetch is stubbed, so detection and the
+// The websocket is replaced with a deterministic EventTarget fake and fetch
+// is stubbed, so detection and the
 // websocket→NDJSON translation run without a real ComfyUI server.
 // =============================================================================
 
@@ -17,7 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const testState = vi.hoisted(() => ({
     uuidValues: [] as string[],
     sockets: [] as any[],
-    openBehavior: 'open' as 'open' | 'refused'
+    openBehavior: 'open' as 'open' | 'refused',
+    pingBehavior: 'ok' as 'ok' | 'throw'
 }));
 
 // Deterministic client ids for the probe / direct submissions.
@@ -66,12 +67,23 @@ vi.mock('undici', () => {
         }
     }
 
-    return { WebSocket: FakeWebSocket, Agent: class FakeAgent { constructor(_opts?: any) {} } };
+    return {
+        WebSocket: FakeWebSocket,
+        Agent: class FakeAgent { constructor(_opts?: any) {} },
+        ping: () => {
+            if (testState.pingBehavior === 'throw') throw new Error('ping failed');
+        }
+    };
 });
 
-import { probeDirectComfyUI, submitDirectPrompt } from './direct-comfy';
 import { createCloudPod } from './cloud';
 import { cloudPrompt } from './cloud-prompt';
+import {
+    DIRECT_WS_HEARTBEAT_MS,
+    DIRECT_WS_RESPONSE_TIMEOUT_MS,
+    probeDirectComfyUI,
+    submitDirectPrompt
+} from './direct-comfy';
 
 const CLIENT_UUID = '11111111-1111-1111-1111-111111111111';
 const CLIENT_ID = '11111111111111111111111111111111';
@@ -118,10 +130,15 @@ beforeEach(() => {
     testState.uuidValues = [CLIENT_UUID];
     testState.sockets.length = 0;
     testState.openBehavior = 'open';
+    testState.pingBehavior = 'ok';
     vi.stubGlobal('fetch', vi.fn());
 });
 
 afterEach(() => {
+    // Terminal prompt events close only the client stream; tests explicitly
+    // close any remaining fake upstream sockets to release their watchdogs.
+    for (const socket of testState.sockets) socket.close();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
 });
 
@@ -198,7 +215,12 @@ describe('submitDirectPrompt', () => {
             { type: 'execution_success', data: { prompt_id: 'prompt-001' } },
             { type: 'proxy_done', data: {} }
         ]);
-        await vi.waitFor(() => expect(socket.readyState).toBe(3));
+        // The proxy stream is complete, but the server keeps the native
+        // websocket open for ComfyUI's final writes and its five-minute idle
+        // cleanup window.
+        expect(socket.readyState).toBe(1);
+        socket.close();
+        expect(socket.readyState).toBe(3);
     });
 
     it('turns a validation-failed ack (node_errors) into a terminal execution_error', async () => {
@@ -254,6 +276,77 @@ describe('submitDirectPrompt', () => {
         await expect(
             submitDirectPrompt({ podUrl: new URL(POD_URL), clientId: CLIENT_ID, promptPayload: { prompt: {} } })
         ).rejects.toThrow('Failed to open ComfyUI websocket');
+    });
+
+    it('ends the NDJSON stream when the direct service closes its websocket', async () => {
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(JSON.stringify({ prompt_id: 'prompt-close', number: 1, node_errors: {} }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' }
+            })
+        );
+
+        const response = await submitDirectPrompt({
+            podUrl: new URL(POD_URL),
+            clientId: CLIENT_ID,
+            promptPayload: { prompt: {} }
+        });
+        testState.sockets[0].close();
+
+        await expect(readStreamLines(response)).resolves.toEqual([
+            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-close', number: 1, node_errors: {} } },
+            { type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } }
+        ]);
+    });
+
+    it('ends the NDJSON stream when a websocket heartbeat write fails', async () => {
+        vi.useFakeTimers();
+        testState.pingBehavior = 'throw';
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(JSON.stringify({ prompt_id: 'prompt-ping', number: 1, node_errors: {} }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' }
+            })
+        );
+
+        const response = await submitDirectPrompt({
+            podUrl: new URL(POD_URL),
+            clientId: CLIENT_ID,
+            promptPayload: { prompt: {} }
+        });
+        const linesPromise = readStreamLines(response);
+        await vi.advanceTimersByTimeAsync(DIRECT_WS_HEARTBEAT_MS);
+
+        await expect(linesPromise).resolves.toEqual([
+            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-ping', number: 1, node_errors: {} } },
+            { type: 'proxy_error', data: { error: 'ComfyUI websocket stopped responding: ping failed' } }
+        ]);
+    });
+
+    it('cleans up a socket that stays open without any pong or application response', async () => {
+        vi.useFakeTimers();
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(JSON.stringify({ prompt_id: 'prompt-timeout', number: 1, node_errors: {} }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' }
+            })
+        );
+
+        const response = await submitDirectPrompt({
+            podUrl: new URL(POD_URL),
+            clientId: CLIENT_ID,
+            promptPayload: { prompt: {} }
+        });
+        const linesPromise = readStreamLines(response);
+        await vi.advanceTimersByTimeAsync(DIRECT_WS_RESPONSE_TIMEOUT_MS);
+
+        await expect(linesPromise).resolves.toEqual([
+            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-timeout', number: 1, node_errors: {} } },
+            {
+                type: 'proxy_error',
+                data: { error: `ComfyUI websocket stopped responding for ${DIRECT_WS_RESPONSE_TIMEOUT_MS / 1000}s` }
+            }
+        ]);
     });
 });
 

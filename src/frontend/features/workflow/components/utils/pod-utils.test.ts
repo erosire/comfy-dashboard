@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, expect, it } from 'vitest';
-import { podButtonLabel, podButtonQueueBadge, shouldHeartbeatPod } from './pod-utils';
+import { isDirectPodIdle, podButtonLabel, podButtonQueueBadge, shouldHeartbeatPod } from './pod-utils';
 import type { PodEntry } from './types';
 
 function pod(overrides: Partial<PodEntry> = {}): PodEntry {
@@ -49,6 +49,22 @@ describe('shouldHeartbeatPod', () => {
 
     it('probes proxy pods in an error state so they can recover or collect their final strike', () => {
         expect(shouldHeartbeatPod(pod({ is_direct: false, status: 'error', failCount: 1 }))).toBe(true);
+    });
+});
+
+describe('isDirectPodIdle', () => {
+    it('marks a ready direct pod with no accepted generations as idle', () => {
+        expect(isDirectPodIdle(pod({ is_direct: true }))).toBe(true);
+    });
+
+    it('keeps a direct pod with queued generations active', () => {
+        expect(isDirectPodIdle(pod({ is_direct: true, activeGenerationIds: ['generation-1'] }))).toBe(false);
+    });
+
+    it('does not apply the direct idle policy to proxy or unresolved pods', () => {
+        expect(isDirectPodIdle(pod({ is_direct: false }))).toBe(false);
+        expect(isDirectPodIdle(pod({ is_direct: undefined }))).toBe(false);
+        expect(isDirectPodIdle(pod({ is_direct: true, pod_url: '' }))).toBe(false);
     });
 });
 

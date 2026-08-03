@@ -74,6 +74,15 @@ export function shouldHeartbeatPod(p: PodEntry): boolean {
 }
 
 /**
+ * Direct pods are local UI resources once their accepted generation queue is
+ * empty. This predicate intentionally ignores proxy pods and unresolved pods;
+ * proxy lifecycle remains governed by its heartbeat strike policy.
+ */
+export function isDirectPodIdle(p: PodEntry): boolean {
+    return p.is_direct === true && p.status !== 'spawning' && Boolean(p.pod_url) && p.activeGenerationIds.length === 0;
+}
+
+/**
  * "Auto" load-balancer pick — the eligible pod with the SMALLEST in-flight
  * queue. Eligibility mirrors the pod buttons themselves: status 'ready'
  * with a resolved pod_url and no heartbeat strikes blocking it. Ties go to

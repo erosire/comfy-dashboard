@@ -45,12 +45,12 @@
 // big-endian header — uint32 image kind (1 = JPEG, 2 = PNG), uint32 zero
 // padding — followed by the raw image bytes. ComfyUI preview binaries
 // carry no node reference, so the preview is attributed to the most
-// recently announced executing node (same convention the connect endpoint
-// uses for prompt attribution).
+// recently announced executing node, matching the server's prompt-event
+// attribution convention.
 
+import diagnosticsChannel from 'node:diagnostics_channel';
 import { randomUUID } from 'node:crypto';
-import { WebSocket } from 'undici';
-import { serverRoute, waitForSocketOpen, websocketUrl } from '../connect';
+import { WebSocket, ping as websocketPing } from 'undici';
 import type { StreamEvent } from '../workflows/generation-store';
 
 /**
@@ -59,6 +59,27 @@ import type { StreamEvent } from '../workflows/generation-store';
  * effectively instantly; the timeout only covers blackholed endpoints.
  */
 export const DIRECT_WS_PROBE_TIMEOUT_MS = 5_000;
+
+// Native ComfyUI websocket handshakes need a bounded default so a direct
+// prompt cannot remain pending forever when the pod disappears mid-request.
+const DIRECT_SOCKET_TIMEOUT_MS = 10_000;
+
+// Protocol-level pings make an open-but-dead upstream socket observable and
+// cause the stream cleanup path to run even when the remote service vanishes
+// without first emitting a browser-style close event.
+export const DIRECT_WS_HEARTBEAT_MS = 10_000;
+
+// A direct execution socket must receive either a websocket pong or an
+// application message inside this window; otherwise the upstream service is
+// treated as dead and the socket is cleaned up. This is intentionally much
+// longer than the UI idle timer because model execution can be quiet while
+// the cloud service is still healthy.
+export const DIRECT_WS_RESPONSE_TIMEOUT_MS = 300_000;
+
+// Undici exposes protocol pong notifications through this process-local
+// diagnostics channel because its WebSocket surface intentionally omits a
+// browser-style pong event.
+const websocketPongChannel = diagnosticsChannel.channel('undici:websocket:pong');
 
 /**
  * Per-attempt budget for the /system_stats enrichment in
@@ -70,6 +91,61 @@ export const DIRECT_STATS_PROBE_TIMEOUT_MS = 10_000;
 // ComfyUI binary preview image kinds (server.py send_image header).
 const PREVIEW_IMAGE_JPEG = 1;
 const PREVIEW_IMAGE_PNG = 2;
+
+// Preserve a pod URL's prefix path while appending a native ComfyUI route.
+// This supports deployments mounted below a non-root reverse-proxy path.
+function serverRoute(podUrl: URL, route: string): URL {
+    const result = new URL(podUrl.toString());
+    const basePath = result.pathname.replace(/\/+$/, '');
+    result.pathname = `${basePath}${route}` || route;
+    return result;
+}
+
+// Convert the HTTP pod URL into the native websocket URL and bind the
+// request's client id so ComfyUI returns only this prompt's execution events.
+function websocketUrl(podUrl: URL, clientId: string): string {
+    const result = serverRoute(podUrl, '/ws');
+    result.protocol = result.protocol === 'https:' ? 'wss:' : 'ws:';
+    result.searchParams.set('clientId', clientId);
+    return result.toString();
+}
+
+// Wait for an undici websocket to open, fail, close, or exceed its deadline.
+// The ready-state check after listener registration handles synchronous/fake
+// websocket implementations that transition before listeners are attached.
+function waitForSocketOpen(socket: WebSocket, timeoutMs: number = DIRECT_SOCKET_TIMEOUT_MS): Promise<void> {
+    if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
+
+    return new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => finish(new Error('Timed out connecting to ComfyUI websocket')), timeoutMs);
+
+        const cleanup = () => {
+            clearTimeout(timer);
+            socket.removeEventListener('open', onOpen);
+            socket.removeEventListener('error', onError);
+            socket.removeEventListener('close', onClose);
+        };
+        const finish = (error?: Error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            if (error) reject(error);
+            else resolve();
+        };
+        const onOpen = () => finish();
+        const onError = () => finish(new Error('Unable to connect to ComfyUI websocket'));
+        const onClose = () => finish(new Error('ComfyUI websocket closed before connecting'));
+
+        socket.addEventListener('open', onOpen);
+        socket.addEventListener('error', onError);
+        socket.addEventListener('close', onClose);
+
+        // A fake/test socket or synchronously completed implementation may
+        // reach OPEN between construction and listener registration.
+        if (socket.readyState === WebSocket.OPEN) finish();
+    });
+}
 
 /** Fresh 32-char hex client id (ComfyUI's documented id shape). */
 export function newDirectClientId(): string {
@@ -241,6 +317,18 @@ export async function submitDirectPrompt(options: DirectSubmitOptions): Promise<
         throw new Error(`ComfyUI POST /prompt returned HTTP ${upstream.status} with a non-JSON body`);
     }
 
+    // The service can close the socket while POST /prompt is still returning
+    // its acknowledgement. Do not create a stream with a socket that already
+    // missed its close event before the stream listeners were attached.
+    if (socket.readyState !== WebSocket.OPEN) {
+        try {
+            socket.close();
+        } catch {
+            // Socket cleanup is best-effort; the closed state is already known.
+        }
+        throw new Error('ComfyUI websocket closed before the prompt stream started');
+    }
+
     const stream = buildDirectStream(socket, ack);
     return new Response(stream, {
         status: 200,
@@ -257,23 +345,63 @@ export async function submitDirectPrompt(options: DirectSubmitOptions): Promise<
  */
 function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStream<Uint8Array> {
     const encoder = new TextEncoder();
-    let finished = false;
+    let streamFinished = false;
+    let socketCleanedUp = false;
     let lastExecutingNode: string | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let lastServerResponseAt = Date.now();
+    let pongListener: ((message: unknown) => void) | null = null;
+    // Assigned when the stream starts so cancellation uses the same cleanup
+    // path as remote close, heartbeat timeout, and write failure.
+    let cleanupSocket = () => undefined;
 
     return new ReadableStream<Uint8Array>({
         start(controller) {
-            const push = (event: StreamEvent) => {
-                if (finished) return;
+            // Keep timer, diagnostics subscription, and socket disposal in one
+            // closure so every cleanup path releases all resources once.
+            cleanupSocket = () => {
+                if (socketCleanedUp) return;
+                socketCleanedUp = true;
+                if (heartbeatTimer !== null) {
+                    clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                }
+                if (pongListener !== null) {
+                    websocketPongChannel.unsubscribe(pongListener);
+                    pongListener = null;
+                }
                 try {
-                    controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+                    socket.close();
                 } catch {
-                    finished = true;
+                    // Socket cleanup is best-effort after a remote failure.
                 }
             };
 
-            const end = (terminal?: StreamEvent) => {
-                if (finished) return;
-                finished = true;
+            // A pong is the protocol-level proof that the upstream service is
+            // alive; application frames also count because they prove the same
+            // socket is still delivering ComfyUI data.
+            pongListener = (message: unknown) => {
+                const event = message as { websocket?: WebSocket };
+                if (event.websocket === socket) lastServerResponseAt = Date.now();
+            };
+            websocketPongChannel.subscribe(pongListener);
+
+            const push = (event: StreamEvent) => {
+                if (streamFinished) return;
+                try {
+                    controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+                } catch {
+                    streamFinished = true;
+                    cleanupSocket();
+                }
+            };
+
+            // Close only the dashboard-facing NDJSON stream. The upstream
+            // ComfyUI websocket remains alive after execution terminals so
+            // ComfyUI can finish its own final writes.
+            const finishStream = (terminal?: StreamEvent) => {
+                if (streamFinished) return;
+                streamFinished = true;
                 if (terminal) {
                     try {
                         controller.enqueue(encoder.encode(JSON.stringify(terminal) + '\n'));
@@ -286,12 +414,30 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
                 } catch {
                     // Closing an already-closed stream is harmless.
                 }
-                try {
-                    socket.close();
-                } catch {
-                    // Socket cleanup is best-effort only.
-                }
             };
+
+            // Upstream failure is different from a normal execution terminal:
+            // it must finish the caller and immediately dispose the socket.
+            const failStream = (terminal: StreamEvent) => {
+                finishStream(terminal);
+                cleanupSocket();
+            };
+
+            // A close can race the HTTP acknowledgement and happen before
+            // the event listeners below are installed. Emit one terminal
+            // failure immediately instead of leaving the response hanging.
+            if (socket.readyState !== WebSocket.OPEN) {
+                push({
+                    type: 'proxy_enqueue',
+                    data: {
+                        prompt_id: ack.prompt_id ?? null,
+                        number: ack.number ?? null,
+                        node_errors: ack.node_errors ?? {}
+                    }
+                });
+                failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
+                return;
+            }
 
             // First line — mirrors the proxy's enqueue acknowledgement so
             // shared consumers learn this job's prompt_id exactly as before.
@@ -309,7 +455,7 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
             // failure on the terminal event consumers already stop at.
             const nodeErrors = ack.node_errors;
             if (nodeErrors && typeof nodeErrors === 'object' && Object.keys(nodeErrors).length > 0) {
-                end({
+                finishStream({
                     type: 'execution_error',
                     data: {
                         prompt_id: ack.prompt_id ?? null,
@@ -320,8 +466,42 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
                 return;
             }
 
+            // Ping at a bounded cadence and verify the socket remains open.
+            // Undici handles pong frames internally; a failed write or a
+            // transition to CLOSING/CLOSED enters the same terminal cleanup
+            // path as an explicit service close/error event.
+            heartbeatTimer = setInterval(() => {
+                if (socket.readyState !== WebSocket.OPEN) {
+                    failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket stopped responding' } });
+                    return;
+                }
+                if (Date.now() - lastServerResponseAt >= DIRECT_WS_RESPONSE_TIMEOUT_MS) {
+                    failStream({
+                        type: 'proxy_error',
+                        data: {
+                            error: `ComfyUI websocket stopped responding for ${DIRECT_WS_RESPONSE_TIMEOUT_MS / 1000}s`
+                        }
+                    });
+                    return;
+                }
+                try {
+                    websocketPing(socket);
+                } catch (error) {
+                    failStream({
+                        type: 'proxy_error',
+                        data: { error: `ComfyUI websocket stopped responding: ${error instanceof Error ? error.message : String(error)}` }
+                    });
+                }
+            }, DIRECT_WS_HEARTBEAT_MS);
+            // The stream's close/error events own cleanup; an unref prevents a
+            // forgotten consumer from keeping the Node process alive forever.
+            const unref = (heartbeatTimer as unknown as { unref?: () => void }).unref;
+            if (typeof unref === 'function') unref.call(heartbeatTimer);
+
             const handleMessage = async (data: unknown): Promise<void> => {
-                if (finished) return;
+                if (socketCleanedUp) return;
+                lastServerResponseAt = Date.now();
+                if (streamFinished) return;
 
                 if (typeof data === 'string') {
                     let message: { type?: unknown; data?: unknown };
@@ -347,11 +527,14 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
                     push({ type, data: eventData });
 
                     if (type === 'execution_success' || type === 'execution_interrupted') {
-                        end({ type: 'proxy_done', data: {} });
+                        // The response is complete, but the native socket is
+                        // deliberately left open until ComfyUI closes it or
+                        // the five-minute response watchdog expires.
+                        finishStream({ type: 'proxy_done', data: {} });
                     } else if (type === 'execution_error') {
                         // execution_error is itself the terminal event every
-                        // consumer stops at — close the stream after it.
-                        end();
+                        // consumer stops at — close only the client stream.
+                        finishStream();
                     }
                     return;
                 }
@@ -359,7 +542,7 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
                 // Binary frame — ComfyUI preview images (8-byte big-endian
                 // header + raw image bytes).
                 const bytes = await frameBytes(data);
-                if (!bytes || bytes.length < 8 || finished) return;
+                if (!bytes || bytes.length < 8 || streamFinished) return;
                 const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 const imageKind = view.getUint32(0, false);
                 const mime =
@@ -388,10 +571,10 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
             });
 
             socket.addEventListener('close', () => {
-                end({ type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
+                failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
             });
             socket.addEventListener('error', () => {
-                end({ type: 'proxy_error', data: { error: 'ComfyUI websocket errored before the prompt finished' } });
+                failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket errored before the prompt finished' } });
             });
         },
 
@@ -399,12 +582,8 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
             // The consumer walked away (client disconnect / aborted
             // background read) — the pod keeps executing, but this job's
             // socket is no longer needed.
-            finished = true;
-            try {
-                socket.close();
-            } catch {
-                // Socket cleanup is best-effort only.
-            }
+            streamFinished = true;
+            cleanupSocket();
         }
     });
 }
