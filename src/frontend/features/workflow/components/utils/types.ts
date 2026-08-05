@@ -3,16 +3,28 @@
 // Extracted from the original CloudTab.tsx so both the WorkflowDashboard
 // component and its sub-components / hooks can import them from one place.
 
-import type { CloudPodStatusResult, CloudStreamEvent, GenerationResultMeta } from '../../../../api';
+import type { CloudStreamEvent, GenerationResultMeta } from '../../../../api';
 import type { UINode, UIWidget } from '../../../../nodes/node-type';
 
-/** A cloud pod tracked by the dashboard, with its run + queue state. */
+/**
+ * A cloud pod tracked by the dashboard, with its run + queue state.
+ *
+ * Liveness is NOT tracked here: the pod buttons purely mirror the server's
+ * registry (GET /v1/comfy/cloud — one persistent websocket per pod). A pod
+ * the server stops listing has a terminated socket (its reconnect schedule
+ * already failed server-side) and its button is removed on the next poll —
+// there are no client-side probes, strikes, or error states.
+ */
 export type PodEntry = {
     id: string;
     podNumber: number;
     name: string;
+    /**
+     * Empty ONLY while the create request is in flight ('spawning') — the
+     * server list cannot judge such placeholders yet (the poll skips them).
+     */
     pod_url: string;
-    status: 'spawning' | 'ready' | 'error';
+    status: 'spawning' | 'ready';
     /**
      * The GPU the pod was spawned on ("4090", "B300", …) — chosen in the
      * New-pod dialog and sent to POST /v1/comfy/cloud as `gpu`. Drives the
@@ -20,11 +32,6 @@ export type PodEntry = {
      * Undefined only for pods predating GPU selection.
      */
     gpu?: string;
-    /**
-     * Consecutive native websocket health-check failures. Reset to 0 on every
-     * successful direct probe; the pod is removed after the configured limit.
-     */
-    failCount: number;
     run: RunState;
     /**
      * Generations currently processed server-side for this pod. A pod is
@@ -33,8 +40,6 @@ export type PodEntry = {
      * (done/error) once nothing is left in flight.
      */
     activeGenerationIds: string[];
-    health?: CloudPodStatusResult;
-    error?: string;
 };
 
 /** Run state of a single pod (idle → running → done/error). */

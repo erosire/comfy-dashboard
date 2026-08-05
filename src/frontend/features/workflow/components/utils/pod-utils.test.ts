@@ -1,13 +1,14 @@
 // =============================================================================
-// Pod heartbeat eligibility tests.
+// Pod button label tests.
 //
-// The keepalive/strike heartbeat is a Tier 2 PROXY pod concept (scale-to-zero
-// idle timer + dead-pod garbage collection). DIRECT ComfyUI pods — standalone
-// native servers — are exempt.
+// The button row shows each GPU name with a numeric queue badge when N jobs
+// are queued. Pods predating GPU selection keep the legacy letter label.
+// (Pod liveness is NOT tested here — it is owned entirely by the server
+// pod-list reconciliation in usePods: listed = alive, unlisted = removed.)
 // =============================================================================
 
 import { describe, expect, it } from 'vitest';
-import { isPodIdle, podButtonLabel, podButtonQueueBadge, shouldProbePod } from './pod-utils';
+import { podButtonLabel, podButtonQueueBadge } from './pod-utils';
 import type { PodEntry } from './types';
 
 function pod(overrides: Partial<PodEntry> = {}): PodEntry {
@@ -17,47 +18,11 @@ function pod(overrides: Partial<PodEntry> = {}): PodEntry {
         name: 'A',
         pod_url: 'https://pod.example',
         status: 'ready',
-        failCount: 0,
         run: { status: 'idle' },
         activeGenerationIds: [],
         ...overrides
     };
 }
-
-describe('shouldProbePod', () => {
-    it('probes every ready native ComfyUI pod', () => {
-        expect(shouldProbePod(pod())).toBe(true);
-    });
-
-    it('skips spawning pods and pods without a resolved pod_url', () => {
-        expect(shouldProbePod(pod({ status: 'spawning', pod_url: '' }))).toBe(false);
-        expect(shouldProbePod(pod({ status: 'spawning' }))).toBe(false);
-        expect(shouldProbePod(pod({ pod_url: '' }))).toBe(false);
-        expect(shouldProbePod(pod({ status: 'error', failCount: 1 }))).toBe(true);
-    });
-});
-
-describe('isPodIdle', () => {
-    it('marks a ready native pod with no accepted generations as idle', () => {
-        expect(isPodIdle(pod())).toBe(true);
-    });
-
-    it('keeps a native pod with queued generations active', () => {
-        expect(isPodIdle(pod({ activeGenerationIds: ['generation-1'] }))).toBe(false);
-    });
-
-    it('does not mark spawning or unresolved pods idle', () => {
-        expect(isPodIdle(pod({ status: 'spawning' }))).toBe(false);
-        expect(isPodIdle(pod({ pod_url: '' }))).toBe(false);
-    });
-});
-
-// =============================================================================
-// Pod button label tests.
-//
-// The button row shows each GPU name with a numeric queue badge when N jobs
-// are queued. Pods predating GPU selection keep the legacy letter label.
-// =============================================================================
 
 describe('podButtonLabel', () => {
     it('shows the bare GPU name when nothing is queued', () => {

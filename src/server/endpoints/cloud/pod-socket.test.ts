@@ -338,22 +338,45 @@ describe('event demultiplexing (subscribePodPrompt)', () => {
 });
 
 describe('pod termination', () => {
-    it('fails every in-flight prompt with prompt_error and deregisters on remote close', async () => {
+    it('fails every in-flight prompt with prompt_error and deregisters on remote close — never reconnects', async () => {
         const connection = await connectPodSocket(new URL(POD_URL));
-        const socket = testState.sockets[0];
         const seenA: any[] = [];
         const seenB: any[] = [];
         subscribePodPrompt(connection, { promptId: 'prompt-a', onEvent: (e) => seenA.push(e) });
         subscribePodPrompt(connection, { promptId: 'prompt-b', onEvent: (e) => seenB.push(e) });
+        // The death must NOT trigger any /history probe or other pod call.
+        vi.mocked(fetch).mockResolvedValue(new Response('{}', { status: 200 }));
 
-        socket.close();
+        testState.sockets[0].close();
         await flushSocketDelivery();
 
+        // Pods are designed to terminate when idle and never restart — the
+        // death is terminal, IMMEDIATE, and no new socket is ever opened.
         const terminal = { type: 'prompt_error', data: { error: 'ComfyUI websocket closed by the cloud server' } };
         expect(seenA).toEqual([terminal]);
         expect(seenB).toEqual([terminal]);
+        expect(testState.sockets).toHaveLength(1);
         expect(getPodSocket(POD_URL)).toBeNull();
         expect(listPodSockets()).toEqual([]);
+        expect(vi.mocked(fetch).mock.calls).toEqual([]);
+    });
+
+    it('a late event from the dead socket cannot revive or double-terminate the pod', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        const seen: any[] = [];
+        subscribePodPrompt(connection, { promptId: 'prompt-a', onEvent: (e) => seen.push(e) });
+
+        testState.sockets[0].close();
+        await flushSocketDelivery();
+        const terminal = { type: 'prompt_error', data: { error: 'ComfyUI websocket closed by the cloud server' } };
+        expect(seen).toEqual([terminal]);
+
+        // Error/close signals after termination are inert.
+        testState.sockets[0].dispatchEvent(new Event('error'));
+        testState.sockets[0].dispatchEvent(new Event('close'));
+        await flushSocketDelivery();
+        expect(seen).toEqual([terminal]);
+        expect(testState.sockets).toHaveLength(1);
     });
 
     it('terminates the pod when a heartbeat ping write fails', async () => {
@@ -368,6 +391,8 @@ describe('pod termination', () => {
         expect(seen).toEqual([
             { type: 'prompt_error', data: { error: 'ComfyUI websocket stopped responding: ping failed' } }
         ]);
+        // No reconnect socket was attempted for the write-failed corpse.
+        expect(testState.sockets).toHaveLength(1);
         expect(getPodSocket(POD_URL)).toBeNull();
     });
 
@@ -566,10 +591,13 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
         }), {});
         testState.sockets[0].close();
 
+        // The pod is dead forever — the failure is terminal, immediate, and
+        // no reconnect socket is ever attempted.
         await expect(readStreamLines((result as any).raw as Response)).resolves.toEqual([
             { type: 'prompt_queued', data: { prompt_id: 'prompt-close', number: 1, node_errors: {} } },
             { type: 'prompt_error', data: { error: 'ComfyUI websocket closed by the cloud server' } }
         ]);
+        expect(testState.sockets).toHaveLength(1);
     });
 
     it('processes a run into the workflow generation json + per-prompt log (server-side mode)', async () => {

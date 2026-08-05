@@ -24,7 +24,7 @@ export {
     updateGeneration,
     generationResultUrl
 } from './frontend/api';
-export { cloud, cloudPrompt, cloudReadNdjson } from './frontend/api/cloud';
+export { cloudCreate, cloudListPods, cloudPrompt, cloudReadNdjson } from './frontend/api/cloud';
 export type {
     WorkflowMeta,
     Workflow,
@@ -36,5 +36,11 @@ export type {
     GenerationResultItem,
     GenerationResultMeta
 } from './frontend/api';
-export type { CloudCreateResult, CloudPodStatusResult, CloudRequest, CloudStreamEvent } from './frontend/api/cloud';
+export type {
+    CloudCreateRequest,
+    CloudCreateResult,
+    CloudPodListEntry,
+    CloudPodListResult,
+    CloudStreamEvent
+} from './frontend/api/cloud';
 export type { DashboardStore } from './frontend/context';

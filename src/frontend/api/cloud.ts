@@ -7,12 +7,13 @@
 //   GET  /v1/comfy/cloud          → { pods: CloudPodListEntry[] } — the
 //                                server's active pods (one persistent
 //                                websocket per pod) with in-flight prompt
-//                                counts. The UI polls this to keep its pod
-//                                buttons in sync automatically.
+//                                counts. THE ONLY pod-liveness source the UI
+//                                uses: the pod buttons mirror this list
+//                                (unknown → added, unlisted → removed); there
+//                                are no per-pod status probes client-side.
 //   POST /v1/comfy/cloud          → { pod_url, health, models_dir, models }
 //                                (create blocks until the pod's persistent
-//                                websocket is connected and held; status
-//                                reuses/adopts that same socket)
+//                                websocket is connected and held)
 //   POST /v1/comfy/cloud/prompt   → 202 { accepted, client_id, prompt_id }
 //                                when workflow_id + generation_id are given
 //                                (server consumes the run off the pod's
@@ -23,9 +24,9 @@
 //                                the same shared socket for the client.
 //
 // The spawner creates a fresh native ComfyUI pod; the server then keeps ONE
-// websocket per pod in memory forever (until the cloud server closes it).
-// Every prompt rides that single socket — jobs are isolated by prompt_id,
-// not by connection.
+// websocket per pod in memory until the pod dies (pods are designed to
+// terminate when idle and never reconnect). Every prompt rides that single
+// socket — jobs are isolated by prompt_id, not by connection.
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -47,18 +48,6 @@ export type CloudCreateResult = {
         error?: string;
     };
     models_dir?: string;
-    models?: Record<string, string[]>;
-};
-
-export type CloudPodStatusResult = {
-    health: {
-        healthy: boolean;
-        system_stats?: Record<string, unknown>;
-        error?: string;
-    };
-    /** Empty for direct ComfyUI pods — the native server lists no models. */
-    models_dir?: string;
-    /** Empty for direct ComfyUI pods — the native server lists no models. */
     models?: Record<string, string[]>;
 };
 
@@ -99,12 +88,10 @@ export type CloudStreamEvent = {
 
 // ── Request types ─────────────────────────────────────────────────────
 
-export type CloudRequest =
-    // Create REQUIRES the GPU — the server picks the spawner list keyed by
-    // it (comfyCloudServiceEndpoint) and falls through the servers in
-    // order, answering 503 when no server can spawn the requested GPU.
-    | { type: 'create'; gpu: string; name?: string }
-    | { type: 'status'; pod_url: string };
+// Create REQUIRES the GPU — the server picks the spawner list keyed by it
+// (comfyCloudServiceEndpoint) and falls through the servers in order,
+// answering 503 when no server can spawn the requested GPU.
+export type CloudCreateRequest = { gpu: string; name?: string };
 
 /**
  * Prompt submission request body.
@@ -139,51 +126,19 @@ export type CloudPromptBody = {
     generation_id?: string;
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────
-
-function isCreateRequest(req: CloudRequest): req is { type: 'create'; gpu: string; name?: string } {
-    return req.type === 'create';
-}
-
-function isStatusRequest(req: CloudRequest): req is { type: 'status'; pod_url: string } {
-    return req.type === 'status';
-}
-
 // ── Main API ──────────────────────────────────────────────────────────
 
 /**
- * Unified cloud endpoint — acts as a switch over request types.
+ * Create a cloud pod: `POST <baseUrl>/cloud` with `{gpu}` or `{gpu, name}`.
  *
- * All requests go through the dashboard service at `baseUrl`.
- *
- * - `{ type: 'create', gpu, name? }` → `POST <baseUrl>/cloud` with `{gpu}` or `{gpu, name}`.
- *   The server tries the GPU's spawner servers in order (302 redirect)
- *   and returns `{ pod_url }`, or 503 when none could spawn it.
- *
- * - `{ type: 'status', pod_url }` → `POST <baseUrl>/cloud` with `{pod_url}`.
- *   The server probes the pod's native websocket and returns
- *   `{ health, models_dir, models }`.
+ * The server tries the GPU's spawner servers in order (302 redirect) and
+ * answers ONLY once the pod's persistent websocket is connected and held —
+ * `{ pod_url }`, or 503 when no spawner could produce one (the error text
+ * carries the per-server attempts).
  */
-export async function cloud(
+export async function cloudCreate(
     baseUrl: string,
-    request: CloudRequest
-): Promise<CloudCreateResult | CloudPodStatusResult> {
-    if (isCreateRequest(request)) {
-        return cloudCreate(baseUrl, request);
-    }
-    if (isStatusRequest(request)) {
-        return cloudStatus(baseUrl, request);
-    }
-    // Exhaustiveness guard
-    const _never: never = request;
-    throw new Error(`Unknown cloud request type: ${JSON.stringify(_never)}`);
-}
-
-// ── Internal implementations ──────────────────────────────────────────
-
-async function cloudCreate(
-    baseUrl: string,
-    request: { type: 'create'; gpu: string; name?: string }
+    request: CloudCreateRequest
 ): Promise<CloudCreateResult> {
     const body: Record<string, string> = { gpu: request.gpu };
     if (request.name) {
@@ -215,28 +170,6 @@ async function cloudCreate(
     return (await response.json()) as CloudCreateResult;
 }
 
-async function cloudStatus(
-    baseUrl: string,
-    request: { type: 'status'; pod_url: string }
-): Promise<CloudPodStatusResult> {
-    const response = await fetch(`${baseUrl}/cloud`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pod_url: request.pod_url }),
-    });
-
-    if (!response.ok) {
-        let message = `Failed to get pod status (HTTP ${response.status})`;
-        try {
-            const data = await response.json();
-            if (data?.error) message = data.error;
-        } catch { /* ignore */ }
-        throw new Error(message);
-    }
-
-    return (await response.json()) as CloudPodStatusResult;
-}
-
 // ── Pod listing ───────────────────────────────────────────────────────
 
 /**
@@ -244,9 +177,9 @@ async function cloudStatus(
  *
  * Pure registry read on the server — every pod whose persistent websocket
  * is currently held, each with its `active` flag and the number of prompts
- * it is processing. The UI polls this to keep its pod buttons in sync:
- * pods spawned elsewhere (or surviving a page refresh) appear
- * automatically.
+ * it is processing. The UI polls this to keep its pod buttons in sync —
+ * listed pods get buttons, unlisted pods' buttons are removed (the server
+ * only deregisters a pod whose socket is definitively dead).
  */
 export async function cloudListPods(baseUrl: string): Promise<CloudPodListResult> {
     const response = await fetch(`${baseUrl}/cloud`, { method: 'GET' });

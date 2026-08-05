@@ -55,7 +55,6 @@ function makePod(overrides: Partial<PodEntry> = {}): PodEntry {
         name: 'A',
         pod_url: 'https://pod.example',
         status: 'ready',
-        failCount: 0,
         run: { status: 'idle' },
         activeGenerationIds: [],
         ...overrides

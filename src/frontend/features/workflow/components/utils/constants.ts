@@ -6,14 +6,14 @@ export const VIEWER_SWIPE_THRESHOLD_PX = 50;
 /** Maximum number of workflow items to display in the sidebar. */
 export const MAX_SIDEBAR_ITEMS = 100;
 
-/** Heartbeat probe interval — keeps pods warm and detects dead pod_urls. */
-export const POD_HEARTBEAT_MS = 30_000;
-
-/** Consecutive heartbeat failures before a dead pod removes itself. */
-export const MAX_POD_FAILURES = 2;
-
-/** Native ComfyUI pod idle window before its local UI button is removed. */
-export const POD_IDLE_MS = 60_000;
+/**
+ * Server pod-list poll interval (GET /v1/comfy/cloud). The list response is
+ * the ONLY liveness source for pod buttons: pods the server no longer lists
+ * have dead sockets (the server already exhausted its reconnect schedule)
+ * and their buttons are removed on that tick. There are NO per-pod client
+ * probes — the server's persistent-websocket registry is authoritative.
+ */
+export const POD_LIST_POLL_MS = 30_000;
 
 /**
  * Dim accent track for the pod button's circular loading border — the

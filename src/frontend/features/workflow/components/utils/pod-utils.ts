@@ -54,27 +54,10 @@ export function podButtonQueueBadge(pod: PodEntry, inFlight: number): string | n
 }
 
 /**
- * Heartbeat eligibility for native ComfyUI pods. The websocket-backed status
- * probe runs for every resolved pod so a dropped connection is visible in the
- * button state before a user queues another generation.
- */
-export function shouldProbePod(p: PodEntry): boolean {
-    if (p.status === 'spawning' || !p.pod_url) return false;
-    return true;
-}
-
-/**
- * A native pod is locally idle once its accepted generation queue is empty.
- * Pending submissions are handled separately by the hook before this check.
- */
-export function isPodIdle(p: PodEntry): boolean {
-    return p.status !== 'spawning' && Boolean(p.pod_url) && p.activeGenerationIds.length === 0;
-}
-
-/**
  * "Auto" load-balancer pick — the eligible pod with the SMALLEST in-flight
  * queue. Eligibility mirrors the pod buttons themselves: status 'ready'
- * with a resolved pod_url and no heartbeat strikes blocking it. Ties go to
+ * with a resolved pod_url (listed pods are alive — the server's registry
+ * drops dead ones, so there is nothing local to strike against). Ties go to
  * the oldest pod (array order == spawn order). Null when nothing can take
  * a job — the Auto button stays disabled until a pod is ready.
  */

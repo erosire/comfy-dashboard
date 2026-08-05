@@ -37,13 +37,14 @@ import React from 'react';
 import { theme } from '../../../styles';
 import { Btn, BtnPrimary, PodButton, PodQueueBadge } from './ui';
 import {
-    MAX_POD_FAILURES,
     POD_RING_TRACK,
     VIEWER_SWIPE_THRESHOLD_PX,
+    getViewerAudioMuted,
     pickLeastLoadedPod,
     podButtonLabel,
     podButtonQueueBadge,
     podLetter,
+    setViewerAudioMuted,
     type PodEntry,
     type ViewerEntry
 } from './utils';
@@ -264,8 +265,17 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         controls
                         autoPlay
                         loop
-                        // Generated previews must not unexpectedly play audio; users can unmute through native controls.
-                        muted
+                        // Generated previews start muted so opening a result
+                        // never unexpectedly plays audio. Once the user
+                        // unmutes (or re-mutes) via the native controls, the
+                        // session memory in utils/viewer-audio.ts keeps the
+                        // choice for every video remounted after this one —
+                        // until the browser refresh resets it to muted.
+                        muted={getViewerAudioMuted()}
+                        // The native mute toggle fires volumechange — capture
+                        // the resulting mute state so the next remounted
+                        // video (per-item key above) starts with it.
+                        onVolumeChange={(e) => setViewerAudioMuted(e.currentTarget.muted)}
                         style={{
                             maxWidth: isMobile ? '100vw' : '85vw',
                             maxHeight: isMobile ? '100dvh' : '80vh',
@@ -507,8 +517,7 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         const inFlight = p.activeGenerationIds.length;
                         const isLoading = isSpawning || inFlight > 0;
                         const letter = podLetter(p.podNumber);
-                        const isDisabled =
-                            actionBusy || isSpawning || !p.pod_url || p.status !== 'ready';
+                        const isDisabled = actionBusy || isSpawning || !p.pod_url;
                         // Match the footer's run-state border colors while
                         // the overlaid badge carries the separate queue count.
                         const borderColor = isLoading
@@ -527,19 +536,16 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                 title={
                                     isSpawning
                                         ? `Pod ${letter}${p.gpu ? ` (${p.gpu})` : ''} — starting up…`
-                                        : p.status !== 'ready'
-                                          ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
-                                            `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
-                                          : inFlight > 0
-                                            ? `Pod ${letter} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
-                                              `in flight on ${p.pod_url} — click to queue ` +
-                                              (inputTargetName
-                                                  ? `the fed run ("${inputTargetName}")`
-                                                  : "this image's prompt")
-                                            : inputTargetName
-                                              ? `Feed this image into "${inputTargetName}"'s Inputs — ` +
-                                                `queue the run on ${p.pod_url} (the generation saves on this workflow)`
-                                              : `Queue this image's prompt on ${p.pod_url}`
+                                        : inFlight > 0
+                                          ? `Pod ${letter} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                            `in flight on ${p.pod_url} — click to queue ` +
+                                            (inputTargetName
+                                                ? `the fed run ("${inputTargetName}")`
+                                                : "this image's prompt")
+                                          : inputTargetName
+                                            ? `Feed this image into "${inputTargetName}"'s Inputs — ` +
+                                              `queue the run on ${p.pod_url} (the generation saves on this workflow)`
+                                            : `Queue this image's prompt on ${p.pod_url}`
                                 }
                                 borderStyle="solid"
                                 borderColor={borderColor}

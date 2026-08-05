@@ -3,10 +3,21 @@
 // Pods are spawned via POST /v1/comfy/cloud (cloud.ts). That endpoint only
 // answers AFTER connectPodSocket() resolves: the pod's native ComfyUI
 // websocket is open and registered here. The connection then lives in
-// SERVER MEMORY FOREVER — until the cloud server terminates it (remote
-// close/error). On termination the pod drops out of the registry and every
-// in-flight prompt subscriber receives a terminal `prompt_error` event, so
-// its generation lands failed with the .log trail intact.
+// SERVER MEMORY FOREVER — until the cloud server terminates it. On
+// termination the pod drops out of the registry and every in-flight prompt
+// subscriber receives a terminal `prompt_error` event, so its generation
+// lands failed with the .log trail intact.
+//
+// ── Transport death ────────────────────────────────────────────────────
+// Cloud pods are DESIGNED to terminate when idle and can never restart
+// without the create-pod endpoint — so a dropped socket is not a transient
+// network event: the pod is gone forever (undici surfaces a close-frame-
+// less TCP drop as code 1006; observed on *.modal.host after the pod's
+// server had already shut down). There is deliberately NO reconnection:
+// attempts would only ever fail against the destroyed pod, delay the
+// failure signal, and spam the log. Death is terminal — the generation
+// fails with prompt_error and the only way back is a fresh pod via
+// POST /v1/comfy/cloud.
 //
 // ComfyUI routes a prompt's execution messages to the websocket whose
 // clientId submitted it (server.py send_sync sid), so every POST /prompt
@@ -19,12 +30,24 @@
 //   - no prompt_id (status broadcasts, …)         → every subscriber,
 //     mirroring the old per-prompt socket consumers (cloud-prompt.ts).
 //
+// ── Non-blocking pipeline ──────────────────────────────────────────────
+// The event loop must never be parked by frame processing: protocol pings
+// (heartbeat) and undici's receiver-side PONG answers run on the same loop,
+// and a stalled loop turns into TCP backpressure that trips intermediary
+// proxies. Therefore:
+//   - message DELIVERY order is arrival order (a single per-socket promise
+//     chain), so subscriber state machines (terminal handling) see exactly
+//     the old serialized semantics;
+//   - but expensive work STARTS at arrival, outside the chain: binary
+//     preview base64 is computed eagerly — on a worker-thread pool for
+//     large frames (pod-base64-pool.ts) — while preceding frames process;
+//   - preview attribution (last executing node/prompt) is SNAPSHOT AT
+//     ARRIVAL, because the async encode completes after later `executing`
+//     frames may have moved the state on.
+//
 // Binary preview frames follow ComfyUI's send_image wire format: an 8-byte
 // big-endian header — uint32 image kind (1 = JPEG, 2 = PNG), uint32 zero
-// padding — followed by the raw image bytes. Previews carry no prompt/node
-// reference, so each is stamped with the most recent executing
-// {node, prompt_id} before routing (the same attribution convention the
-// removed per-prompt buildDirectStream used).
+// padding — followed by the raw image bytes.
 //
 // Every event delivered for a known prompt_id is ultimately traced into
 // that prompt's generation .log file by the subscriber in cloud-prompt.ts
@@ -43,6 +66,7 @@ import {
     waitForSocketOpen,
     websocketUrl
 } from './direct-comfy';
+import { encodePodPayload } from './pod-base64-pool';
 import type { StreamEvent } from '../workflows/generation-store';
 
 /**
@@ -94,14 +118,16 @@ export type PodSocketConnection = {
      * The pod-level client id shared by the websocket AND every POST
      * /prompt: ComfyUI routes each prompt's execution messages to the
      * socket whose clientId submitted it, so reusing one id is what makes
-     * the single-socket design work.
+     * the single-socket design work. Reconnects keep the SAME id so
+     * in-flight prompts resume routing to the fresh socket.
      */
     clientId: string;
     /** Spawn-time metadata echoed by GET /v1/comfy/cloud (best-effort). */
     gpu?: string;
     name?: string;
-    /** ISO timestamp of the (re)connection — diagnostics for the GET list. */
+    /** ISO timestamp of the connection — diagnostics for the GET list. */
     connectedAt: string;
+    /** The pod's one socket — never replaced (pods never recover). */
     socket: WebSocket;
     /** Live prompt consumers keyed by subscriber id. */
     subscribers: Map<string, PodPromptSubscriber>;
@@ -117,7 +143,7 @@ export type PodSocketConnection = {
     buffered: Map<string, StreamEvent[]>;
     /** Liveness interval handle — needed by closeAllPodSockets teardown. */
     heartbeat: ReturnType<typeof setInterval> | null;
-    /** Set once the socket closes/errors — the connection is terminal. */
+    /** Set once the socket is dead — the pod is terminal. */
     closed: boolean;
 };
 
@@ -331,7 +357,54 @@ export function releasePodSubmission(connection: PodSocketConnection): void {
     connection.pendingSubmissions = Math.max(0, connection.pendingSubmissions - 1);
 }
 
-// ── Connection construction & event demultiplexing ─────────────────────
+// ── Event routing (module-scope: shared by every socket generation) ────
+
+/** Deliver one event to its prompt_id's subscriber(s), or buffer it. */
+function deliverEvent(connection: PodSocketConnection, event: StreamEvent): void {
+    if (connection.closed) return;
+    const pid = typeof event.data?.prompt_id === 'string' ? event.data.prompt_id : null;
+    if (pid) {
+        let delivered = false;
+        for (const subscriber of connection.subscribers.values()) {
+            if (subscriber.promptId !== pid) continue;
+            delivered = true;
+            try {
+                subscriber.onEvent(event);
+            } catch {
+                // A crashing consumer must not break routing for others.
+            }
+        }
+        if (!delivered) bufferEvent(connection.buffered, pid, event);
+        return;
+    }
+    // Unattributed event (status broadcast, …) — every subscriber, the same
+    // shape the old per-prompt socket consumers observed.
+    for (const subscriber of connection.subscribers.values()) {
+        try {
+            subscriber.onEvent(event);
+        } catch {
+            // A crashing consumer must not break routing for others.
+        }
+    }
+}
+
+/** Buffer one event for a not-yet-subscribed prompt_id (ack → subscribe race). */
+function bufferEvent(buffered: Map<string, StreamEvent[]>, promptId: string, event: StreamEvent): void {
+    const list = buffered.get(promptId) ?? [];
+    list.push(event);
+    if (list.length > MAX_BUFFERED_EVENTS_PER_PROMPT) list.shift();
+    if (!buffered.has(promptId)) buffered.set(promptId, list);
+}
+
+/** Normalize one websocket binary frame to bytes (undici delivers Buffer/Blob/ArrayBuffer). */
+async function frameBytes(data: unknown): Promise<Uint8Array | null> {
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
+    return null;
+}
+
+// ── Connection construction & socket wiring ────────────────────────────
 
 function buildConnection(
     key: string,
@@ -354,122 +427,71 @@ function buildConnection(
         heartbeat: null,
         closed: false
     };
+    attachSocket(connection, socket);
+    return connection;
+}
 
+/**
+ * Wire the pod's socket onto its connection: message demultiplexing,
+ * heartbeat, and death handling. Preview attribution (lastExecuting*) and
+ * the delivery chain live in this closure — per-connection state, since a
+ * pod's socket is never replaced.
+ */
+function attachSocket(connection: PodSocketConnection, socket: WebSocket): void {
     // Preview attribution state — the most recent executing node/prompt,
     // exactly as ComfyUI's own prompt-event convention implies.
     let lastExecutingNode = '';
     let lastExecutingPromptId: string | null = null;
 
-    /** Deliver one event to its prompt_id's subscriber(s), or buffer it. */
-    const deliver = (event: StreamEvent) => {
-        if (connection.closed) return;
-        const pid = typeof event.data?.prompt_id === 'string' ? event.data.prompt_id : null;
-        if (pid) {
-            let delivered = false;
-            for (const subscriber of connection.subscribers.values()) {
-                if (subscriber.promptId !== pid) continue;
-                delivered = true;
-                try {
-                    subscriber.onEvent(event);
-                } catch {
-                    // A crashing consumer must not break routing for others.
-                }
-            }
-            if (!delivered) bufferEvent(connection.buffered, pid, event);
-            return;
-        }
-        // Unattributed event (status broadcast, …) — every subscriber, the
-        // same shape the old per-prompt socket consumers observed.
-        for (const subscriber of connection.subscribers.values()) {
-            try {
-                subscriber.onEvent(event);
-            } catch {
-                // A crashing consumer must not break routing for others.
-            }
-        }
-    };
-
-    /** Remote close/error/failed ping → fail every prompt and deregister. */
-    const terminate = (reason: string) => {
-        if (connection.closed) return;
-        connection.closed = true;
-        if (connection.heartbeat !== null) {
-            clearInterval(connection.heartbeat);
-            connection.heartbeat = null;
-        }
-        if (podSockets.get(key) === connection) podSockets.delete(key);
+    /**
+     * Text frame handling — parse + attribution update AT ARRIVAL, in the
+     * message listener itself. The resulting event is delivered through the
+     * ordered chain, but the parse cannot wait for its chain slot: binary
+     * frames snapshot lastExecuting* at THEIR arrival, so the attribution
+     * state must already reflect every text frame that arrived before them
+     * (parse stays inline: shipping a decoded string to a worker and
+     * cloning the parsed object back costs the same CPU on this thread).
+     * Returns the event to deliver, or null for a malformed frame to drop.
+     */
+    const handleTextArrival = (text: string): StreamEvent | null => {
+        let message: { type?: unknown; data?: unknown };
         try {
-            socket.close();
+            message = JSON.parse(text) as { type?: unknown; data?: unknown };
         } catch {
-            // The terminal event below is what matters.
+            return null; // malformed text frame — nothing to route
         }
-        const terminal: StreamEvent = { type: 'prompt_error', data: { error: reason } };
-        for (const subscriber of connection.subscribers.values()) {
-            try {
-                subscriber.onEvent(terminal);
-            } catch {
-                // Termination must reach every remaining subscriber.
+        const type = typeof message?.type === 'string' ? message.type : 'raw';
+        const eventData =
+            message?.data && typeof message.data === 'object'
+                ? (message.data as Record<string, unknown>)
+                : {};
+
+        // Track the executing node so following binary preview frames
+        // can be attributed to it (and to its prompt for routing).
+        if (type === 'executing') {
+            const node = eventData.node;
+            if (typeof node === 'string' && node) {
+                lastExecutingNode = node;
+                lastExecutingPromptId =
+                    typeof eventData.prompt_id === 'string' ? eventData.prompt_id : null;
             }
         }
-        connection.subscribers.clear();
-        connection.buffered.clear();
+        return { type, data: eventData };
     };
 
-    socket.addEventListener('close', () => terminate('ComfyUI websocket closed by the cloud server'));
-    socket.addEventListener('error', () => terminate('ComfyUI websocket errored'));
-
-    // Liveness: protocol pings only. A quiet pod is HEALTHY — unlike the
-    // removed per-prompt sockets there is intentionally no response-silence
-    // watchdog; the connection lives until the cloud server ends it.
-    connection.heartbeat = setInterval(() => {
-        if (socket.readyState !== WebSocket.OPEN) {
-            terminate('ComfyUI websocket stopped responding');
-            return;
-        }
-        try {
-            websocketPing(socket);
-        } catch (error) {
-            terminate(
-                `ComfyUI websocket stopped responding: ${error instanceof Error ? error.message : String(error)}`
-            );
-        }
-    }, POD_WS_HEARTBEAT_MS);
-    // The pod registry must not keep a Node process alive by itself.
-    const unref = (connection.heartbeat as unknown as { unref?: () => void }).unref;
-    if (typeof unref === 'function') unref.call(connection.heartbeat);
-
-    const handleMessage = async (data: unknown): Promise<void> => {
-        if (connection.closed) return;
-
-        if (typeof data === 'string') {
-            let message: { type?: unknown; data?: unknown };
-            try {
-                message = JSON.parse(data) as { type?: unknown; data?: unknown };
-            } catch {
-                return; // malformed text frame — nothing to route
-            }
-            const type = typeof message?.type === 'string' ? message.type : 'raw';
-            const eventData =
-                message?.data && typeof message.data === 'object'
-                    ? (message.data as Record<string, unknown>)
-                    : {};
-
-            // Track the executing node so following binary preview frames
-            // can be attributed to it (and to its prompt for routing).
-            if (type === 'executing') {
-                const node = eventData.node;
-                if (typeof node === 'string' && node) {
-                    lastExecutingNode = node;
-                    lastExecutingPromptId =
-                        typeof eventData.prompt_id === 'string' ? eventData.prompt_id : null;
-                }
-            }
-            deliver({ type, data: eventData });
-            return;
-        }
-
-        // Binary frame — ComfyUI preview images (8-byte big-endian header
-        // + raw image bytes), delivered as imagepreview.update.
+    /**
+     * Binary frame handling — ComfyUI preview images (8-byte big-endian
+     * header + raw image bytes), delivered as imagepreview.update. The
+     * base64 encode is the only heavyweight step; it is delegated to
+     * encodePodPayload (worker pool for large frames, inline for small).
+     * `stamp` is the attribution SNAPSHOT taken at arrival — the async
+     * encode completes after later `executing` frames may have advanced
+     * lastExecuting*, so completion-time reads would mis-route previews.
+     */
+    const encodePreviewFrame = async (
+        data: unknown,
+        stamp: { node: string; promptId: string | null }
+    ): Promise<void> => {
         const bytes = await frameBytes(data);
         if (!bytes || bytes.length < 8) return;
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -480,42 +502,130 @@ function buildConnection(
         const payload = bytes.subarray(8);
         if (payload.length === 0) return;
 
-        deliver({
+        const base64 = await encodePodPayload(payload);
+        deliverEvent(connection, {
             type: 'imagepreview.update',
             data: {
-                node_id: lastExecutingNode,
+                node_id: stamp.node,
                 // Stamped prompt_id drives routing to JUST that subscriber;
                 // absent (unknown prompt) it falls back to broadcast.
-                ...(lastExecutingPromptId ? { prompt_id: lastExecutingPromptId } : {}),
-                image: `data:${mime};base64,${Buffer.from(payload).toString('base64')}`
+                ...(stamp.promptId ? { prompt_id: stamp.promptId } : {}),
+                image: `data:${mime};base64,${base64}`
             }
         });
     };
 
-    // Serialize message handling: events must be delivered in arrival order,
-    // and binary preview decoding is async.
+    // Serialize DELIVERY in arrival order — subscriber state machines
+    // (terminal handling in cloud-prompt.ts) depend on it. Heavy per-frame
+    // WORK (base64 of previews) starts eagerly at arrival, so it overlaps
+    // the frames ahead of it in the chain instead of blocking the loop
+    // when its delivery slot comes up.
     let chain: Promise<void> = Promise.resolve();
     socket.addEventListener('message', (event) => {
-        chain = chain.then(() => handleMessage((event as MessageEvent).data)).catch(() => {
+        const data = (event as MessageEvent).data;
+
+        if (typeof data === 'string') {
+            // Parse + attribution update NOW (arrival) — see handleTextArrival.
+            const parsed = handleTextArrival(data);
+            // Only the DELIVERY takes an ordered chain slot.
+            if (parsed) {
+                chain = chain.then(() => deliverEvent(connection, parsed)).catch(() => {
+                    // A dropped frame must not kill the pod's shared socket.
+                });
+            }
+            return;
+        }
+
+        // Snapshot attribution at ARRIVAL (see encodePreviewFrame).
+        const stamp = { node: lastExecutingNode, promptId: lastExecutingPromptId };
+        const work = encodePreviewFrame(data, stamp);
+        // Observed from birth — the chain only consumes it later, and a
+        // rejection must never surface as an unhandledRejection in between.
+        work.catch(() => {});
+        chain = chain.then(() => work).catch(() => {
             // A dropped frame must not kill the pod's shared socket.
         });
     });
 
-    return connection;
+    // Transport death (remote close, TCP error, failed ping) → terminate:
+    // pods are designed to never come back without the create endpoint.
+    socket.addEventListener('close', (event) => {
+        const code = (event as CloseEvent).code;
+        const suffix = typeof code === 'number' && code > 0 ? ` (code ${code})` : '';
+        handleSocketDeath(connection, socket, `ComfyUI websocket closed by the cloud server${suffix}`);
+    });
+    socket.addEventListener('error', () => {
+        // Undici fires 'error' immediately BEFORE the paired 'close' on a
+        // transport drop (websocket.js #onSocketClose) — deferring a
+        // microtask lets the close handler (which carries the close code)
+        // win; this only terminates for a closeless error.
+        queueMicrotask(() => handleSocketDeath(connection, socket, 'ComfyUI websocket errored'));
+    });
+
+    // Liveness: protocol pings only. A quiet pod is HEALTHY — unlike the
+    // removed per-prompt sockets there is intentionally no response-silence
+    // watchdog; the connection lives until the cloud server ends it.
+    connection.heartbeat = setInterval(() => {
+        if (socket.readyState !== WebSocket.OPEN) {
+            handleSocketDeath(connection, socket, 'ComfyUI websocket stopped responding');
+            return;
+        }
+        try {
+            websocketPing(socket);
+        } catch (error) {
+            handleSocketDeath(
+                connection,
+                socket,
+                `ComfyUI websocket stopped responding: ${error instanceof Error ? error.message : String(error)}`
+            );
+        }
+    }, POD_WS_HEARTBEAT_MS);
+    // The pod registry must not keep a Node process alive by itself.
+    const unref = (connection.heartbeat as unknown as { unref?: () => void }).unref;
+    if (typeof unref === 'function') unref.call(connection.heartbeat);
 }
 
-/** Buffer one event for a not-yet-subscribed prompt_id (ack → subscribe race). */
-function bufferEvent(buffered: Map<string, StreamEvent[]>, promptId: string, event: StreamEvent): void {
-    const list = buffered.get(promptId) ?? [];
-    list.push(event);
-    if (list.length > MAX_BUFFERED_EVENTS_PER_PROMPT) list.shift();
-    if (!buffered.has(promptId)) buffered.set(promptId, list);
+/**
+ * The pod's socket died — stop its heartbeat and terminate the connection
+ * IMMEDIATELY. No reconnection is attempted: cloud pods are designed to
+ * terminate when idle and can never restart without the create-pod
+ * endpoint, so a handshake retry would only ever fail against the already
+ * destroyed pod (delaying the failure and spamming the log). The stale
+ * guard (dead-socket identity / already-closed) keeps double signalling —
+// e.g. undici's error+close pair — from terminating twice.
+ */
+function handleSocketDeath(connection: PodSocketConnection, socket: WebSocket, reason: string): void {
+    if (connection.closed || connection.socket !== socket) return;
+    terminate(connection, reason);
 }
 
-/** Normalize one websocket binary frame to bytes (undici delivers Buffer/Blob/ArrayBuffer). */
-async function frameBytes(data: unknown): Promise<Uint8Array | null> {
-    if (data instanceof ArrayBuffer) return new Uint8Array(data);
-    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
-    return null;
+/**
+ * Remote close/error/failed ping → fail every prompt riding the socket and
+ * deregister the pod. The only way back is a fresh pod via POST
+ * /v1/comfy/cloud.
+ */
+function terminate(connection: PodSocketConnection, reason: string): void {
+    if (connection.closed) return;
+    connection.closed = true;
+    if (connection.heartbeat !== null) {
+        clearInterval(connection.heartbeat);
+        connection.heartbeat = null;
+    }
+    if (podSockets.get(connection.key) === connection) podSockets.delete(connection.key);
+    try {
+        connection.socket.close();
+    } catch {
+        // The terminal event below is what matters.
+    }
+    console.error(`[cloud] Pod ${connection.key} terminated: ${reason}`);
+    const terminal: StreamEvent = { type: 'prompt_error', data: { error: reason } };
+    for (const subscriber of connection.subscribers.values()) {
+        try {
+            subscriber.onEvent(terminal);
+        } catch {
+            // Termination must reach every remaining subscriber.
+        }
+    }
+    connection.subscribers.clear();
+    connection.buffered.clear();
 }

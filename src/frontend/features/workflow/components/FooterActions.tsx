@@ -16,15 +16,15 @@
 // while the pod_url resolves), labeled with the GPU name plus the queued
 // job count badge while busy ("3" = three jobs in flight). Every button
 // represents a native ComfyUI websocket connection and carries its own
-// status: circular loading while spawning / while jobs are in flight,
-// colored border for the last settled result, and heartbeat removal when
-// the pod_url dies.
+// status: circular loading while spawning / while jobs are in flight, and
+// a colored border for the last settled result. Button LIVENESS is owned
+// by the server pod-list poll in usePods (a pod whose socket the server
+// stopped holding simply disappears — no client-side probing).
 
 import React from 'react';
 import { theme } from '../../../styles';
 import { Btn, BtnPrimary, PodButton, PodQueueBadge } from './ui';
 import {
-    MAX_POD_FAILURES,
     POD_RING_TRACK,
     pickLeastLoadedPod,
     podButtonLabel,
@@ -107,7 +107,7 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 const inFlight = p.activeGenerationIds.length;
                 const isLoading = isSpawning || inFlight > 0;
                 const letter = podLetter(p.podNumber);
-                const isDisabled = isSpawning || nodeCount === 0 || !p.pod_url || p.status !== 'ready';
+                const isDisabled = isSpawning || nodeCount === 0 || !p.pod_url;
                 // Keep the settled run state and active queue state visible in
                 // the styled button while leaving the badge to show only N.
                 const borderColor = isLoading
@@ -126,13 +126,10 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                         title={
                             isSpawning
                                 ? `Pod ${letter}${p.gpu ? ` (${p.gpu})` : ''} — starting up…`
-                                : p.status !== 'ready'
-                                  ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
-                                    `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
-                                  : inFlight > 0
-                                    ? `Pod ${letter} (ComfyUI websocket) — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
-                                      `in flight on ${p.pod_url} — click to queue another`
-                                  : `Queue a new generation on ${p.pod_url} over the ComfyUI websocket`
+                                : inFlight > 0
+                                  ? `Pod ${letter} (ComfyUI websocket) — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                    `in flight on ${p.pod_url} — click to queue another`
+                                : `Queue a new generation on ${p.pod_url} over the ComfyUI websocket`
                         }
                         borderStyle="solid"
                         borderColor={borderColor}

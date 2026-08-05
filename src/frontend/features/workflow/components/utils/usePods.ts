@@ -1,9 +1,8 @@
 // Cloud pod lifecycle — pod creation/reuse for the New / GPU-labeled pod
-// / Auto buttons, run-state sync from polled generations, server pod-list
-// polling (GET /v1/comfy/cloud auto-adds buttons for pods the server
-// tracks), and the heartbeat that detects dead pod_urls.
+// / Auto buttons, run-state sync from polled generations, and the server
+// pod-list poll that owns pod button liveness.
 //
-// Extracted from the original CloudTab.tsx. Behaviour notes preserved:
+// Extracted from the original CloudTab.tsx. Behaviour notes:
 //   - New is NEVER blocked: the GPU picker dialog (GpuSelectDialog) asks
 //     for the GPU ("4090" / "B300", see GPU_OPTIONS), and every pick
 //     spawns a fresh pod for that GPU. Per-pod status lives on the pod
@@ -12,19 +11,33 @@
 //     server rides all of them on the pod's one persistent websocket and
 //     scopes events by prompt_id. "Auto" queues on the least-loaded ready
 //     pod (see pickLeastLoadedPod).
-//   - Server pod-list polling every POD_HEARTBEAT_MS adds buttons for
-//     server-tracked pods the UI does not know yet; heartbeat status probes
-//     verify every known pod — MAX_POD_FAILURES consecutive failures remove
-//     the pod. A pod is also removed after POD_IDLE_MS with no accepted
-//     generation queue.
+//   - LIVENESS IS THE SERVER'S JOB: every POD_LIST_POLL_MS the hook fetches
+//     GET /v1/comfy/cloud — the registry of pods whose persistent websocket
+//     the server still holds. A pod drops out of the list the moment its
+//     socket dies: pods are designed to terminate when idle and never come
+//     back (see server pod-socket.ts — no reconnection is attempted). The
+//     pod buttons are a pure MIRROR of that list:
+//       * listed but unknown locally      → add a ready button (spawned by
+//         another client, page refresh, …);
+//       * known locally but NOT listed    → the pod is dead for good;
+//         remove the button (its in-flight generations already failed
+//         server-side with prompt_error and settle through generation
+//         polling);
+//       * listed and known                → stays;
+//       * local placeholder with no pod_url yet (create in flight) → the
+//         list cannot judge it; untouched either way.
+//     There are deliberately NO per-pod status probes / heartbeat strikes /
+//     idle expiry timers — pinging pods is the server-side socket's job.
+//     A failed LIST fetch skips the whole tick: an unreachable server never
+//     clears local buttons (removals need a definitive server answer).
 
 import React from 'react';
-import type { CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
-import { cloud, cloudListPods, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
+import type { GenerationEntry, GenerationSummary } from '../../../../api';
+import { cloudCreate, cloudListPods, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
-import { MAX_POD_FAILURES, POD_HEARTBEAT_MS, POD_IDLE_MS } from './constants';
-import { isPodIdle, podLetter, pickLeastLoadedPod, shouldProbePod } from './pod-utils';
+import { POD_LIST_POLL_MS } from './constants';
+import { podLetter, pickLeastLoadedPod } from './pod-utils';
 import { replacePreferenceVariables } from './workflow-prompt';
 
 /**
@@ -94,22 +107,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
     const podsRef = React.useRef(pods);
-    // One timer is kept per native pod so unrelated pod updates cannot reset
-    // another pod's exact 60-second idle deadline.
-    const directIdleTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-    // A generation request is considered pending before the server accepts it;
-    // this prevents a slow snapshot/submission from being removed as "idle".
-    const pendingGenerationPodIdsRef = React.useRef<Set<string>>(new Set());
     podsRef.current = pods;
-
-    // Cancel an idle timer immediately when the user starts another job on a
-    // native pod, before the asynchronous generation request can be accepted.
-    const cancelDirectIdleTimer = React.useCallback((podId: string) => {
-        const timer = directIdleTimersRef.current.get(podId);
-        if (timer === undefined) return;
-        clearTimeout(timer);
-        directIdleTimersRef.current.delete(podId);
-    }, []);
 
     // ── Sync pod buttons from polled generations ────────────────────
     // Pod processing lives on the server; polling the generation list is
@@ -151,53 +149,6 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         });
     }, [generations]);
 
-    // Arm the exact idle deadline for every native pod whose accepted queue is
-    // empty. The callback rechecks current state, so a completion race or a
-    // newly accepted job can never remove a busy button.
-    React.useEffect(() => {
-        const timers = directIdleTimersRef.current;
-        const eligibleIds = new Set(
-            pods
-                .filter((pod) => isPodIdle(pod) && !pendingGenerationPodIdsRef.current.has(pod.id))
-                .map((pod) => pod.id)
-        );
-
-        for (const [podId, timer] of timers) {
-            if (!eligibleIds.has(podId)) {
-                clearTimeout(timer);
-                timers.delete(podId);
-            }
-        }
-
-        for (const podId of eligibleIds) {
-            if (timers.has(podId)) continue;
-            const pod = pods.find((entry) => entry.id === podId)!;
-            const timer = setTimeout(() => {
-                timers.delete(podId);
-                setPods((previous) => {
-                    const current = previous.find((entry) => entry.id === podId);
-                    if (!current || !isPodIdle(current) || pendingGenerationPodIdsRef.current.has(podId)) {
-                        return previous;
-                    }
-                    console.log(
-                        `[Idle] Removing ComfyUI Pod#${current.podNumber} after ${POD_IDLE_MS / 1000}s with no queued jobs`
-                    );
-                    return previous.filter((entry) => entry.id !== podId);
-                });
-            }, POD_IDLE_MS);
-            timers.set(pod.id, timer);
-        }
-    }, [pods]);
-
-    // Timers are process-local UI resources and must not survive hook unmount.
-    React.useEffect(() => {
-        return () => {
-            for (const timer of directIdleTimersRef.current.values()) clearTimeout(timer);
-            directIdleTimersRef.current.clear();
-            pendingGenerationPodIdsRef.current.clear();
-        };
-    }, []);
-
     // ── Run a generation on a cloud pod ────────────────────────────
     // Shared by "New" (spawns a fresh pod), "#N" (reuses a pod), "Auto"
     // (load-balances onto the least-loaded pod) and the result viewer's
@@ -213,103 +164,85 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // 3. Submits the snapshot to POST /v1/comfy/cloud/prompt with the
     //    pod_url + workflow/generation ids. THE SERVER converts the
     //    workflow json to the flat API prompt (workflowToApiPrompt),
-    //    consumes the pod's NDJSON stream and updates the generation
-    //    json by itself — this call returns immediately (202).
+    //    consumes the pod's stream and updates the generation json by
+    //    itself — this call returns immediately (202).
     // 4. Client-side we are done: the continuous generations polling
     //    updates the sidebar with progress, and settles the pod button's
-    //    running → done/error state (see the sync effect below).
+    //    running → done/error state (see the sync effect above).
 
     const runGenerationOnPod = React.useCallback(
         async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot) => {
             const snapshot = generationOverride ?? getCurrentRaw?.() ?? null;
             if (!editingWorkflowId || !snapshot) return;
 
-            // Reserve the direct pod before any asynchronous snapshot work so
-            // a slow server request cannot be mistaken for an idle queue.
-            if (podId) {
-                pendingGenerationPodIdsRef.current.add(podId);
-                cancelDirectIdleTimer(podId);
+            // Resolve the default preference profile at the UI boundary so
+            // the server receives a self-contained workflow document rather
+            // than a second preference payload. A preference API outage is
+            // treated as an empty profile, which still removes every token.
+            let preferences: Record<string, unknown> = {};
+            try {
+                preferences = await fetchPreferenceVariables(baseUrl);
+            } catch {
+                preferences = {};
             }
+            const preparedSnapshot = replacePreferenceVariables(snapshot, preferences);
+
+            // Step 1+2 — snapshot the already-prepared workflow json into a
+            // generation file. The generation is named after the workflow +
+            // current local timestamp by default (the server falls back to
+            // its own timestamp id when no name is passed).
+            const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
+            const generation = await generateWorkflow(editingWorkflowId, preparedSnapshot, generationName);
+            console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
 
             try {
-                // Resolve the default preference profile at the UI boundary so
-                // the server receives a self-contained workflow document rather
-                // than a second preference payload. A preference API outage is
-                // treated as an empty profile, which still removes every token.
-                let preferences: Record<string, unknown> = {};
-                try {
-                    preferences = await fetchPreferenceVariables(baseUrl);
-                } catch {
-                    preferences = {};
-                }
-                const preparedSnapshot = replacePreferenceVariables(snapshot, preferences);
-
-                // Step 1+2 — snapshot the already-prepared workflow json into a
-                // generation file. The generation is named after the workflow +
-                // current local timestamp by default (the server falls back to
-                // its own timestamp id when no name is passed).
-                const generationName = workflowName ? `${workflowName}_${localTimestampFile(new Date())}` : undefined;
-                const generation = await generateWorkflow(editingWorkflowId, preparedSnapshot, generationName);
-                console.log(`[Generate] Created generation ${generation.id} — submitting to ${podUrl}`);
-
-                try {
-                    // Step 3 — submit the already-prepared workflow and be done.
-                    // The server owns the native websocket and POST /prompt
-                    // connection from this point; the client only tracks the
-                    // accepted generation through polling.
-                    await cloudPrompt(baseUrl, {
-                        pod_url: podUrl,
-                        prompt: generation.prompt,
+                // Step 3 — submit the already-prepared workflow and be done.
+                // The server owns the native websocket and POST /prompt
+                // connection from this point; the client only tracks the
+                // accepted generation through polling.
+                await cloudPrompt(baseUrl, {
+                    pod_url: podUrl,
+                    prompt: generation.prompt,
+                    workflow_id: editingWorkflowId,
+                    generation_id: generation.id,
+                    extra_data: {
                         workflow_id: editingWorkflowId,
-                        generation_id: generation.id,
-                        extra_data: {
-                            workflow_id: editingWorkflowId,
-                            generation_id: generation.id
-                        }
-                    });
-                    // Accepted — add to the pod's in-flight set; polling
-                    // settles each entry. Pods accept concurrent jobs, so an
-                    // existing run does not block this one.
-                    if (podId) {
-                        setPods((prev) =>
-                            prev.map((p) =>
-                                p.id === podId
-                                    ? {
-                                          ...p,
-                                          run: { status: 'running', events: [] },
-                                          activeGenerationIds: [...p.activeGenerationIds, generation.id]
-                                      }
-                                    : p
-                            )
-                        );
+                        generation_id: generation.id
                     }
-                } catch (err: any) {
-                    const message = err.message ?? String(err);
-                    // Submission itself failed — only surface an error on the
-                    // button when nothing else is still running on this pod.
-                    if (podId) {
-                        setPods((prev) =>
-                            prev.map((p) =>
-                                p.id === podId && p.activeGenerationIds.length === 0
-                                    ? { ...p, run: { status: 'error', events: [], message } }
-                                    : p
-                            )
-                        );
-                    }
-                    throw err;
-                }
-            } finally {
+                });
+                // Accepted — add to the pod's in-flight set; polling
+                // settles each entry. Pods accept concurrent jobs, so an
+                // existing run does not block this one.
                 if (podId) {
-                    pendingGenerationPodIdsRef.current.delete(podId);
-                    // A snapshot failure does not otherwise mutate pod state;
-                    // clone the matching entry to let the idle effect re-arm.
                     setPods((prev) =>
-                        prev.map((p) => (p.id === podId ? { ...p } : p))
+                        prev.map((p) =>
+                            p.id === podId
+                                ? {
+                                      ...p,
+                                      run: { status: 'running', events: [] },
+                                      activeGenerationIds: [...p.activeGenerationIds, generation.id]
+                                  }
+                                : p
+                        )
                     );
                 }
+            } catch (err: any) {
+                const message = err.message ?? String(err);
+                // Submission itself failed — only surface an error on the
+                // button when nothing else is still running on this pod.
+                if (podId) {
+                    setPods((prev) =>
+                        prev.map((p) =>
+                            p.id === podId && p.activeGenerationIds.length === 0
+                                ? { ...p, run: { status: 'error', events: [], message } }
+                                : p
+                        )
+                    );
+                }
+                throw err;
             }
         },
-        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow, cancelDirectIdleTimer]
+        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow]
     );
 
     // ── New workflow ───────────────────────────────────────────────
@@ -347,7 +280,6 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             gpu,
             pod_url: '',
             status: 'spawning',
-            failCount: 0,
             activeGenerationIds: [],
             run: { status: 'idle' }
         };
@@ -359,11 +291,11 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         console.log(`[Generate] Spawning Pod#${podNumber} on gpu=${gpu}...`);
         let podUrl: string;
         try {
-            const result = await cloud(baseUrl, { type: 'create', gpu });
-            if (!('pod_url' in result)) {
+            const result = await cloudCreate(baseUrl, { gpu });
+            podUrl = result.pod_url;
+            if (!podUrl) {
                 throw new Error('Pod spawn response did not contain pod_url');
             }
-            podUrl = (result as { pod_url: string }).pod_url;
         } catch (err: any) {
             // Spawn failed — no pod_url ever existed; remove the button.
             setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
@@ -380,9 +312,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             const normalized = normalizePodUrl(podUrl);
             return prev
                 .filter((p) => p.id === podEntry.id || !p.pod_url || normalizePodUrl(p.pod_url) !== normalized)
-                .map((p) =>
-                    p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p
-                );
+                .map((p) => (p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready' } : p));
         });
 
         // Step 4 — snapshot + submit for server-side processing.
@@ -397,8 +327,8 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
 
     // ── Pod button (A00): same as New but reuses an existing pod_url ──
     // NEVER blocked while running: each click queues ANOTHER job on the
-    // pod. The server scopes each submission with its own client_id and
-    // filters the shared pod stream by prompt_id, so every generation
+    // pod. The server marks each submission with its own prompt_id and
+    // demultiplexes the shared pod stream by it, so every generation
     // json only receives its own job's events.
     //
     // generationOverride: rerun with a stored generation snapshot (result
@@ -444,32 +374,35 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         [handlePodGenerate]
     );
 
-    // ── Server pod-list polling (auto-update the pod buttons) ────────
+    // ── Server pod-list polling — the pod buttons' ONLY liveness source ─
     // GET /v1/comfy/cloud returns every pod whose persistent websocket the
-    // server currently holds. Pods the UI does not know yet — spawned by
-    // another client, or surviving a page refresh while the server kept
-    // running — are added as ready pod buttons automatically.
+    // server still holds; the pod buttons are a pure mirror of it:
+    // unknown listed pods are ADDED as ready buttons (spawned elsewhere,
+    // page refresh), and local pods that STOP being listed are REMOVED —
+    // pods are designed to die when idle and never reconnect, so the server
+    // deregistering one is a definitive death verdict, not a timeout guess.
     //
-    // Removal is intentionally NOT done here: disappearing from the list
-    // means the cloud server terminated the pod's socket, and the per-pod
-    // heartbeat strikes (below) already own the error → removal path.
+    // A failed LIST request skips the tick entirely: an unreachable server
+    // must never clear the local buttons.
     React.useEffect(() => {
         let running = false;
         const syncServerPods = async () => {
-            if (running) return;
+            if (running) return; // previous tick still in flight — skip
             running = true;
             try {
                 const { pods: serverPods } = await cloudListPods(baseUrl);
-                const activePods = serverPods.filter((sp) => sp.active);
-                if (activePods.length === 0) return;
+                // The authoritative liveness set, keyed the same way the
+                // server keys its registry (URL.toString() normalization).
+                const serverUrls = new Set(serverPods.map((sp) => normalizePodUrl(sp.pod_url)));
 
-                // Compare against the freshest state via the ref — a slow
-                // poll must not re-add a pod the user already removed.
+                // Additions are computed against the freshest state (ref) —
+                // a slow poll must not re-add a pod the user lost since;
+                // the commit below re-dedupes atomically.
                 const knownUrls = new Set(
                     podsRef.current.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
                 );
                 const additions: PodEntry[] = [];
-                for (const serverPod of activePods) {
+                for (const serverPod of serverPods) {
                     const normalized = normalizePodUrl(serverPod.pod_url);
                     if (knownUrls.has(normalized)) continue;
                     knownUrls.add(normalized);
@@ -482,112 +415,62 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                         gpu: serverPod.gpu,
                         pod_url: serverPod.pod_url,
                         status: 'ready',
-                        failCount: 0,
                         activeGenerationIds: [],
                         run: { status: 'idle' }
                     });
                 }
-                if (additions.length === 0) return;
-                console.log(
-                    `[Pods] Server reported ${additions.length} unknown pod(s) — adding buttons: ` +
-                        additions.map((a) => a.pod_url).join(', ')
-                );
-                // Re-check inside the updater: a pod added between the
-                // async fetch and this commit must not duplicate.
+
                 setPods((prev) => {
+                    // Removals: resolved pods the server stopped listing.
+                    // Placeholders (pod_url === '' — create still in flight)
+                    // are invisible to the server list and never judged.
+                    const removed: PodEntry[] = [];
+                    const kept = prev.filter((p) => {
+                        if (!p.pod_url) return true;
+                        if (serverUrls.has(normalizePodUrl(p.pod_url))) return true;
+                        removed.push(p);
+                        return false;
+                    });
+
+                    // Re-dedupe the additions against the commit-time state:
+                    // a pod added between the fetch and this commit (spawn
+                    // resolution, earlier poll) must not duplicate.
                     const prevUrls = new Set(
-                        prev.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
+                        kept.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
                     );
-                    const fresh = additions.filter((a) => !prevUrls.has(normalizePodUrl(a.pod_url)));
-                    return fresh.length > 0 ? [...prev, ...fresh] : prev;
+                    const fresh = additions.filter((a) => {
+                        const normalized = normalizePodUrl(a.pod_url);
+                        if (prevUrls.has(normalized)) return false;
+                        prevUrls.add(normalized);
+                        return true;
+                    });
+
+                    if (removed.length === 0 && fresh.length === 0) return prev;
+                    if (removed.length > 0) {
+                        console.warn(
+                            `[Pods] Server no longer holds ${removed.length} pod(s) — removing button(s): ` +
+                                removed.map((p) => `Pod#${p.podNumber} (${p.pod_url})`).join(', ')
+                        );
+                    }
+                    if (fresh.length > 0) {
+                        console.log(
+                            `[Pods] Server reported ${fresh.length} unknown pod(s) — adding buttons: ` +
+                                fresh.map((a) => a.pod_url).join(', ')
+                        );
+                    }
+                    return [...kept, ...fresh];
                 });
             } catch {
-                // Best-effort — the heartbeat's strike path still owns
-                // dead-pod detection when the list endpoint is unreachable.
+                // The LIST endpoint itself failed — skip the tick. Buttons
+                // are only ever reconciled from a definitive server answer.
             } finally {
                 running = false;
             }
         };
         void syncServerPods();
-        const interval = setInterval(() => void syncServerPods(), POD_HEARTBEAT_MS);
+        const interval = setInterval(() => void syncServerPods(), POD_LIST_POLL_MS);
         return () => clearInterval(interval);
     }, [baseUrl]);
-
-    // ── Native ComfyUI heartbeat ─────────────────────────────────────
-    // Every websocket-backed status probe resets the pod's strike counter on
-    // success. A failure (pod unreachable or health.healthy === false) records a strike:
-    // the first strike marks the pod as error (button disabled, stays
-    // visible in case it recovers); once strikes reach MAX_POD_FAILURES
-    // the pod's pod_url is considered dead and the pod is removed
-    // entirely — its "#N" button disappears.
-    //
-    // Skips the tick if the previous one is still in flight (cold start).
-
-    // Record a failed heartbeat probe for a pod. Reads the freshest entry
-    // from state so concurrent success/reset can't clobber the count.
-    const strikePod = React.useCallback((podId: string, message: string) => {
-        setPods((prev) => {
-            const current = prev.find((ep) => ep.id === podId);
-            if (!current) return prev;
-            const failCount = current.failCount + 1;
-            if (failCount >= MAX_POD_FAILURES) {
-                console.warn(
-                    `[Heartbeat] Pod#${current.podNumber} removed — pod_url stopped working ` +
-                        `(${failCount} consecutive probe failures, last: ${message})`
-                );
-                return prev.filter((ep) => ep.id !== podId);
-            }
-            console.warn(
-                `[Heartbeat] Pod#${current.podNumber} probe failed (${failCount}/${MAX_POD_FAILURES}): ${message}`
-            );
-            return prev.map((ep) => (ep.id === podId ? { ...ep, status: 'error', failCount, error: message } : ep));
-        });
-    }, []);
-
-    React.useEffect(() => {
-        let running = false;
-        const interval = setInterval(async () => {
-            if (running) return; // previous tick still in flight — skip
-            running = true;
-            try {
-                const currentPods = podsRef.current;
-                for (const p of currentPods) {
-                    // Probe ready AND previously-failed pods so they can
-                    // either recover or accumulate the final strike.
-                    if (!shouldProbePod(p)) continue;
-                    try {
-                        const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
-                        const statusResult = result as CloudPodStatusResult;
-                        const healthy = 'health' in result ? statusResult.health?.healthy !== false : true;
-                        if (healthy) {
-                            // Alive — clear strikes, refresh native health, and
-                            // mark the button ready.
-                            setPods((prev) =>
-                                prev.map((ep) =>
-                                    ep.id === p.id
-                                        ? {
-                                              ...ep,
-                                              status: 'ready',
-                                              failCount: 0,
-                                              error: undefined,
-                                              health: statusResult
-                                          }
-                                        : ep
-                                )
-                            );
-                        } else {
-                            strikePod(p.id, statusResult.health?.error ?? 'pod reported unhealthy');
-                        }
-                    } catch (err: any) {
-                        strikePod(p.id, err.message ?? String(err));
-                    }
-                }
-            } finally {
-                running = false;
-            }
-        }, POD_HEARTBEAT_MS);
-        return () => clearInterval(interval);
-    }, [baseUrl, strikePod]);
 
     return { pods, handleGenerate, handlePodGenerate, handleAutoGenerate };
 }

@@ -15,6 +15,7 @@ export * from './workflow-serialize';
 export * from './prompt-fields';
 export * from './input-fields';
 export * from './formatting';
+export * from './viewer-audio';
 export * from './useMediaQuery';
 export * from './useDebouncedSearch';
 export * from './useGenerationsPolling';

@@ -7,7 +7,8 @@
 //
 // Verifies:
 //   1. Empty / no-ready-pod lists produce null.
-//   2. Spawning, error (heartbeat-struck) and url-less pods are ineligible.
+//   2. Spawning and url-less pods are ineligible (server-list reconciliation
+//      removes dead pods outright — there is no local "error" state).
 //   3. The least-loaded ready pod wins.
 //   4. Ties resolve to the oldest pod (array order == spawn order).
 //   5. Ineligible pods lose even with an empty queue.
@@ -25,7 +26,6 @@ function makePod(overrides: Partial<PodEntry> = {}): PodEntry {
         name: `P${seq}`,
         pod_url: `https://pod-${seq}.example.com`,
         status: 'ready',
-        failCount: 0,
         run: { status: 'idle' },
         activeGenerationIds: [],
         ...overrides
@@ -41,10 +41,10 @@ describe('pickLeastLoadedPod', () => {
         expect(pickLeastLoadedPod([])).toBeNull();
     });
 
-    it('returns null when no pod is ready (spawning / error / no pod_url)', () => {
+    it('returns null when no pod is ready (spawning / no pod_url)', () => {
         const pods = [
             makePod({ status: 'spawning', pod_url: '' }),
-            makePod({ status: 'error', error: 'heartbeat failed' }),
+            makePod({ status: 'spawning' }),
             makePod({ pod_url: '' })
         ];
         expect(pickLeastLoadedPod(pods)).toBeNull();
@@ -72,8 +72,8 @@ describe('pickLeastLoadedPod', () => {
     });
 
     it('ignores ineligible pods even when their queue is emptier', () => {
-        const struck = makePod({ status: 'error', activeGenerationIds: jobs(0) });
+        const spawning = makePod({ status: 'spawning', activeGenerationIds: jobs(0) });
         const ready = makePod({ activeGenerationIds: jobs(2) });
-        expect(pickLeastLoadedPod([struck, ready])).toBe(ready);
+        expect(pickLeastLoadedPod([spawning, ready])).toBe(ready);
     });
 });

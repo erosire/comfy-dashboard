@@ -202,7 +202,8 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
  * matched by prompt_id); never throws — failures land in the generation
  * entry itself. Terminals: execution_success / execution_interrupted
  * (completion) and execution_error / prompt_error (failure, incl. the
- * registry's socket-death terminal).
+ * registry's socket-death terminal — pods are designed to die when idle
+ * and never reconnect, so a dropped socket is a final verdict).
  */
 function trackGenerationOnPod(
     root: string,
