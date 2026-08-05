@@ -14,12 +14,11 @@
 //
 // Pod buttons appear the moment a GPU is picked (loading border ring
 // while the pod_url resolves), labeled with the GPU name plus the queued
-// job count badge while busy ("3" = three jobs in flight). The
-// border style marks what the pod_url fronts: SOLID a DIRECT ComfyUI
-// server (native websocket + /prompt), DASHED a Tier 2 proxy. They carry
-// their own status: circular loading border while spawning / while jobs
-// are in flight, colored border for the last settled result, heartbeat
-// removal when the pod_url dies.
+// job count badge while busy ("3" = three jobs in flight). Every button
+// represents a native ComfyUI websocket connection and carries its own
+// status: circular loading while spawning / while jobs are in flight,
+// colored border for the last settled result, and heartbeat removal when
+// the pod_url dies.
 
 import React from 'react';
 import { theme } from '../../../styles';
@@ -101,20 +100,14 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 +
             </BtnPrimary>
 
-            {/* 4090 / B300 with a numeric queue badge: queue another generation on an existing pod
-                (skips pod creation). Sits immediately right of New. The
-                label is the pod's GPU name with the queued job count while
-                busy; the border STYLE marks what the pod_url fronts: solid
-                a DIRECT ComfyUI server (native websocket + /prompt), dashed
-                a Tier 2 proxy. */}
+            {/* 4090 / B300 with a numeric queue badge: queue another generation
+                on an existing native ComfyUI websocket. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';
                 const inFlight = p.activeGenerationIds.length;
                 const isLoading = isSpawning || inFlight > 0;
                 const letter = podLetter(p.podNumber);
                 const isDisabled = isSpawning || nodeCount === 0 || !p.pod_url || p.status !== 'ready';
-                const linkDesc =
-                    p.is_direct === undefined ? '' : p.is_direct ? 'direct ComfyUI' : 'via proxy';
                 // Keep the settled run state and active queue state visible in
                 // the styled button while leaving the badge to show only N.
                 const borderColor = isLoading
@@ -137,14 +130,14 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                                   ? `Pod ${letter} — ${p.error || 'unavailable'} ` +
                                     `(heartbeat ${p.failCount}/${MAX_POD_FAILURES}, removed if it keeps failing)`
                                   : inFlight > 0
-                                    ? `Pod ${letter}${linkDesc ? ` (${linkDesc})` : ''} — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
+                                    ? `Pod ${letter} (ComfyUI websocket) — ${inFlight} job${inFlight !== 1 ? 's' : ''} ` +
                                       `in flight on ${p.pod_url} — click to queue another`
-                                   : `Queue a new generation on ${p.pod_url}${linkDesc ? ` — ${linkDesc}` : ''}`
+                                  : `Queue a new generation on ${p.pod_url} over the ComfyUI websocket`
                         }
-                        borderStyle={p.is_direct === false ? 'dashed' : 'solid'}
+                        borderStyle="solid"
                         borderColor={borderColor}
                         data-testid={`pod-generate-${p.podNumber}`}
-                        data-direct={p.is_direct === undefined ? 'unknown' : p.is_direct ? 'direct' : 'proxy'}
+                        data-transport="websocket"
                     >
                         {podButtonLabel(p, inFlight)}
                         {podButtonQueueBadge(p, inFlight) && (

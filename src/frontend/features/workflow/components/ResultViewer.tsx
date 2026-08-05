@@ -465,7 +465,7 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                 least-loaded ready pod; visible only while such a pod
                 exists). Mirrors the footer's New/pod/Auto styling: loading
                 ring while spawning / jobs in flight, settled-state border
-                colors, solid border = direct ComfyUI / dashed = proxy. */}
+                colors; every pod uses the native ComfyUI websocket transport. */}
             {onGenerate && (
                 <div
                     onClick={(e) => e.stopPropagation()}
@@ -541,9 +541,10 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                                 `queue the run on ${p.pod_url} (the generation saves on this workflow)`
                                               : `Queue this image's prompt on ${p.pod_url}`
                                 }
-                                borderStyle={p.is_direct === false ? 'dashed' : 'solid'}
+                                borderStyle="solid"
                                 borderColor={borderColor}
                                 data-testid={`viewer-pod-generate-${p.podNumber}`}
+                                data-transport="websocket"
                             >
                                 {podButtonLabel(p, inFlight)}
                                 {podButtonQueueBadge(p, inFlight) && (

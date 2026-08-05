@@ -1,9 +1,6 @@
 // =============================================================================
-// Direct-ComfyUI pod support tests (endpoints/cloud/direct-comfy.ts), plus
-// the shape dispatch wired around the two per-shape modules: the is_direct
-// detection in endpoints/cloud/cloud.ts and the stale-flag 405 self-heal in
-// endpoints/cloud/cloud-prompt.ts. The sibling shape's tests live in
-// ./proxy-comfy.test.ts.
+// Direct-ComfyUI pod support tests (endpoints/cloud/direct-comfy.ts) and the
+// direct-only cloud endpoint wiring.
 //
 // The websocket is replaced with a deterministic EventTarget fake and fetch
 // is stubbed, so detection and the
@@ -183,7 +180,7 @@ describe('submitDirectPrompt', () => {
         expect(testState.sockets[0].url).toBe(`wss://pod-a.example/ws?clientId=${CLIENT_ID}`);
     });
 
-    it('translates websocket messages into the proxy NDJSON vocabulary', async () => {
+    it('translates websocket messages into the direct NDJSON stream', async () => {
         const fetchMock = vi.mocked(fetch);
         fetchMock.mockResolvedValue(
             new Response(JSON.stringify({ prompt_id: 'prompt-001', number: 5, node_errors: {} }), {
@@ -206,16 +203,16 @@ describe('submitDirectPrompt', () => {
 
         const lines = await readStreamLines(response);
         expect(lines).toEqual([
-            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-001', number: 5, node_errors: {} } },
+            { type: 'prompt_queued', data: { prompt_id: 'prompt-001', number: 5, node_errors: {} } },
             { type: 'executing', data: { node: '9', prompt_id: 'prompt-001' } },
             {
                 type: 'imagepreview.update',
                 data: { node_id: '9', image: `data:image/png;base64,${Buffer.from([137, 80, 78, 71]).toString('base64')}` }
             },
             { type: 'execution_success', data: { prompt_id: 'prompt-001' } },
-            { type: 'proxy_done', data: {} }
+            { type: 'prompt_done', data: {} }
         ]);
-        // The proxy stream is complete, but the server keeps the native
+        // The dashboard stream is complete, but the server keeps the native
         // websocket open for ComfyUI's final writes and its five-minute idle
         // cleanup window.
         expect(socket.readyState).toBe(1);
@@ -240,7 +237,7 @@ describe('submitDirectPrompt', () => {
 
         const lines = await readStreamLines(response);
         expect(lines).toEqual([
-            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-001', number: 5, node_errors: nodeErrors } },
+            { type: 'prompt_queued', data: { prompt_id: 'prompt-001', number: 5, node_errors: nodeErrors } },
             {
                 type: 'execution_error',
                 data: {
@@ -294,8 +291,8 @@ describe('submitDirectPrompt', () => {
         testState.sockets[0].close();
 
         await expect(readStreamLines(response)).resolves.toEqual([
-            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-close', number: 1, node_errors: {} } },
-            { type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } }
+            { type: 'prompt_queued', data: { prompt_id: 'prompt-close', number: 1, node_errors: {} } },
+            { type: 'prompt_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } }
         ]);
     });
 
@@ -318,8 +315,8 @@ describe('submitDirectPrompt', () => {
         await vi.advanceTimersByTimeAsync(DIRECT_WS_HEARTBEAT_MS);
 
         await expect(linesPromise).resolves.toEqual([
-            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-ping', number: 1, node_errors: {} } },
-            { type: 'proxy_error', data: { error: 'ComfyUI websocket stopped responding: ping failed' } }
+            { type: 'prompt_queued', data: { prompt_id: 'prompt-ping', number: 1, node_errors: {} } },
+            { type: 'prompt_error', data: { error: 'ComfyUI websocket stopped responding: ping failed' } }
         ]);
     });
 
@@ -341,39 +338,17 @@ describe('submitDirectPrompt', () => {
         await vi.advanceTimersByTimeAsync(DIRECT_WS_RESPONSE_TIMEOUT_MS);
 
         await expect(linesPromise).resolves.toEqual([
-            { type: 'proxy_enqueue', data: { prompt_id: 'prompt-timeout', number: 1, node_errors: {} } },
+            { type: 'prompt_queued', data: { prompt_id: 'prompt-timeout', number: 1, node_errors: {} } },
             {
-                type: 'proxy_error',
+                type: 'prompt_error',
                 data: { error: `ComfyUI websocket stopped responding for ${DIRECT_WS_RESPONSE_TIMEOUT_MS / 1000}s` }
             }
         ]);
     });
 });
 
-describe('POST /v1/comfy/cloud — is_direct detection', () => {
-    it('reports is_direct: false for a Tier 2 proxy pod (JSON status, websocket refused)', async () => {
-        testState.openBehavior = 'refused';
-        vi.mocked(fetch).mockImplementation(async (input: any) => {
-            const url = String(input);
-            if (url === `${POD_URL}/`) {
-                return new Response(JSON.stringify({ health: { healthy: true }, models_dir: '/models', models: {} }), {
-                    status: 200,
-                    headers: { 'content-type': 'application/json' }
-                });
-            }
-            throw new Error(`Unexpected fetch: ${url}`);
-        });
-
-        const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
-        expect(result.status).toBe(200);
-        expect(result.response).toMatchObject({
-            is_direct: false,
-            health: { healthy: true },
-            models_dir: '/models'
-        });
-    });
-
-    it('reports is_direct: true and rebuilds health for a direct ComfyUI pod (HTML at /, websocket opens)', async () => {
+describe('POST /v1/comfy/cloud — direct ComfyUI status', () => {
+    it('reports native websocket health and system statistics', async () => {
         const systemStats = { system: { os: 'linux', comfyui_version: '0.3.40' }, devices: [] };
         vi.mocked(fetch).mockImplementation(async (input: any) => {
             const url = String(input);
@@ -396,7 +371,6 @@ describe('POST /v1/comfy/cloud — is_direct detection', () => {
         const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
         expect(result.status).toBe(200);
         expect(result.response).toMatchObject({
-            is_direct: true,
             health: { healthy: true, system_stats: systemStats },
             models_dir: '',
             models: {}
@@ -421,9 +395,8 @@ describe('POST /v1/comfy/cloud — is_direct detection', () => {
         const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
         expect(result.status).toBe(200);
         expect(result.response).toMatchObject({
-            is_direct: true,
-            // No system_stats at all — HTTP 200 on the base URL and the
-            // completed websocket handshake are the health signals.
+            // The completed websocket handshake is authoritative even when
+            // optional system statistics are unavailable.
             health: { healthy: true, checked: { http_ok: true, websocket: true } },
             models_dir: '',
             models: {}
@@ -437,12 +410,11 @@ describe('POST /v1/comfy/cloud — is_direct detection', () => {
         const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
         expect(result.status).toBe(200);
         expect(result.response).toMatchObject({
-            is_direct: true,
             health: { healthy: true, checked: { http_ok: false, websocket: true } }
         });
     });
 
-    it('returns 502 when the pod answers HTTP 200 HTML but refuses the websocket (neither proxy nor ComfyUI)', async () => {
+    it('returns 502 when the pod refuses the native websocket', async () => {
         testState.openBehavior = 'refused';
         vi.mocked(fetch).mockResolvedValue(
             new Response('<!doctype html><html>some other web server</html>', {
@@ -453,18 +425,16 @@ describe('POST /v1/comfy/cloud — is_direct detection', () => {
 
         const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
         expect(result.status).toBe(502);
-        expect(result.response).toMatchObject({ is_direct: false });
-        expect(String((result.response as any).error)).toContain('refused the ComfyUI websocket');
+        expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
     });
 
-    it('returns 502 when neither the proxy status nor the websocket answer', async () => {
+    it('returns 502 when the native websocket cannot be reached', async () => {
         testState.openBehavior = 'refused';
         vi.mocked(fetch).mockRejectedValue(new Error('connect ECONNREFUSED'));
 
         const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
         expect(result.status).toBe(502);
-        expect(result.response).toMatchObject({ is_direct: false });
-        expect(String((result.response as any).error)).toContain('ECONNREFUSED');
+        expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
     });
 
     it('rejects an invalid pod_url', async () => {
@@ -473,16 +443,12 @@ describe('POST /v1/comfy/cloud — is_direct detection', () => {
     });
 });
 
-describe('POST /v1/comfy/cloud/prompt — stale-flag self-heal', () => {
-    it('retries a proxy submission answered with HTTP 405 over the direct websocket', async () => {
+describe('POST /v1/comfy/cloud/prompt — native websocket transport', () => {
+    it('opens the native websocket and posts directly to /prompt', async () => {
         const calls: string[] = [];
         vi.mocked(fetch).mockImplementation(async (input: any, init: any) => {
             const url = String(input);
             calls.push(`${init?.method ?? 'GET'} ${url}`);
-            if (url === `${POD_URL}/`) {
-                // Native ComfyUI: POST / is not a route.
-                return new Response('Method Not Allowed', { status: 405 });
-            }
             if (url === `${POD_URL}/prompt`) {
                 const payload = JSON.parse(init.body);
                 expect(payload.client_id).toBe(CLIENT_ID);
@@ -505,9 +471,7 @@ describe('POST /v1/comfy/cloud/prompt — stale-flag self-heal', () => {
         );
 
         expect(result.status).toBe(200);
-        // Proxy attempt first, native /prompt retry second.
-        expect(calls).toEqual([`POST ${POD_URL}/`, `POST ${POD_URL}/prompt`]);
-        // The retry opened exactly one direct websocket.
+        expect(calls).toEqual([`POST ${POD_URL}/prompt`]);
         expect(testState.sockets).toHaveLength(1);
         expect(testState.sockets[0].url).toBe(`wss://pod-a.example/ws?clientId=${CLIENT_ID}`);
 
@@ -517,32 +481,9 @@ describe('POST /v1/comfy/cloud/prompt — stale-flag self-heal', () => {
 
         const lines = await readStreamLines((result as any).raw as Response);
         expect(lines.at(0)).toEqual({
-            type: 'proxy_enqueue',
+            type: 'prompt_queued',
             data: { prompt_id: 'prompt-405', number: 1, node_errors: {} }
         });
-        expect(lines.at(-1)).toEqual({ type: 'proxy_done', data: {} });
-    });
-
-    it('leaves non-405 pod errors untouched (no websocket retry)', async () => {
-        vi.mocked(fetch).mockImplementation(async (input: any, init: any) => {
-            const url = String(input);
-            if (url === `${POD_URL}/` && init?.method === 'POST') {
-                return new Response(JSON.stringify({ error: 'bad prompt' }), {
-                    status: 400,
-                    headers: { 'content-type': 'application/json' }
-                });
-            }
-            throw new Error(`Unexpected fetch: ${url}`);
-        });
-
-        const result = await cloudPrompt(
-            context(),
-            parameters({ pod_url: POD_URL, prompt: { '3': { class_type: 'KSampler', inputs: {} } } }),
-            {}
-        );
-
-        expect(result.status).toBe(400);
-        expect((result as any).response).toEqual({ error: 'bad prompt' });
-        expect(testState.sockets).toHaveLength(0);
+        expect(lines.at(-1)).toEqual({ type: 'prompt_done', data: {} });
     });
 });

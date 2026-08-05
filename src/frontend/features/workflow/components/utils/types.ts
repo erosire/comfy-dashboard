@@ -21,18 +21,8 @@ export type PodEntry = {
      */
     gpu?: string;
     /**
-     * What the pod_url fronts: true = a DIRECT ComfyUI server (native
-     * websocket at /ws — prompt over POST /cloud/prompt with
-     * `is_direct: true`), false = Tier 2 ComfyProxy. Learned from the
-     * create/status responses' `is_direct` (undefined until detected).
-     * Renders as the pod button's border style: solid = direct, dashed =
-     * proxy.
-     */
-    is_direct?: boolean;
-    /**
-     * Consecutive heartbeat failures. Reset to 0 on every successful probe.
-     * The pod (and its "#N" button) is removed once this reaches
-     * MAX_POD_FAILURES — i.e. when the pod_url has stopped working.
+     * Consecutive native websocket health-check failures. Reset to 0 on every
+     * successful direct probe; the pod is removed after the configured limit.
      */
     failCount: number;
     run: RunState;

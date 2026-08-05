@@ -54,32 +54,21 @@ export function podButtonQueueBadge(pod: PodEntry, inFlight: number): string | n
 }
 
 /**
- * Heartbeat eligibility for the keepalive/strike probe. The heartbeat
- * exists for Tier 2 PROXY pods: they scale to zero ~120s after the last
- * active connection (the probe resets that idle timer) and a dead proxy
- * pod_url should garbage-collect itself after MAX_POD_FAILURES strikes.
- *
- * A DIRECT ComfyUI pod is a standalone server — there is no idle
- * scale-to-zero timer to reset and no proxy health document to poll, so
- * the keepalive heartbeat makes no sense: skip it outright. Reachability
- * problems surface at prompt-submission time (the run error lands on the
- * pod button) instead of via background strikes.
- *
- * Pods whose shape isn't detected yet stay eligible — the probe is what
- * resolves is_direct for a misdetected pod, after which it drops out.
+ * Heartbeat eligibility for native ComfyUI pods. The websocket-backed status
+ * probe runs for every resolved pod so a dropped connection is visible in the
+ * button state before a user queues another generation.
  */
-export function shouldHeartbeatPod(p: PodEntry): boolean {
+export function shouldProbePod(p: PodEntry): boolean {
     if (p.status === 'spawning' || !p.pod_url) return false;
-    return p.is_direct !== true;
+    return true;
 }
 
 /**
- * Direct pods are local UI resources once their accepted generation queue is
- * empty. This predicate intentionally ignores proxy pods and unresolved pods;
- * proxy lifecycle remains governed by its heartbeat strike policy.
+ * A native pod is locally idle once its accepted generation queue is empty.
+ * Pending submissions are handled separately by the hook before this check.
  */
-export function isDirectPodIdle(p: PodEntry): boolean {
-    return p.is_direct === true && p.status !== 'spawning' && Boolean(p.pod_url) && p.activeGenerationIds.length === 0;
+export function isPodIdle(p: PodEntry): boolean {
+    return p.status !== 'spawning' && Boolean(p.pod_url) && p.activeGenerationIds.length === 0;
 }
 
 /**

@@ -12,51 +12,25 @@
 //    immediate 202 and observes progress by polling
 //    GET /v1/comfy/workflows/:id/generate.
 //
-// 2) Legacy proxy mode — no workflow reference.
-//    The pod's NDJSON stream is proxied back to the caller as-is
-//    (application/x-ndjson) for the client to consume.
-//
-// Two pod branches (orthogonal to the modes above) — each comfy server
-// shape owns a sibling module here; this file just DISPATCHES between
-// them (add a third shape's module in the same style and wire its branch
-// into `submit` below):
-//
-// - `is_direct: false | omitted` — PROXY flow (./proxy-comfy.ts):
-//   the whole prompt payload is POSTed to the Tier 2 ComfyProxy (the
-//   pod_url itself) and its NDJSON response is consumed. SELF-HEALING: a
-//   native ComfyUI server has no POST / route and answers HTTP 405 — a
-//   proxy accepts prompt POSTs at / by design, so a 405 means the
-//   caller's is_direct flag was stale (e.g. the create-time probe raced a
-//   still-booting pod); the submission is then retried transparently
-//   through the direct websocket flow instead of failing the run.
-//
-// - `is_direct: true` — DIRECT ComfyUI flow (./direct-comfy.ts): the
-//   pod_url fronts a native ComfyUI server. A websocket is opened at
-//   <pod_url>/ws and the prompt is POSTed to the native <pod_url>/prompt.
-//   EVERY prompt request gets a FRESH client_id — ComfyUI routes a
-//   prompt's execution events only to the websocket whose client_id
-//   submitted it, so each request owns its stream and no cross-talk
-//   between jobs is possible. The received websocket messages are
-//   translated back into the proxy's NDJSON event vocabulary, so BOTH
-//   modes consume the result with the exact same logic.
+// 2) Direct stream mode — no workflow reference.
+//    The native websocket event stream is returned as application/x-ndjson
+//    for callers that need to observe a run directly.
 //
 // Common request fields (mirrors beam_comfy_service PromptRequest schema):
-//   - pod_url:   the pod URL (Tier 2 proxy, or direct ComfyUI)
+//   - pod_url:   the native ComfyUI pod URL
 //   - prompt:    the ORIGINAL workflow json snapshot (v0.4/v1 editor format
 //                — what the dashboard stores on every generation). Converted
 //                to the flat API prompt HERE, server-side, right before it
 //                goes out to the Comfy Cloud pod — the one place conversion
 //                happens, so stored documents stay lossless.
-//   - client_id: optional client identifier (32-char hex; proxy flow only —
-//                the direct flow always generates a fresh one per request)
+//   - client_id: accepted for compatibility and ignored; every request gets
+//                a fresh native websocket client id
 //   - extra_data: passed through to ComfyUI's POST /prompt extra_data
 //   - front / number: forwarded to ComfyUI POST /prompt
-//   - is_direct: optional — true selects the direct ComfyUI branch
+//
 
-import { randomUUID } from 'node:crypto';
 import { asHandlerMethod } from '@underload/service';
 import { newDirectClientId, submitDirectPrompt } from './direct-comfy';
-import { submitProxyPrompt } from './proxy-comfy';
 import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
 import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
@@ -66,15 +40,6 @@ import {
     type GenerationResultItem,
     type StreamEvent
 } from '../workflows/generation-store';
-
-/**
- * Generate a client_id for a prompt submission (32-char hex, as required
- * by the beam proxy / ComfyUI). One per submission: with several jobs
- * sharing a pod, this scopes which stream events belong to which job.
- */
-function newClientId(): string {
-    return randomUUID().replace(/-/g, '');
-}
 
 export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variables) => {
     const body = _parameters.body as {
@@ -86,7 +51,6 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         number?: number;
         workflow_id?: string;
         generation_id?: string;
-        is_direct?: boolean;
     };
 
     if (!body?.pod_url) {
@@ -115,9 +79,6 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     const promptPayload: Record<string, unknown> = {
         prompt: apiPrompt,
     };
-    if (body.client_id) {
-        promptPayload.client_id = body.client_id;
-    }
     if (body.extra_data !== undefined) {
         promptPayload.extra_data = body.extra_data;
     }
@@ -132,89 +93,15 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     const incomingHeaders = request.req.header() as Record<string, string>;
     const authorization = incomingHeaders.authorization;
 
-    // ── Pod branch: proxy (default) vs direct ComfyUI websocket ──────
-    // Both branches resolve their pod submission to a plain Response —
-    // Mode 1 and Mode 2 below consume it with IDENTICAL logic.
-    const isDirect = body.is_direct === true;
-
-    // The direct flow talks to ComfyUI's websocket under a FRESH client_id
-    // per prompt request: ComfyUI routes a prompt's execution events only
-    // to the socket whose client_id submitted it, so every job owns its
-    // own stream and jobs can never cross-read each other's events. Any
-    // caller-supplied client_id is overridden — that is the point of the
-    // direct branch.
-    const directClientId = isDirect ? newDirectClientId() : undefined;
-    if (directClientId) {
-        promptPayload.client_id = directClientId;
-    }
-
-    // Mutable submission plan — the 405 fallback below can correct a stale
-    // is_direct flag mid-flight and rewrites these fields; the background
-    // processor reads them at log time.
+    // Every request owns a fresh native websocket client id. The direct
+    // transport uses this value in both the websocket URL and POST /prompt.
+    const directClientId = newDirectClientId();
     const submission = {
-        origin: isDirect ? `${podUrl.toString()} (direct websocket)` : podUrl.toString(),
-        clientId: directClientId as string | undefined,
-        retried405: false
+        origin: `${podUrl.toString()} (ComfyUI websocket)`,
+        clientId: directClientId
     };
-
-    const submit = async (): Promise<Response> => {
-        if (directClientId) {
-            // Open <pod_url>/ws first, POST the native <pod_url>/prompt,
-            // and translate the socket back into the proxy's NDJSON event
-            // vocabulary (see ./direct-comfy.ts).
-            return submitDirectPrompt({
-                podUrl,
-                clientId: directClientId,
-                promptPayload,
-                authorization
-            });
-        }
-
-        // Tier 2 proxy shape — POST the payload to the pod_url itself and
-        // consume its NDJSON stream (see ./proxy-comfy.ts).
-        const upstream = await submitProxyPrompt({ podUrl, promptPayload, authorization });
-
-        // ── Stale-detection self-heal ─────────────────────────────
-        // A native ComfyUI server has no POST / route — it answers HTTP
-        // 405 Method Not Allowed. A Tier 2 proxy ACCEPTS prompt POSTs at
-        // / by design, so a 405 only ever means "this pod is actually
-        // direct and the caller's is_direct flag was stale" (e.g. the
-        // create-time probe raced a still-booting pod). Retry the same
-        // submission through the direct websocket flow so the run isn't
-        // stranded; the next status probe (UI heartbeat) corrects the
-        // flag going forward.
-        if (upstream.status !== 405) {
-            return upstream;
-        }
-
-        submission.retried405 = true;
-        // Reuse the submission's client_id when it's already a valid
-        // ComfyUI id (server-side processing mode always sets one) —
-        // the 202 response and stream scoping stay consistent.
-        submission.clientId =
-            typeof promptPayload.client_id === 'string' && /^[0-9a-f]{32}$/i.test(promptPayload.client_id)
-                ? promptPayload.client_id
-                : newDirectClientId();
-        promptPayload.client_id = submission.clientId;
-        submission.origin = `${podUrl.toString()} (direct websocket — retried after HTTP 405)`;
-        try {
-            return await submitDirectPrompt({
-                podUrl,
-                clientId: submission.clientId,
-                promptPayload,
-                authorization
-            });
-        } catch (err: any) {
-            // The 405 said native ComfyUI yet the websocket won't open —
-            // report the original 405 response; it is the accurate failure.
-            console.warn(
-                `[cloud/prompt] ${body.pod_url} answered HTTP 405 but the direct websocket retry failed: ` +
-                    (err?.message ?? String(err))
-            );
-            submission.retried405 = false;
-            return upstream;
-        }
-    };
+    const submit = (): Promise<Response> =>
+        submitDirectPrompt({ podUrl, clientId: directClientId, promptPayload, authorization });
 
     // ── Mode 1: server-side processing ──────────────────────────────
     // The client submits and is done — the server owns the pod stream
@@ -225,21 +112,9 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             return { status: 500, response: { error: 'Server misconfigured: missing project root' } };
         }
 
-        // One client_id per submission. Multiple generations can be queued
-        // on the same pod, and the pod broadcasts every execution event to
-        // all subscribers — this id ties the job to its prompt_id so the
-        // stream consumer keeps only this job's events. (The direct branch
-        // already fixed its fresh id above; ComfyUI only delivers the job's
-        // own events to its socket there.)
-        const clientId =
-            directClientId ??
-            (typeof body.client_id === 'string' && /^[0-9a-f]{32}$/i.test(body.client_id)
-                ? body.client_id
-                : newClientId());
-        promptPayload.client_id = clientId;
-        // Keep the traced plan in sync (the 405 fallback then reuses this
-        // id for its retry, keeping logs/202 consistent).
-        submission.clientId = clientId;
+        // The native client id was generated before this asynchronous branch,
+        // so the accepted response, websocket, and generation log correlate.
+        const clientId = directClientId;
 
         // Fire-and-forget — intentionally not awaited. The function never
         // rejects; all failures land in the generation file.
@@ -262,7 +137,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         };
     }
 
-    // ── Mode 2: legacy streaming proxy ──────────────────────────────
+    // ── Mode 2: direct websocket event stream ────────────────────────
     try {
         const upstream = await submit();
 
@@ -290,7 +165,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
             }),
         };
     } catch (err: any) {
-        console.error(`[cloud/prompt] Error proxying to ${body.pod_url}:`, err.message);
+        console.error(`[cloud/prompt] Error connecting to ${body.pod_url}:`, err.message);
         return {
             status: 502,
             response: { error: `Failed to reach pod: ${err.message}` },
@@ -306,19 +181,15 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
  * file. The event stream itself is traced into the sibling .log file only.
  * Never throws — failures are recorded in the generation entry itself.
  *
- * The pod-facing submission is injected as `submit`: the proxy branch
- * POSTs to the Tier 2 proxy, the direct branch opens the ComfyUI
- * websocket and POSTs the native /prompt — both resolve to a Response
- * whose NDJSON body this function consumes identically. `submission` is
- * the handler's mutable plan — it is read at log time so the 405-fallback
- * mid-flight corrections (direct origin, fresh client id) are traced
- * accurately.
+ * The pod-facing submission opens the native ComfyUI websocket before POST
+ * /prompt and resolves to a Response whose NDJSON body this function reads.
+ * `submission` records the direct URL and client id for the generation log.
  */
 async function processPodPromptInBackground(
     root: string,
     workflowId: string,
     generationId: string,
-    submission: { origin: string; clientId?: string; retried405: boolean },
+    submission: { origin: string; clientId?: string },
     submit: () => Promise<Response>
 ): Promise<void> {
     const startedAt = Date.now();
@@ -346,9 +217,6 @@ async function processPodPromptInBackground(
         }
 
         const upstream = await submit();
-        if (submission.retried405) {
-            log(`POST / answered HTTP 405 — native ComfyUI detected (stale is_direct flag); retried over the direct websocket (client_id: ${submission.clientId})`);
-        }
         log(`Pod responded HTTP ${upstream.status}`);
 
         if (!upstream.ok) {
@@ -413,8 +281,8 @@ async function processPodPromptInBackground(
 /**
  * Read the pod's NDJSON response to completion, capturing image previews
  * into `results` and counting events.
- * Returns `{ failure, eventCount }` — failure is the execution_error /
- * proxy_error message, else null.
+ * Returns `{ failure, eventCount }` — failure is the native execution_error
+ * or direct connection error message, else null.
  *
  * Every event is appended to the generation's .log (via `log`), which is
  * the chronological, human-readable trail of the run. Events are NOT
@@ -440,17 +308,17 @@ async function consumeNdjsonStream(
     // Several generations may share the pod at once; ComfyUI broadcasts
     // every execution event to all websocket subscribers, so this stream
     // can receive events belonging to OTHER jobs. Our submission's
-    // prompt_id is learned from the proxy_enqueue acknowledgement; from
+    // prompt_id is learned from the prompt_queued acknowledgement; from
     // then on, any event carrying a DIFFERENT prompt_id is dropped.
-    // Events without a prompt_id (status broadcasts, proxy_done, preview
-    // frames) cannot be attributed that way and are kept — proxy_done is
-    // emitted per subscription, so the stream still ends when OUR job
-    // (the one tied to our client_id) finishes.
+    // Events without a prompt_id (status broadcasts, prompt_done, preview
+    // frames) cannot be attributed that way and are kept — prompt_done is
+    // emitted per direct subscription, so the stream still ends when this
+    // client id's job finishes.
     let ourPromptId: string | null = null;
 
     /** Returns true when the event is terminal (stop reading). */
     const handleEvent = (event: StreamEvent): boolean => {
-        if (event.type === 'proxy_enqueue') {
+        if (event.type === 'prompt_queued') {
             const pid = (event.data as Record<string, unknown>)?.prompt_id;
             if (typeof pid === 'string') {
                 ourPromptId = pid;
@@ -486,7 +354,7 @@ async function consumeNdjsonStream(
             );
         }
 
-        if (event.type === 'execution_error' || event.type === 'proxy_error') {
+        if (event.type === 'execution_error' || event.type === 'prompt_error') {
             const data = event.data as Record<string, unknown>;
             failureMessage =
                 (data?.exception_message as string) ??
@@ -495,8 +363,8 @@ async function consumeNdjsonStream(
             log(`Terminal error (${event.type}): ${failureMessage}`);
             return true;
         }
-        if (event.type === 'proxy_done') {
-            log('proxy_done — stream ending');
+        if (event.type === 'prompt_done') {
+            log('prompt_done — stream ending');
             return true;
         }
         return false;

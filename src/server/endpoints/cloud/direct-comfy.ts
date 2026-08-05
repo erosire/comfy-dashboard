@@ -1,45 +1,17 @@
 // Direct-ComfyUI pod support for the cloud endpoints.
 //
-// One of the two comfy server shapes a pod_url handed back by the spawner
-// (or probed via POST /v1/comfy/cloud) can point at (see ./proxy-comfy.ts
-// for the other; ./cloud.ts probes both shapes and ./cloud-prompt.ts
-// dispatches the submission by `is_direct`):
+// Every cloud pod is the native ComfyUI server. This module owns the short
+// websocket readiness check and the per-generation websocket plus native
+// POST /prompt submission.
 //
-//   - Direct ComfyUI (this module): the pod_url IS the ComfyUI server.
-//     GET / serves the ComfyUI frontend HTML (not JSON), but it answers
-//     the native endpoints: GET /system_stats, POST /prompt, and the
-//     websocket at /ws?clientId=<id>.
+// A fresh client id is used for each generation because ComfyUI routes the
+// execution messages for a prompt to the websocket carrying that id. This
+// keeps concurrent dashboard generations isolated without a shared socket.
 //
-//   - Tier 2 proxy (./proxy-comfy.ts): GET / returns a JSON
-//     {health, models_dir, models} document and POST / executes a prompt
-//     while streaming progress back as NDJSON. There is no reachable
-//     ComfyUI websocket on that URL — the handshake is refused.
-//
-// Detection (probeDirectComfyUI) is exactly that websocket handshake:
-// if the connection can be opened the pod is a direct ComfyUI; a refused /
-// failed / timed-out handshake means it is not. probeDirectHealth then
-// synthesizes the proxy-shaped status document for the direct shape —
-// the native server has NO health JSON, so "base URL answered HTTP 200"
-// plus "websocket available" are its health signals, enriched with the
-// native GET /system_stats when it answers (models stay empty).
-//
-// Prompt submission (submitDirectPrompt) drives the native protocol —
-// open /ws under a FRESH client_id per request (ComfyUI routes a prompt's
-// execution events only to the websocket whose client_id submitted it, so
-// a per-request socket gives every job its own stream with no cross-talk),
-// then POST /prompt. The received websocket messages are translated into
-// the SAME NDJSON event vocabulary the Tier 2 proxy emits, so every
-// downstream consumer (server-side generation processing, legacy client
-// streaming) is shared, unchanged, with the proxy flow:
-//
-//   ComfyUI ws message                      →  stream event
-//   POST /prompt ack                        →  proxy_enqueue {prompt_id, number, node_errors}
-//   any JSON frame {type, data}             →  passed through unchanged
-//   binary preview frame (8-byte header)    →  imagepreview.update {node_id, image: data:<mime>;base64,…}
-//   execution_success / execution_interrupted  →  event, then proxy_done
-//   execution_error                         →  event, then stream end (terminal for consumers)
-//   node_errors in the POST ack             →  proxy_enqueue, then execution_error, then end
-//   socket closed / errored before the end  →  proxy_error {error}, then end
+// The dashboard endpoint exposes a small NDJSON envelope around native
+// websocket frames so generation persistence and the optional stream reader
+// consume the same ordered data. Envelope events are named prompt_queued,
+// prompt_done, and prompt_error; native ComfyUI frame types pass through.
 //
 // Binary preview frames follow ComfyUI's send_image wire format: an 8-byte
 // big-endian header — uint32 image kind (1 = JPEG, 2 = PNG), uint32 zero
@@ -93,7 +65,7 @@ const PREVIEW_IMAGE_JPEG = 1;
 const PREVIEW_IMAGE_PNG = 2;
 
 // Preserve a pod URL's prefix path while appending a native ComfyUI route.
-// This supports deployments mounted below a non-root reverse-proxy path.
+// This supports deployments mounted below a non-root gateway path.
 function serverRoute(podUrl: URL, route: string): URL {
     const result = new URL(podUrl.toString());
     const basePath = result.pathname.replace(/\/+$/, '');
@@ -155,8 +127,8 @@ export function newDirectClientId(): string {
 /**
  * Direct-ComfyUI detection: attempt to open the native ComfyUI websocket
  * at <pod_url>/ws?clientId=<throwaway id>. True when the handshake
- * completes; false when it is refused/errors/times out (i.e. the pod_url
- * fronts a proxy, or the pod is unreachable).
+ * completes; false when it is refused/errors/times out and the pod is
+ * unavailable for a native ComfyUI run.
  */
 export async function probeDirectComfyUI(podUrl: URL, timeoutMs: number = DIRECT_WS_PROBE_TIMEOUT_MS): Promise<boolean> {
     let socket: WebSocket;
@@ -181,16 +153,24 @@ export async function probeDirectComfyUI(podUrl: URL, timeoutMs: number = DIRECT
 }
 
 /**
- * Synthesize the proxy-shaped status document for a DIRECT ComfyUI pod —
- * the direct shape's half of the status answer POST /v1/comfy/cloud
- * returns (the proxy shape's half is the JSON status document itself, see
- * ./proxy-comfy.ts probeProxyStatus). The health signal is already
- * established by the caller — base URL answered HTTP 200 and the
- * websocket handshake completed — so this only enriches the report with
- * the native GET /system_stats when it answers. Models are not listed on
- * the native server; the listing stays empty.
+ * Build the direct pod status document after a websocket handshake succeeds.
+ * The native server has no model-list endpoint used by this dashboard, so
+ * those fields remain empty while /system_stats is copied when it answers.
+ * Root HTTP failure is diagnostic only because the websocket is authoritative.
  */
-export async function probeDirectHealth(podUrl: URL, http: { ok: boolean }): Promise<any> {
+export async function probeDirectHealth(podUrl: URL): Promise<any> {
+    let httpOk = false;
+    try {
+        const root = await fetch(serverRoute(podUrl, '/').toString(), {
+            method: 'GET',
+            headers: { Accept: 'text/html' },
+            signal: AbortSignal.timeout(DIRECT_STATS_PROBE_TIMEOUT_MS)
+        });
+        httpOk = root.ok;
+    } catch (error: any) {
+        console.warn(`[cloud] Direct pod root probe failed: ${error?.message ?? String(error)}`);
+    }
+
     let system_stats: unknown;
     try {
         const upstream = await fetch(serverRoute(podUrl, '/system_stats').toString(), {
@@ -209,10 +189,10 @@ export async function probeDirectHealth(podUrl: URL, http: { ok: boolean }): Pro
 
     return {
         health: {
-            // healthy := HTTP 200 on the base URL AND the websocket
-            // handshake succeeded (checked by the caller).
+            // The caller already completed the websocket handshake; root HTTP
+            // is retained as a diagnostic signal and may fail independently.
             healthy: true,
-            checked: { http_ok: http.ok, websocket: true },
+            checked: { http_ok: httpOk, websocket: true },
             ...(system_stats !== undefined ? { system_stats } : {})
         },
         models_dir: '',
@@ -237,18 +217,16 @@ export type DirectSubmitOptions = {
 };
 
 /**
- * Submit a prompt to a DIRECT ComfyUI pod (is_direct: true flow).
+ * Submit a prompt to a direct ComfyUI pod.
  *
  * Opens the native websocket under `clientId`, POSTs the prompt to the
- * native /prompt endpoint, and returns a Response shaped exactly like the
- * Tier 2 proxy's: when the pod rejects the submission (non-2xx) its real
- * Response is handed back for the shared !ok error path; when accepted,
- * the Response carries a synthesized application/x-ndjson body that the
- * shared consumers read identically to a proxy stream.
+ * native /prompt endpoint. When the pod rejects the submission (non-2xx),
+ * its native Response is handed back for the shared error path; when
+ * accepted, the Response carries an application/x-ndjson direct event stream.
  *
  * Throws (socket handshake refused, network failure, malformed ack) for
- * the same 502 / failed-generation handling the proxy flow's fetch
- * exception receives.
+ * the same 502 / failed-generation handling the native fetch exception
+ * receives.
  */
 export async function submitDirectPrompt(options: DirectSubmitOptions): Promise<Response> {
     const { podUrl, clientId, promptPayload, authorization } = options;
@@ -295,8 +273,8 @@ export async function submitDirectPrompt(options: DirectSubmitOptions): Promise<
     }
 
     if (!upstream.ok) {
-        // Relay the pod's own error response — the caller's shared !ok
-        // handling consumes it exactly like a proxy response.
+        // Relay the pod's own native error response so the caller can expose
+        // ComfyUI's validation details without rewriting them.
         try {
             socket.close();
         } catch {
@@ -337,8 +315,8 @@ export async function submitDirectPrompt(options: DirectSubmitOptions): Promise<
 }
 
 /**
- * Synthesize the proxy-vocabulary NDJSON stream from one open ComfyUI
- * websocket. Message handling is chained so lines are enqueued strictly in
+ * Build the direct NDJSON stream from one open ComfyUI websocket. Message
+ * handling is chained so lines are enqueued strictly in
  * arrival order (binary preview decoding is async); the chain also
  * guarantees previews that precede a terminal event are written before the
  * stream ends.
@@ -428,21 +406,21 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
             // failure immediately instead of leaving the response hanging.
             if (socket.readyState !== WebSocket.OPEN) {
                 push({
-                    type: 'proxy_enqueue',
+                    type: 'prompt_queued',
                     data: {
                         prompt_id: ack.prompt_id ?? null,
                         number: ack.number ?? null,
                         node_errors: ack.node_errors ?? {}
                     }
                 });
-                failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
+                failStream({ type: 'prompt_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
                 return;
             }
 
-            // First line — mirrors the proxy's enqueue acknowledgement so
-            // shared consumers learn this job's prompt_id exactly as before.
+            // First line carries the native POST /prompt acknowledgement so
+            // the server can scope following native frames to this job.
             push({
-                type: 'proxy_enqueue',
+                type: 'prompt_queued',
                 data: {
                     prompt_id: ack.prompt_id ?? null,
                     number: ack.number ?? null,
@@ -472,12 +450,12 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
             // path as an explicit service close/error event.
             heartbeatTimer = setInterval(() => {
                 if (socket.readyState !== WebSocket.OPEN) {
-                    failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket stopped responding' } });
+                    failStream({ type: 'prompt_error', data: { error: 'ComfyUI websocket stopped responding' } });
                     return;
                 }
                 if (Date.now() - lastServerResponseAt >= DIRECT_WS_RESPONSE_TIMEOUT_MS) {
                     failStream({
-                        type: 'proxy_error',
+                        type: 'prompt_error',
                         data: {
                             error: `ComfyUI websocket stopped responding for ${DIRECT_WS_RESPONSE_TIMEOUT_MS / 1000}s`
                         }
@@ -488,7 +466,7 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
                     websocketPing(socket);
                 } catch (error) {
                     failStream({
-                        type: 'proxy_error',
+                        type: 'prompt_error',
                         data: { error: `ComfyUI websocket stopped responding: ${error instanceof Error ? error.message : String(error)}` }
                     });
                 }
@@ -530,7 +508,7 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
                         // The response is complete, but the native socket is
                         // deliberately left open until ComfyUI closes it or
                         // the five-minute response watchdog expires.
-                        finishStream({ type: 'proxy_done', data: {} });
+                        finishStream({ type: 'prompt_done', data: {} });
                     } else if (type === 'execution_error') {
                         // execution_error is itself the terminal event every
                         // consumer stops at — close only the client stream.
@@ -571,10 +549,10 @@ function buildDirectStream(socket: WebSocket, ack: DirectPromptAck): ReadableStr
             });
 
             socket.addEventListener('close', () => {
-                failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
+                failStream({ type: 'prompt_error', data: { error: 'ComfyUI websocket closed before the prompt finished' } });
             });
             socket.addEventListener('error', () => {
-                failStream({ type: 'proxy_error', data: { error: 'ComfyUI websocket errored before the prompt finished' } });
+                failStream({ type: 'prompt_error', data: { error: 'ComfyUI websocket errored before the prompt finished' } });
             });
         },
 

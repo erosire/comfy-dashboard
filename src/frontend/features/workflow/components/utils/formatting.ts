@@ -40,12 +40,12 @@ export function formatRelativeTime(isoString: string | null): string {
 /** One-line summary of a cloud stream event (for run logs / tooltips). */
 export function eventSummary(event: CloudStreamEvent): string {
     switch (event.type) {
-        case 'proxy_enqueue':
+        case 'prompt_queued':
             return `✓ Enqueued (prompt_id: ${(event.data as any).prompt_id ?? '?'})`;
-        case 'proxy_done':
+        case 'prompt_done':
             return `✓ Done`;
-        case 'proxy_error':
-            return `✗ Proxy error: ${(event.data as any).error ?? JSON.stringify(event.data)}`;
+        case 'prompt_error':
+            return `✗ Websocket error: ${(event.data as any).error ?? JSON.stringify(event.data)}`;
         case 'status':
             return `⟳ Status update`;
         case 'execution_start':

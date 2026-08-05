@@ -1,11 +1,11 @@
 // API client for the ComfyUI cloud dashboard endpoints.
 //
-// All calls go through the local server proxy at baseUrl (default
+// All calls go through the dashboard service at baseUrl (default
 // http://192.168.8.128:5000). See src/server/endpoints/comfy-dashboard.yml.
 //
 // Routes:
-//   POST /v1/comfy/cloud          → { pod_url, is_direct }  (create — spawner 302 redirect)
-//                                or { health, models_dir, models, is_direct } (status)
+//   POST /v1/comfy/cloud          → { pod_url, health, models_dir, models }
+//                                (create — spawner 302 redirect or status)
 //   POST /v1/comfy/cloud/prompt   → 202 { accepted } when workflow_id +
 //                                generation_id are given (server consumes the
 //                                pod stream and updates the generation json
@@ -13,20 +13,9 @@
 //                                progress); otherwise NDJSON stream (raw
 //                                Response) for the client to consume.
 //
-// The two-tier architecture mirrors beam_comfy_service.yaml:
-//   Tier 1 — Spawner: GET /spawn.json on the Beam spawner creates a fresh
-//            ComfyUI pod and returns its pod_url.
-//   Tier 2 — ComfyProxy: The pod's public proxy (GET / for health+models,
-//            POST / for prompt execution with NDJSON streaming).
-//
-// A pod_url can also front a DIRECT ComfyUI server instead of the Tier 2
-// proxy. The server detects this by attempting the native ComfyUI
-// websocket handshake at <pod_url>/ws (a refused connection → proxy) and
-// reports it as `is_direct` on every response. Prompt submission then
-// passes the flag back: `is_direct: true` makes /cloud/prompt open the
-// native websocket + POST /prompt (fresh client_id per request, so jobs
-// never cross-read each other's events) and translate the socket back
-// into the same NDJSON vocabulary the proxy emits.
+// The spawner creates a fresh native ComfyUI pod and returns its pod_url.
+// Prompt submission always uses the native websocket plus POST /prompt; the
+// server creates a fresh client id for each request so jobs do not cross-talk.
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -42,12 +31,6 @@ export type CloudCreateResult = {
      * produced this pod — the fallback chain's winner.
      */
     spawner?: string;
-    /**
-     * True when the pod_url fronts a DIRECT ComfyUI server (native
-     * websocket reachable at /ws); false for the Tier 2 ComfyProxy shape.
-     * Feed this back as `is_direct` when prompting the pod.
-     */
-    is_direct?: boolean;
     health?: {
         healthy: boolean;
         system_stats?: Record<string, unknown>;
@@ -63,11 +46,6 @@ export type CloudPodStatusResult = {
         system_stats?: Record<string, unknown>;
         error?: string;
     };
-    /**
-     * True when the pod_url fronts a DIRECT ComfyUI server (detected via
-     * the native websocket handshake); false for the Tier 2 ComfyProxy.
-     */
-    is_direct?: boolean;
     /** Empty for direct ComfyUI pods — the native server lists no models. */
     models_dir?: string;
     /** Empty for direct ComfyUI pods — the native server lists no models. */
@@ -103,13 +81,9 @@ export type CloudPromptBody = {
      */
     prompt: Record<string, unknown>;
     /**
-     * True when the pod is a DIRECT ComfyUI server (from the `is_direct`
-     * reported by POST /v1/comfy/cloud). The server then opens the native
-     * ComfyUI websocket with a FRESH client_id per request (overriding any
-     * client_id sent here — each job owns its stream, no cross-talk) and
-     * POSTs /prompt natively; omitted/false keeps the Tier 2 proxy flow.
+     * The server opens the native ComfyUI websocket with a FRESH client_id
+     * per request (overriding any client_id sent here) and POSTs /prompt.
      */
-    is_direct?: boolean;
     client_id?: string;
     extra_data?: Record<string, unknown>;
     front?: boolean;
@@ -141,14 +115,14 @@ function isStatusRequest(req: CloudRequest): req is { type: 'status'; pod_url: s
 /**
  * Unified cloud endpoint — acts as a switch over request types.
  *
- * All requests go through the server proxy at `baseUrl`.
+ * All requests go through the dashboard service at `baseUrl`.
  *
  * - `{ type: 'create', gpu, name? }` → `POST <baseUrl>/cloud` with `{gpu}` or `{gpu, name}`.
  *   The server tries the GPU's spawner servers in order (302 redirect)
  *   and returns `{ pod_url }`, or 503 when none could spawn it.
  *
  * - `{ type: 'status', pod_url }` → `POST <baseUrl>/cloud` with `{pod_url}`.
- *   The server probes the pod's Tier 2 proxy and returns
+ *   The server probes the pod's native websocket and returns
  *   `{ health, models_dir, models }`.
  */
 export async function cloud(
@@ -240,9 +214,9 @@ async function cloudStatus(
  * Legacy mode: returns the raw Response object — the caller must read it
  * as a stream of newline-delimited JSON (NDJSON). Each line is a
  * CloudStreamEvent. The stream ends when the caller receives:
- *   - `{"type":"proxy_done","data":{}}` — success
+ *   - `{"type":"prompt_done","data":{}}` — success
  *   - `{"type":"execution_error",...}` — failure
- *   - `{"type":"proxy_error",...}` — proxy-level failure
+ *   - `{"type":"prompt_error",...}` — websocket-level failure
  */
 export async function cloudPrompt(
     baseUrl: string,
@@ -274,7 +248,7 @@ export async function cloudPrompt(
  *   const response = await cloudPrompt(baseUrl, { pod_url, prompt });
  *   for await (const event of cloudReadNdjson(response)) {
  *       console.log(event.type, event.data);
- *       if (event.type === 'proxy_done') break;
+ *       if (event.type === 'prompt_done') break;
  *   }
  */
 export async function* cloudReadNdjson(

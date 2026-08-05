@@ -1,6 +1,6 @@
 // Cloud pod lifecycle — pod creation/reuse for the New / GPU-labeled pod
-// / Auto buttons, run-state sync from polled generations, and the keepalive
-// heartbeat that detects dead pod_urls.
+// / Auto buttons, run-state sync from polled generations, and the native
+// websocket health heartbeat that detects dead pod_urls.
 //
 // Extracted from the original CloudTab.tsx. Behaviour notes preserved:
 //   - New is NEVER blocked: the GPU picker dialog (GpuSelectDialog) asks
@@ -10,18 +10,17 @@
 //   - Pods accept concurrent jobs: each "#N" click queues another job; the
 //     server scopes each submission with its own client_id. "Auto" queues
 //     on the least-loaded ready pod (see pickLeastLoadedPod).
-//   - Heartbeat probes every POD_HEARTBEAT_MS keep PROXY pods warm and
-//     accrue strikes; MAX_POD_FAILURES consecutive failures remove the
-//     pod. Direct ComfyUI pods are exempt from that heartbeat and are removed
-//     after DIRECT_POD_IDLE_MS with no accepted generation queue.
+//   - Heartbeat probes every POD_HEARTBEAT_MS verify every native pod;
+//     MAX_POD_FAILURES consecutive failures remove the pod. A pod is also
+//     removed after POD_IDLE_MS with no accepted generation queue.
 
 import React from 'react';
-import type { CloudCreateResult, CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
+import type { CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
 import { cloud, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
-import { DIRECT_POD_IDLE_MS, MAX_POD_FAILURES, POD_HEARTBEAT_MS } from './constants';
-import { isDirectPodIdle, podLetter, pickLeastLoadedPod, shouldHeartbeatPod } from './pod-utils';
+import { MAX_POD_FAILURES, POD_HEARTBEAT_MS, POD_IDLE_MS } from './constants';
+import { isPodIdle, podLetter, pickLeastLoadedPod, shouldProbePod } from './pod-utils';
 import { replacePreferenceVariables } from './workflow-prompt';
 
 /**
@@ -78,7 +77,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
     const podsRef = React.useRef(pods);
-    // One timer is kept per direct pod so unrelated pod updates cannot reset
+    // One timer is kept per native pod so unrelated pod updates cannot reset
     // another pod's exact 60-second idle deadline.
     const directIdleTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     // A generation request is considered pending before the server accepts it;
@@ -87,7 +86,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     podsRef.current = pods;
 
     // Cancel an idle timer immediately when the user starts another job on a
-    // direct pod, before the asynchronous generation request can be accepted.
+    // native pod, before the asynchronous generation request can be accepted.
     const cancelDirectIdleTimer = React.useCallback((podId: string) => {
         const timer = directIdleTimersRef.current.get(podId);
         if (timer === undefined) return;
@@ -135,14 +134,14 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         });
     }, [generations]);
 
-    // Arm the exact idle deadline for every direct pod whose accepted queue is
+    // Arm the exact idle deadline for every native pod whose accepted queue is
     // empty. The callback rechecks current state, so a completion race or a
     // newly accepted job can never remove a busy button.
     React.useEffect(() => {
         const timers = directIdleTimersRef.current;
         const eligibleIds = new Set(
             pods
-                .filter((pod) => isDirectPodIdle(pod) && !pendingGenerationPodIdsRef.current.has(pod.id))
+                .filter((pod) => isPodIdle(pod) && !pendingGenerationPodIdsRef.current.has(pod.id))
                 .map((pod) => pod.id)
         );
 
@@ -160,15 +159,15 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                 timers.delete(podId);
                 setPods((previous) => {
                     const current = previous.find((entry) => entry.id === podId);
-                    if (!current || !isDirectPodIdle(current) || pendingGenerationPodIdsRef.current.has(podId)) {
+                    if (!current || !isPodIdle(current) || pendingGenerationPodIdsRef.current.has(podId)) {
                         return previous;
                     }
                     console.log(
-                        `[Idle] Removing direct Pod#${current.podNumber} after ${DIRECT_POD_IDLE_MS / 1000}s with no queued jobs`
+                        `[Idle] Removing ComfyUI Pod#${current.podNumber} after ${POD_IDLE_MS / 1000}s with no queued jobs`
                     );
                     return previous.filter((entry) => entry.id !== podId);
                 });
-            }, DIRECT_POD_IDLE_MS);
+            }, POD_IDLE_MS);
             timers.set(pod.id, timer);
         }
     }, [pods]);
@@ -204,7 +203,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     //    running → done/error state (see the sync effect below).
 
     const runGenerationOnPod = React.useCallback(
-        async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot, isDirect?: boolean) => {
+        async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot) => {
             const snapshot = generationOverride ?? getCurrentRaw?.() ?? null;
             if (!editingWorkflowId || !snapshot) return;
 
@@ -238,22 +237,14 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
 
                 try {
                     // Step 3 — submit the already-prepared workflow and be done.
-                    // The server processes the
-                    // pod stream in the background from here (scoped to this
-                    // job via a per-submission client_id). A direct ComfyUI pod
-                    // is flagged is_direct so the server drives its native
-                    // websocket + /prompt instead of the Tier 2 proxy. The flag
-                    // is handed in by the caller (creation/heartbeat are the
-                    // authoritative sources); fall back to the freshest pod
-                    // state through the ref when it wasn't.
-                    const directFlag =
-                        isDirect ?? (podId ? podsRef.current.find((p) => p.id === podId)?.is_direct : undefined);
+                    // The server owns the native websocket and POST /prompt
+                    // connection from this point; the client only tracks the
+                    // accepted generation through polling.
                     await cloudPrompt(baseUrl, {
                         pod_url: podUrl,
                         prompt: generation.prompt,
                         workflow_id: editingWorkflowId,
                         generation_id: generation.id,
-                        ...(directFlag !== undefined ? { is_direct: directFlag } : {}),
                         extra_data: {
                             workflow_id: editingWorkflowId,
                             generation_id: generation.id
@@ -350,28 +341,24 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         // spawn it — the error text carries the per-server attempts).
         console.log(`[Generate] Spawning Pod#${podNumber} on gpu=${gpu}...`);
         let podUrl: string;
-        let isDirect: boolean | undefined;
         try {
             const result = await cloud(baseUrl, { type: 'create', gpu });
             if (!('pod_url' in result)) {
                 throw new Error('Pod spawn response did not contain pod_url');
             }
             podUrl = (result as { pod_url: string }).pod_url;
-            // The server probed the pod's websocket handshake: true = the
-            // pod_url fronts a DIRECT ComfyUI server, false = Tier 2 proxy.
-            isDirect = (result as CloudCreateResult).is_direct;
         } catch (err: any) {
             // Spawn failed — no pod_url ever existed; remove the button.
             setPods((prev) => prev.filter((p) => p.id !== podEntry.id));
             alert(`Failed to spawn ${gpu} pod: ${err.message ?? String(err)}`);
             return;
         }
-        console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl} (${isDirect ? 'direct ComfyUI' : 'proxy'})`);
+        console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl} (ComfyUI websocket)`);
 
         // Step 3 — pod_url exists: the pod is now usable
         setPods((prev) =>
             prev.map((p) =>
-                p.id === podEntry.id ? { ...p, pod_url: podUrl, is_direct: isDirect, status: 'ready', failCount: 0 } : p
+                p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p
             )
         );
 
@@ -379,7 +366,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         // A failure here keeps the pod — its button shows the run error
         // and stays reusable.
         try {
-            await runGenerationOnPod(podUrl, podEntry.id, generationOverride, isDirect);
+            await runGenerationOnPod(podUrl, podEntry.id, generationOverride);
         } catch (err: any) {
             alert(`Failed to generate: ${err.message ?? String(err)}`);
         }
@@ -400,7 +387,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             if (!pod.pod_url || pod.status !== 'ready') return;
             try {
                 console.log(`[Pod#${pod.podNumber}] Queueing job on ${pod.pod_url}`);
-                await runGenerationOnPod(pod.pod_url, pod.id, generationOverride, pod.is_direct);
+                await runGenerationOnPod(pod.pod_url, pod.id, generationOverride);
             } catch (err: any) {
                 alert(`Failed to generate: ${err.message ?? String(err)}`);
             }
@@ -434,22 +421,13 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         [handlePodGenerate]
     );
 
-    // ── Keepalive heartbeat ─────────────────────────────────────────
-    // Tier 2 PROXY pods scale to zero ~120s after the last active
-    // connection, so probing periodically both resets that idle timer AND
-    // detects dead pods.
-    //
-    // Every probe resets the pod's strike counter on success. A failure
-    // (pod unreachable, or health.healthy === false) records a strike:
+    // ── Native ComfyUI heartbeat ─────────────────────────────────────
+    // Every websocket-backed status probe resets the pod's strike counter on
+    // success. A failure (pod unreachable or health.healthy === false) records a strike:
     // the first strike marks the pod as error (button disabled, stays
     // visible in case it recovers); once strikes reach MAX_POD_FAILURES
     // the pod's pod_url is considered dead and the pod is removed
     // entirely — its "#N" button disappears.
-    //
-    // DIRECT ComfyUI pods are EXEMPT (see shouldHeartbeatPod): they are
-    // standalone servers with no scale-to-zero timer to reset and no
-    // proxy health document to poll, so both purposes are meaningless —
-    // their reachability surfaces at prompt-submission time instead.
     //
     // Skips the tick if the previous one is still in flight (cold start).
 
@@ -484,15 +462,14 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                 for (const p of currentPods) {
                     // Probe ready AND previously-failed pods so they can
                     // either recover or accumulate the final strike.
-                    // Direct ComfyUI pods are exempt from the heartbeat.
-                    if (!shouldHeartbeatPod(p)) continue;
+                    if (!shouldProbePod(p)) continue;
                     try {
                         const result = await cloud(baseUrl, { type: 'status', pod_url: p.pod_url });
                         const statusResult = result as CloudPodStatusResult;
                         const healthy = 'health' in result ? statusResult.health?.healthy !== false : true;
                         if (healthy) {
-                            // Alive — clear strikes, refresh health + the
-                            // direct/proxy detection, mark ready.
+                            // Alive — clear strikes, refresh native health, and
+                            // mark the button ready.
                             setPods((prev) =>
                                 prev.map((ep) =>
                                     ep.id === p.id
@@ -501,10 +478,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                                               status: 'ready',
                                               failCount: 0,
                                               error: undefined,
-                                              health: statusResult,
-                                              ...(statusResult.is_direct !== undefined
-                                                  ? { is_direct: statusResult.is_direct }
-                                                  : {})
+                                              health: statusResult
                                           }
                                         : ep
                                 )

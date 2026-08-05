@@ -7,18 +7,14 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-// Keep the transport call observable while leaving prompt compilation in the
-// real cloud-prompt handler under test.
+// Keep the native transport call observable while leaving prompt compilation
+// in the real cloud-prompt handler under test.
 const transport = vi.hoisted(() => vi.fn());
 
-// The direct branch is not selected in this test, but its imported symbols are
-// mocked so loading the handler never initializes a real websocket transport.
-vi.mock('./proxy-comfy', () => ({
-    submitProxyPrompt: transport
-}));
+// The transport is mocked so loading the handler never opens a real websocket.
 vi.mock('./direct-comfy', () => ({
     newDirectClientId: () => '0123456789abcdef0123456789abcdef',
-    submitDirectPrompt: vi.fn()
+    submitDirectPrompt: transport
 }));
 
 import { cloudPrompt } from './cloud-prompt';
@@ -30,7 +26,7 @@ const parameters = (body: Record<string, unknown>) => ({ path: {}, query: {}, bo
 
 describe('cloudPrompt UI-prepared prompt forwarding', () => {
     it('forwards the UI-prepared JSON without a preference payload', async () => {
-        // The response only needs to be a successful NDJSON-shaped transport
+        // The response only needs to be a successful NDJSON-shaped native
         // response because this test stops at the pod-facing request boundary.
         transport.mockResolvedValue(new Response('{}\n', {
             status: 200,
@@ -56,6 +52,7 @@ describe('cloudPrompt UI-prepared prompt forwarding', () => {
         expect(transport.mock.calls).toEqual([[
             {
                 podUrl: new URL('https://pod.example/'),
+                clientId: '0123456789abcdef0123456789abcdef',
                 promptPayload: {
                     prompt: {
                         '1': {

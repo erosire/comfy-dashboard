@@ -7,20 +7,20 @@
 // 302 redirect wins, failures fall through, and an exhausted list answers
 // HTTP 503 with the per-server attempts trail.
 //
-// The websocket is replaced with a refused-connection fake (the pod probe
-// then classifies the spawned pod as a proxy — same setup as
-// direct-comfy.test.ts) and fetch is stubbed, so no real spawner or pod is
-// contacted.
+// The websocket is replaced with a deterministic native ComfyUI fake and
+// fetch is stubbed, so no real spawner or pod is contacted.
 // =============================================================================
 
 // @vitest-environment node
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Every websocket handshake is refused → spawned pods classify as proxies.
+// Every websocket handshake completes → spawned pods use native ComfyUI.
 vi.mock('undici', () => {
     class FakeWebSocket extends EventTarget {
         static readonly CONNECTING = 0;
+        static readonly OPEN = 1;
+        static readonly CLOSING = 2;
         static readonly CLOSED = 3;
         readonly url: string;
         readyState = FakeWebSocket.CONNECTING;
@@ -30,14 +30,15 @@ vi.mock('undici', () => {
             this.url = url;
             queueMicrotask(() => {
                 if (this.readyState !== FakeWebSocket.CONNECTING) return;
-                this.readyState = FakeWebSocket.CLOSED;
-                this.dispatchEvent(new Event('error'));
-                this.dispatchEvent(new Event('close'));
+                this.readyState = FakeWebSocket.OPEN;
+                this.dispatchEvent(new Event('open'));
             });
         }
 
         send(_data: string): void {}
-        close(): void {}
+        close(): void {
+            this.readyState = FakeWebSocket.CLOSED;
+        }
     }
 
     return { WebSocket: FakeWebSocket, Agent: class FakeAgent { constructor(_opts?: any) {} } };
@@ -160,12 +161,12 @@ describe('spawnFromCandidates', () => {
 });
 
 describe('POST /v1/comfy/cloud — gpu selection', () => {
-    const STATUS_DOCUMENT = { health: { healthy: true }, models_dir: '/models', models: {} };
+    const STATUS_DOCUMENT = { health: { healthy: true }, models_dir: '', models: {} };
 
     it('rejects a create request without a gpu, listing the available GPUs', async () => {
         const result = await createCloudPod(context(), parameters({}), {});
         expect(result.status).toBe(400);
-        expect(result.response).toMatchObject({ available_gpus: ['4090', 'B300'] });
+        expect(result.response).toMatchObject({ available_gpus: ['4090', 'RTX6000', 'B300'] });
         expect(String((result.response as any).error)).toContain('Missing gpu');
         expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
@@ -175,7 +176,7 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
         expect(result.status).toBe(400);
         expect(result.response).toMatchObject({
             error: 'Unknown gpu: A100',
-            available_gpus: ['4090', 'B300']
+            available_gpus: ['4090', 'RTX6000', 'B300']
         });
         expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
@@ -187,10 +188,13 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
                 return new Response(null, { status: 302, headers: { location: POD_URL } });
             }
             if (url === `${POD_URL}/`) {
-                return new Response(JSON.stringify(STATUS_DOCUMENT), {
+                return new Response('<!doctype html><html>ComfyUI</html>', {
                     status: 200,
-                    headers: { 'content-type': 'application/json' }
+                    headers: { 'content-type': 'text/html' }
                 });
+            }
+            if (url === `${POD_URL}/system_stats`) {
+                return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
             }
             throw new Error(`Unexpected fetch: ${url}`);
         });
@@ -201,9 +205,8 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
             pod_url: POD_URL,
             gpu: '4090',
             spawner: 'lancer',
-            is_direct: false,
             health: { healthy: true },
-            models_dir: '/models'
+            models_dir: ''
         });
         // First fetch is the spawner; the pod probe follows.
         expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_4090}/`);
@@ -233,7 +236,7 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
         expect(result.status).toBe(503);
         expect(result.response).toEqual({
             error: 'No server available to spawn gpu=B300 — every spawner failed',
-            attempts: [{ server: 'devilz', error: 'connect ECONNREFUSED' }]
+            attempts: [{ server: 'brianJohnson', error: 'connect ECONNREFUSED' }]
         });
     });
 
