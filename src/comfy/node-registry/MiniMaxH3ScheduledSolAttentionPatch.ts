@@ -1,0 +1,95 @@
+import type { NodeWidgetLayout } from './types';
+
+// The model input is a connection; the remaining attention-patch controls are
+// kept in this exact order because ComfyUI serializes them as widget slots.
+export const MiniMaxH3ScheduledSolAttentionPatch: NodeWidgetLayout = {
+    nodeType: 'MiniMaxH3ScheduledSolAttentionPatch',
+    displayName: 'MiniMax H3 Scheduled Sol Attention Patch',
+    category: 'model_patches/attention',
+    github: {
+        repo: 'https://github.com/Saganaki22/ComfyUI-sol-attn',
+        path: 'minimax.py',
+        extension: 'ComfyUI-sol-attn',
+    },
+    widgets: [
+        {
+            name: 'enabled',
+            label: 'Enabled',
+            widgetType: 'BOOLEAN',
+            default: true,
+        },
+        {
+            name: 'tau_start',
+            label: 'Tau Start',
+            widgetType: 'FLOAT',
+            default: 2,
+            min: 0,
+            max: 4,
+            step: 0.05,
+            display: 'number',
+        },
+        {
+            name: 'tau_end',
+            label: 'Tau End',
+            widgetType: 'FLOAT',
+            default: 0.8,
+            min: 0,
+            max: 4,
+            step: 0.05,
+            display: 'number',
+        },
+        {
+            name: 'curve',
+            label: 'Curve',
+            widgetType: 'COMBO',
+            options: ['linear', 'cosine', 'sqrt', 'smoothstep', 'exponential', 'step'],
+            default: 'linear',
+        },
+        {
+            name: 'min_tokens',
+            label: 'Min Tokens',
+            widgetType: 'INT',
+            default: 8192,
+            min: 256,
+            max: 131072,
+            step: 256,
+            display: 'number',
+        },
+        {
+            name: 'strict',
+            label: 'Strict',
+            widgetType: 'BOOLEAN',
+            default: false,
+        },
+        {
+            name: 'dense_percent',
+            label: 'Dense Percent',
+            widgetType: 'FLOAT',
+            default: 0,
+            min: 0,
+            max: 0.9,
+            step: 0.05,
+            display: 'number',
+        },
+        {
+            name: 'thresh_type',
+            label: 'Threshold Type',
+            widgetType: 'COMBO',
+            options: ['diag', 'exact'],
+            default: 'diag',
+        },
+        {
+            name: 'int8_qk',
+            label: 'INT8 QK',
+            widgetType: 'BOOLEAN',
+            default: false,
+        },
+        {
+            name: 'sink_conditioning',
+            label: 'Sink Conditioning',
+            widgetType: 'COMBO',
+            options: ['exact_kv', 'exact_kv_and_rows', 'off'],
+            default: 'exact_kv',
+        },
+    ],
+};
