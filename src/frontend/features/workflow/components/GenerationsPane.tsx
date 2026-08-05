@@ -5,11 +5,16 @@
 //
 //   LIST  — one SINGLE row per generation: [ ||| | id (time) | ✕ ] — menu
 //           grip, divider, id+time, divider, delete.
-//   THUMBS — a masonry grid (4 columns, 2 on mobile) with one card per
-//           generation: the first result item's media streams straight
-//           from the server (no base64 payloads through React), with an
-//           overlay bar on top of the image (colored label on the left,
-//           ✕ delete at the top-right corner).
+//   THUMBS — an ordered masonry grid (4 columns, 2 on mobile) with one
+//           card per generation: the first result item's media streams
+//           straight from the server (no base64 payloads through React),
+//           with an overlay bar on top of the image (colored label on the
+//           left, ✕ delete at the top-right corner). Cards are dealt
+//           round-robin into per-column stacks so the visual reading
+//           order is ROW-major — left to right, then down — and the
+//           newest generation always sits top-left on the top row (plain
+//           CSS column-count fills column-major and buries the newest
+//           mid-page).
 //
 // Shared conventions:
 //   - The id text carries the status purely by color (green = completed
@@ -42,6 +47,7 @@
 
 import React from 'react';
 import styled from '@emotion/styled';
+import { arrayCreate, arrayEach } from '@presource/core';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
 import type { MediaKind, OutputViewMode } from './utils';
@@ -149,14 +155,33 @@ const GenDeleteBtn = styled('button')({
 
 // ── Thumbnail (masonry) view ──────────────────────────────────────────
 
-// ThumbGrid — CSS-column masonry: items keep their natural aspect ratio
-// and pack top-to-bottom, left-to-right across `cols` columns.
-const ThumbGrid = styled('div', {
-    shouldForwardProp: (prop) => prop !== 'cols'
-})<{ cols: number }>(({ cols }) => ({
-    columnCount: cols,
-    columnGap: 8
-}));
+// ThumbGrid — the ordered-masonry container: a flex ROW of vertical
+// column stacks (see ThumbColumn below). Generations are dealt
+// round-robin (index % columnCount) into the columns at render time, so
+// the visual reading order is ROW-major: item N sits at
+// (row floor(N / columnCount), column N % columnCount) — left to right,
+// then down, newest at the top-left. Each column packs its own cards
+// independently, so mixed aspect ratios keep the masonry look. (CSS
+// multi-column counting can't deliver this: it auto-balances each column
+// top-to-bottom first — column-major — which buries the newest item
+// mid-page.)
+const ThumbGrid = styled('div')({
+    display: 'flex',
+    flexDirection: 'row',
+    // Columns track their own heights — never stretch to the tallest.
+    alignItems: 'flex-start',
+    gap: 8
+});
+
+// ThumbColumn — one masonry stack inside the grid. flex: 1 1 0 splits
+// the row width evenly across columns; minWidth: 0 lets narrow columns
+// shrink without overflowing the container.
+const ThumbColumn = styled('div')({
+    display: 'flex',
+    flexDirection: 'column',
+    flex: '1 1 0',
+    minWidth: 0
+});
 
 const ThumbCard = styled('div')({
     // relative — the overlay label/delete bar is positioned over the media.
@@ -289,76 +314,96 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
     }
 
     if (view === 'thumbs') {
+        // Masonry column count — narrow screens drop to 2.
+        const columnCount = isMobile ? 2 : 4;
+        // Deal generations round-robin into per-column stacks: column =
+        // index % columnCount, so consecutive generations sit side by
+        // side and the grid reads ROW-major (left→right, top→down) —
+        // the newest generation is always the first card of the first
+        // column, i.e. the top-left of the top row. arrayCreate(N)
+        // yields N slots (undefined), mapped here to one stack each.
+        const columns: GenerationSummary[][] = arrayCreate(columnCount).map(() => []);
+        arrayEach(generations, ({ index, value }) => {
+            columns[index % columnCount].push(value);
+        });
+
+        // One thumb card per generation — shared across columns.
+        const renderThumb = (gen: GenerationSummary) => {
+            const first = gen.resultItems?.[0];
+            const hasResults = !!first;
+            const noOutput = gen.status === 'completed' && !hasResults;
+            const failed = gen.status === 'failed' || noOutput;
+            const mediaKind = generationMediaKind(gen);
+            const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
+            // Failed/error generations open the .log dialog;
+            // successful ones with results open the viewer.
+            // (A failed run with partial results opens the log
+            // — the terminal error is what needs debugging.)
+            const tooltip = failed
+                ? `${gen.error ?? 'Completed with no output — treated as failed'} — click to view the log`
+                : gen.id;
+            return (
+                <ThumbCard
+                    key={gen.id}
+                    data-testid={`gen-thumb-${gen.id}`}
+                    style={hasResults || failed ? { cursor: 'pointer' } : undefined}
+                    onClick={failed ? () => onShowLog(gen.id) : hasResults ? () => onOpenViewer(gen.id) : undefined}
+                >
+                    {first ? (
+                        first.type === 'video' ? (
+                            // First frame as the poster — preload
+                            // metadata only, never autoplay.
+                            <video src={getResultMediaUrl(gen.id, 0)} muted loop playsInline preload="metadata" style={MEDIA_STYLE} />
+                        ) : first.type === 'audio' ? (
+                            // Inline player; stop propagation so
+                            // its controls don't open the viewer.
+                            <audio
+                                src={getResultMediaUrl(gen.id, 0)}
+                                controls
+                                preload="metadata"
+                                style={MEDIA_STYLE}
+                                onClick={(e) => e.stopPropagation()}
+                            />
+                        ) : (
+                            <img src={getResultMediaUrl(gen.id, 0)} alt={gen.id} loading="lazy" style={MEDIA_STYLE} />
+                        )
+                    ) : (
+                        <ThumbMedia>
+                            {gen.status === 'processing' || gen.status === 'pending' ? 'running…' : 'no output'}
+                        </ThumbMedia>
+                    )}
+                    <ThumbOverlay>
+                        <ThumbName title={tooltip} style={{ color: statusColor }}>
+                            {gen.id}
+                            {gen.generatedTime && (
+                                <span style={{ color: theme.textFaint, fontWeight: 400 }}> ({gen.generatedTime})</span>
+                            )}
+                        </ThumbName>
+                        <GenKindBadge kind={mediaKind} genId={gen.id} />
+                        <GenDeleteBtn
+                            className="sg-danger"
+                            title="Delete this generation"
+                            data-testid={`gen-delete-${gen.id}`}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onDeleteGeneration(gen.id);
+                            }}
+                        >
+                            ✕
+                        </GenDeleteBtn>
+                    </ThumbOverlay>
+                </ThumbCard>
+            );
+        };
+
         return (
             <div data-testid="results-tab-pane">
-                <ThumbGrid cols={isMobile ? 2 : 4} data-testid="results-thumb-grid">
-                    {generations.map((gen) => {
-                        const first = gen.resultItems?.[0];
-                        const hasResults = !!first;
-                        const noOutput = gen.status === 'completed' && !hasResults;
-                        const failed = gen.status === 'failed' || noOutput;
-                        const mediaKind = generationMediaKind(gen);
-                        const statusColor = failed ? theme.danger : gen.status === 'completed' ? theme.success : theme.textDim;
-                        // Failed/error generations open the .log dialog;
-                        // successful ones with results open the viewer.
-                        // (A failed run with partial results opens the log
-                        // — the terminal error is what needs debugging.)
-                        const tooltip = failed
-                            ? `${gen.error ?? 'Completed with no output — treated as failed'} — click to view the log`
-                            : gen.id;
-                        return (
-                            <ThumbCard
-                                key={gen.id}
-                                data-testid={`gen-thumb-${gen.id}`}
-                                style={hasResults || failed ? { cursor: 'pointer' } : undefined}
-                                onClick={failed ? () => onShowLog(gen.id) : hasResults ? () => onOpenViewer(gen.id) : undefined}
-                            >
-                                {first ? (
-                                    first.type === 'video' ? (
-                                        // First frame as the poster — preload
-                                        // metadata only, never autoplay.
-                                        <video src={getResultMediaUrl(gen.id, 0)} muted loop playsInline preload="metadata" style={MEDIA_STYLE} />
-                                    ) : first.type === 'audio' ? (
-                                        // Inline player; stop propagation so
-                                        // its controls don't open the viewer.
-                                        <audio
-                                            src={getResultMediaUrl(gen.id, 0)}
-                                            controls
-                                            preload="metadata"
-                                            style={MEDIA_STYLE}
-                                            onClick={(e) => e.stopPropagation()}
-                                        />
-                                    ) : (
-                                        <img src={getResultMediaUrl(gen.id, 0)} alt={gen.id} loading="lazy" style={MEDIA_STYLE} />
-                                    )
-                                ) : (
-                                    <ThumbMedia>
-                                        {gen.status === 'processing' || gen.status === 'pending' ? 'running…' : 'no output'}
-                                    </ThumbMedia>
-                                )}
-                                <ThumbOverlay>
-                                    <ThumbName title={tooltip} style={{ color: statusColor }}>
-                                        {gen.id}
-                                        {gen.generatedTime && (
-                                            <span style={{ color: theme.textFaint, fontWeight: 400 }}> ({gen.generatedTime})</span>
-                                        )}
-                                    </ThumbName>
-                                    <GenKindBadge kind={mediaKind} genId={gen.id} />
-                                    <GenDeleteBtn
-                                        className="sg-danger"
-                                        title="Delete this generation"
-                                        data-testid={`gen-delete-${gen.id}`}
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            onDeleteGeneration(gen.id);
-                                        }}
-                                    >
-                                        ✕
-                                    </GenDeleteBtn>
-                                </ThumbOverlay>
-                            </ThumbCard>
-                        );
-                    })}
+                <ThumbGrid data-testid="results-thumb-grid">
+                    {columns.map((column, columnIndex) => (
+                        <ThumbColumn key={columnIndex} data-testid={`results-thumb-column-${columnIndex}`}>
+                            {column.map(renderThumb)}
+                        </ThumbColumn>
+                    ))}
                 </ThumbGrid>
             </div>
         );
