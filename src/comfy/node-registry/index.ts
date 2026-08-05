@@ -99,7 +99,9 @@ import { BasicGuider } from './BasicGuider';
 
 // Math
 import { ComfyMathExpression } from './ComfyMathExpression';
+import { EasyCache } from './EasyCache';
 import { MiniMaxH3ImageToVideo } from './MiniMaxH3ImageToVideo';
+import { MiniMaxH3ScheduledSolAttentionPatch } from './MiniMaxH3ScheduledSolAttentionPatch';
 import { VAEDecodeAudio } from './VAEDecodeAudio';
 
 // LTXV nodes
@@ -112,10 +114,12 @@ import { LTXVLatentUpsampler } from './LTXVLatentUpsampler';
 import { LTXVAudioVAEDecode } from './LTXVAudioVAEDecode';
 import { LTXVAudioVAELoader } from './LTXVAudioVAELoader';
 import { LTXAVTextEncoderLoader } from './LTXAVTextEncoderLoader';
+import { LTXVImgToVideoInplace } from './LTXVImgToVideoInplace';
 import { LatentUpscaleModelLoader } from './LatentUpscaleModelLoader';
 
 // Image batch
 import { ImageFromBatch } from './ImageFromBatch';
+import { ResizeImageMaskNode } from './ResizeImageMaskNode';
 
 // Built-in ComfyUI nodes (additional)
 import { ConditioningZeroOut } from './ConditioningZeroOut';
@@ -262,7 +266,9 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
 
     // Math
     ComfyMathExpression,
+    EasyCache,
     MiniMaxH3ImageToVideo,
+    MiniMaxH3ScheduledSolAttentionPatch,
     VAEDecodeAudio,
 
     // LTXV nodes
@@ -275,10 +281,12 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     LTXVAudioVAEDecode,
     LTXVAudioVAELoader,
     LTXAVTextEncoderLoader,
+    LTXVImgToVideoInplace,
     LatentUpscaleModelLoader,
 
     // Image batch
     ImageFromBatch,
+    ResizeImageMaskNode,
 
     // Additional built-in ComfyUI nodes
     ConditioningZeroOut,

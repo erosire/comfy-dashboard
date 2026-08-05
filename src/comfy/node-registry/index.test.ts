@@ -1,16 +1,138 @@
 import { describe, expect, it } from 'vitest';
 import { comfyNodeRegistry, getWidgetLabel, isNodeRegistered } from './index';
 
-// These entries cover the recently encountered built-in and MiniMax H3 S&R
-// names; exact layouts protect positional widgets_values-to-input serialization.
+// These entries cover the recently encountered built-in, LTXV, EasyCache, and
+// MiniMax H3 S&R names; exact layouts protect positional serialization.
 describe('comfyNodeRegistry missing node entries', () => {
     it('registers every requested node type', () => {
-        expect(['BasicGuider', 'BasicScheduler', 'ComfyMathExpression', 'MiniMaxH3ImageToVideo', 'VAEDecodeAudio'].map(isNodeRegistered)).toEqual([
+        expect([
+            'BasicGuider',
+            'BasicScheduler',
+            'ComfyMathExpression',
+            'EasyCache',
+            'MiniMaxH3ImageToVideo',
+            'MiniMaxH3ScheduledSolAttentionPatch',
+            'ResizeImageMaskNode',
+            'LTXVImgToVideoInplace',
+            'VAEDecodeAudio',
+        ].map(isNodeRegistered)).toEqual([
             true,
             true,
             true,
             true,
             true,
+            true,
+            true,
+            true,
+            true,
+        ]);
+    });
+
+    it('maps EasyCache scalar widgets after its model connection', () => {
+        expect(comfyNodeRegistry.EasyCache.widgets).toEqual([
+            {
+                name: 'reuse_threshold',
+                label: 'Reuse Threshold',
+                widgetType: 'FLOAT',
+                default: 0.2,
+                min: 0,
+                max: 3,
+                step: 0.01,
+                display: 'number',
+            },
+            {
+                name: 'start_percent',
+                label: 'Start Percent',
+                widgetType: 'FLOAT',
+                default: 0.15,
+                min: 0,
+                max: 1,
+                step: 0.01,
+                display: 'number',
+            },
+            {
+                name: 'end_percent',
+                label: 'End Percent',
+                widgetType: 'FLOAT',
+                default: 0.95,
+                min: 0,
+                max: 1,
+                step: 0.01,
+                display: 'number',
+            },
+            {
+                name: 'verbose',
+                label: 'Verbose',
+                widgetType: 'BOOLEAN',
+                default: false,
+            },
+        ]);
+    });
+
+    it('maps the MiniMax H3 scheduled attention patch controls in source order', () => {
+        expect(comfyNodeRegistry.MiniMaxH3ScheduledSolAttentionPatch.widgets.map(({ name, widgetType, default: value }) => ({
+            name,
+            widgetType,
+            default: value,
+        }))).toEqual([
+            { name: 'enabled', widgetType: 'BOOLEAN', default: true },
+            { name: 'tau_start', widgetType: 'FLOAT', default: 2 },
+            { name: 'tau_end', widgetType: 'FLOAT', default: 0.8 },
+            { name: 'curve', widgetType: 'COMBO', default: 'linear' },
+            { name: 'min_tokens', widgetType: 'INT', default: 8192 },
+            { name: 'strict', widgetType: 'BOOLEAN', default: false },
+            { name: 'dense_percent', widgetType: 'FLOAT', default: 0 },
+            { name: 'thresh_type', widgetType: 'COMBO', default: 'diag' },
+            { name: 'int8_qk', widgetType: 'BOOLEAN', default: false },
+            { name: 'sink_conditioning', widgetType: 'COMBO', default: 'exact_kv' },
+        ]);
+    });
+
+    it('serializes each active ResizeImageMaskNode DynamicCombo branch', () => {
+        const serialize = comfyNodeRegistry.ResizeImageMaskNode.serializeWidgets;
+        expect(serialize).toBeDefined();
+        expect(serialize!([
+            { index: 0, value: 'scale dimensions' },
+            { index: 1, value: 640 },
+            { index: 2, value: 480 },
+            { index: 3, value: 'center' },
+            { index: 4, value: 'area' },
+        ])).toEqual({
+            resize_type: 'scale dimensions',
+            'resize_type.width': 640,
+            'resize_type.height': 480,
+            'resize_type.crop': 'center',
+            scale_method: 'area',
+        });
+        expect(serialize!([
+            { index: 0, value: 'scale by multiplier' },
+            { index: 1, value: 2 },
+            { index: 2, value: 'lanczos' },
+        ])).toEqual({
+            resize_type: 'scale by multiplier',
+            'resize_type.multiplier': 2,
+            scale_method: 'lanczos',
+        });
+    });
+
+    it('maps LTXVImgToVideoInplace widgets after its three connections', () => {
+        expect(comfyNodeRegistry.LTXVImgToVideoInplace.widgets).toEqual([
+            {
+                name: 'strength',
+                label: 'Strength',
+                widgetType: 'FLOAT',
+                default: 1,
+                min: 0,
+                max: 1,
+                step: 0.01,
+                display: 'slider',
+            },
+            {
+                name: 'bypass',
+                label: 'Bypass',
+                widgetType: 'BOOLEAN',
+                default: false,
+            },
         ]);
     });
 

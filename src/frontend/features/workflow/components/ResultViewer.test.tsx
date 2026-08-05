@@ -59,5 +59,6 @@ describe('ResultViewer video preview', () => {
         // state; React applies the boolean prop directly to that property.
         expect(video).not.toBeNull();
         expect(video?.muted).toBe(true);
+        expect(video?.loop).toBe(true);
     });
 });

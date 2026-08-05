@@ -263,6 +263,7 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         src={mediaUrl}
                         controls
                         autoPlay
+                        loop
                         // Generated previews must not unexpectedly play audio; users can unmute through native controls.
                         muted
                         style={{

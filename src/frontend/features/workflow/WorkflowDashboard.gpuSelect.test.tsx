@@ -2,7 +2,7 @@
 // GPU selection tests
 //
 // Pressing "New" no longer spawns directly — it opens the GpuSelectDialog,
-// which offers the hardcoded GPUs (GPU_OPTIONS: "4090", "B300") and hands the
+// which offers the hardcoded GPUs (GPU_OPTIONS: "4090", "B300", "RTX6000") and hands the
 // pick to usePods.handleGenerate (POST /v1/comfy/cloud with {gpu}).
 //
 // Verifies:
@@ -69,7 +69,7 @@ describe('GpuSelectDialog', () => {
             el.getAttribute('data-testid')
         );
         expect(options).toEqual(GPU_OPTIONS.map((gpu) => `gpu-select-${gpu}`));
-        expect(options).toEqual(['gpu-select-4090', 'gpu-select-B300']);
+        expect(options).toEqual(['gpu-select-4090', 'gpu-select-B300', 'gpu-select-RTX6000']);
     });
 
     it('renders above the generation preview stacking layer', () => {
@@ -89,6 +89,9 @@ describe('GpuSelectDialog', () => {
 
         click(container.querySelector('[data-testid="gpu-select-B300"]'));
         expect(onSelect).toHaveBeenCalledWith('B300');
+
+        click(container.querySelector('[data-testid="gpu-select-RTX6000"]'));
+        expect(onSelect).toHaveBeenCalledWith('RTX6000');
     });
 
     it('does not render a cancel button and dismisses from the backdrop', () => {

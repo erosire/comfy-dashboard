@@ -26,4 +26,4 @@ export const POD_RING_TRACK = 'rgba(129, 140, 248, 0.30)';
  * the keys of comfyCloudServiceEndpoint (runtime/secret/private/modal/
  * comfy.ts) — more GPUs land there first, then join this list.
  */
-export const GPU_OPTIONS = ['4090', 'B300'] as const;
+export const GPU_OPTIONS = ['4090', 'B300', 'RTX6000'] as const;

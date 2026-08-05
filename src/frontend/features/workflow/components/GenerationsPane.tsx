@@ -317,7 +317,7 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                     first.type === 'video' ? (
                                         // First frame as the poster — preload
                                         // metadata only, never autoplay.
-                                        <video src={getResultMediaUrl(gen.id, 0)} muted playsInline preload="metadata" style={MEDIA_STYLE} />
+                                        <video src={getResultMediaUrl(gen.id, 0)} muted loop playsInline preload="metadata" style={MEDIA_STYLE} />
                                     ) : first.type === 'audio' ? (
                                         // Inline player; stop propagation so
                                         // its controls don't open the viewer.
