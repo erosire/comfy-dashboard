@@ -7,7 +7,7 @@
 // =============================================================================
 
 import { describe, expect, it } from 'vitest';
-import { isDirectPodIdle, podButtonLabel, podButtonQueueBadge, shouldHeartbeatPod } from './pod-utils';
+import { isPodIdle, podButtonLabel, podButtonQueueBadge, shouldProbePod } from './pod-utils';
 import type { PodEntry } from './types';
 
 function pod(overrides: Partial<PodEntry> = {}): PodEntry {
@@ -24,47 +24,31 @@ function pod(overrides: Partial<PodEntry> = {}): PodEntry {
     };
 }
 
-describe('shouldHeartbeatPod', () => {
-    it('exempts direct ComfyUI pods — no idle timer to reset, no proxy to poll', () => {
-        expect(shouldHeartbeatPod(pod({ is_direct: true }))).toBe(false);
-    });
-
-    it('probes proxy pods', () => {
-        expect(shouldHeartbeatPod(pod({ is_direct: false }))).toBe(true);
-    });
-
-    it('probes pods whose shape is not detected yet (the probe resolves is_direct)', () => {
-        expect(shouldHeartbeatPod(pod({ is_direct: undefined }))).toBe(true);
+describe('shouldProbePod', () => {
+    it('probes every ready native ComfyUI pod', () => {
+        expect(shouldProbePod(pod())).toBe(true);
     });
 
     it('skips spawning pods and pods without a resolved pod_url', () => {
-        expect(shouldHeartbeatPod(pod({ status: 'spawning', pod_url: '' }))).toBe(false);
-        expect(shouldHeartbeatPod(pod({ status: 'spawning' }))).toBe(false);
-        expect(shouldHeartbeatPod(pod({ pod_url: '' }))).toBe(false);
-    });
-
-    it('still skips direct pods that are in an error state', () => {
-        expect(shouldHeartbeatPod(pod({ is_direct: true, status: 'error', failCount: 1 }))).toBe(false);
-    });
-
-    it('probes proxy pods in an error state so they can recover or collect their final strike', () => {
-        expect(shouldHeartbeatPod(pod({ is_direct: false, status: 'error', failCount: 1 }))).toBe(true);
+        expect(shouldProbePod(pod({ status: 'spawning', pod_url: '' }))).toBe(false);
+        expect(shouldProbePod(pod({ status: 'spawning' }))).toBe(false);
+        expect(shouldProbePod(pod({ pod_url: '' }))).toBe(false);
+        expect(shouldProbePod(pod({ status: 'error', failCount: 1 }))).toBe(true);
     });
 });
 
-describe('isDirectPodIdle', () => {
-    it('marks a ready direct pod with no accepted generations as idle', () => {
-        expect(isDirectPodIdle(pod({ is_direct: true }))).toBe(true);
+describe('isPodIdle', () => {
+    it('marks a ready native pod with no accepted generations as idle', () => {
+        expect(isPodIdle(pod())).toBe(true);
     });
 
-    it('keeps a direct pod with queued generations active', () => {
-        expect(isDirectPodIdle(pod({ is_direct: true, activeGenerationIds: ['generation-1'] }))).toBe(false);
+    it('keeps a native pod with queued generations active', () => {
+        expect(isPodIdle(pod({ activeGenerationIds: ['generation-1'] }))).toBe(false);
     });
 
-    it('does not apply the direct idle policy to proxy or unresolved pods', () => {
-        expect(isDirectPodIdle(pod({ is_direct: false }))).toBe(false);
-        expect(isDirectPodIdle(pod({ is_direct: undefined }))).toBe(false);
-        expect(isDirectPodIdle(pod({ is_direct: true, pod_url: '' }))).toBe(false);
+    it('does not mark spawning or unresolved pods idle', () => {
+        expect(isPodIdle(pod({ status: 'spawning' }))).toBe(false);
+        expect(isPodIdle(pod({ pod_url: '' }))).toBe(false);
     });
 });
 

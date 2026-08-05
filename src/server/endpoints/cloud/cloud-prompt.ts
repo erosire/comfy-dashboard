@@ -1,36 +1,42 @@
 // Cloud prompt endpoint — POST /v1/comfy/cloud/prompt
 //
-// Two modes:
+// The pod must already hold a server-managed websocket: pods are spawned
+// (or adopted) via POST /v1/comfy/cloud, which keeps ONE persistent socket
+// per pod in memory (pod-socket.ts). This endpoint NEVER opens another
+// websocket — it gates on the registry, submits natively over HTTP POST
+// <pod>/prompt with the shared socket's client_id, learns the prompt_id
+// from the acknowledgement, and consumes the run from the shared socket's
+// demultiplexed events (matched by prompt_id).
 //
 // 1) Server-side processing — body includes `workflow_id` + `generation_id`.
-//    The server submits the prompt to the pod, consumes the NDJSON stream
-//    in the background, and keeps the generation json file updated by
-//    itself (status → processing/completed/failed, results, timing
-//    — same file the workflow generation API writes). The event progression
-//    is traced line-by-line into the sibling .log file — the raw events are
-//    intentionally NOT stored in the json. The client gets an
-//    immediate 202 and observes progress by polling
-//    GET /v1/comfy/workflows/:id/generate.
+//    The endpoint registers a prompt_id subscriber and answers 202
+//    immediately. Every event the shared socket routes to that prompt_id is
+//    traced line-by-line into the generation's sibling .log file (one log
+//    per prompt) and folded into the generation json itself (status →
+//    processing/completed/failed, results, timing — the same file the
+//    workflow generation API writes). Clients poll
+//    GET /v1/comfy/workflows/:id/generate for progress.
 //
 // 2) Direct stream mode — no workflow reference.
-//    The native websocket event stream is returned as application/x-ndjson
-//    for callers that need to observe a run directly.
+//    The same shared socket's events (this prompt's prompt_id plus
+//    unattributed broadcasts) stream back as application/x-ndjson — one
+//    JSON object per line, terminated by prompt_done / execution_error /
+//    prompt_error.
 //
 // Common request fields (mirrors beam_comfy_service PromptRequest schema):
-//   - pod_url:   the native ComfyUI pod URL
+//   - pod_url:   the native ComfyUI pod URL (must be registry-connected)
 //   - prompt:    the ORIGINAL workflow json snapshot (v0.4/v1 editor format
 //                — what the dashboard stores on every generation). Converted
 //                to the flat API prompt HERE, server-side, right before it
 //                goes out to the Comfy Cloud pod — the one place conversion
 //                happens, so stored documents stay lossless.
-//   - client_id: accepted for compatibility and ignored; every request gets
-//                a fresh native websocket client id
+//   - client_id: accepted for compatibility and ignored; the pod's shared
+//                websocket client_id is what binds events to the socket
 //   - extra_data: passed through to ComfyUI's POST /prompt extra_data
 //   - front / number: forwarded to ComfyUI POST /prompt
 //
 
 import { asHandlerMethod } from '@underload/service';
-import { newDirectClientId, submitDirectPrompt } from './direct-comfy';
 import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
 import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
@@ -40,6 +46,14 @@ import {
     type GenerationResultItem,
     type StreamEvent
 } from '../workflows/generation-store';
+import {
+    getPodSocket,
+    releasePodSubmission,
+    subscribePodPrompt,
+    submitPodPrompt,
+    type PodPromptAck,
+    type PodSocketConnection
+} from './pod-socket';
 
 export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variables) => {
     const body = _parameters.body as {
@@ -69,6 +83,21 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         return { status: 400, response: { error: `Invalid pod_url: ${body.pod_url}` } };
     }
 
+    // Gate on the server's pod registry: the pod must hold its ONE
+    // persistent websocket already. This endpoint never opens another
+    // socket — unknown or terminated pods are rejected instead.
+    const connection = getPodSocket(podUrl);
+    if (!connection) {
+        return {
+            status: 502,
+            response: {
+                error:
+                    `Pod is not connected — no active websocket for ${body.pod_url} ` +
+                    `(spawn or verify it via POST /v1/comfy/cloud first)`
+            }
+        };
+    }
+
     // Convert the already-prepared workflow json into the flat API prompt
     // ComfyUI's POST /prompt expects. Preference replacement happens in the UI
     // before this request, so this server boundary performs only format
@@ -93,38 +122,43 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     const incomingHeaders = request.req.header() as Record<string, string>;
     const authorization = incomingHeaders.authorization;
 
-    // Every request owns a fresh native websocket client id. The direct
-    // transport uses this value in both the websocket URL and POST /prompt.
-    const directClientId = newDirectClientId();
-    const submission = {
-        origin: `${podUrl.toString()} (ComfyUI websocket)`,
-        clientId: directClientId
-    };
-    const submit = (): Promise<Response> =>
-        submitDirectPrompt({ podUrl, clientId: directClientId, promptPayload, authorization });
+    // Submit over HTTP ONLY — the pod's persistent websocket (and its
+    // client_id pairing) delivers every execution event for this prompt.
+    let submission: { response: Response; ack: PodPromptAck | null };
+    try {
+        submission = await submitPodPrompt(connection, { promptPayload, authorization });
+    } catch (err: any) {
+        console.error(`[cloud/prompt] Error submitting to ${body.pod_url}:`, err.message);
+        return {
+            status: 502,
+            response: { error: `Failed to reach pod: ${err.message}` },
+        };
+    }
+
+    const { response: upstream, ack } = submission;
+    if (!upstream.ok || !ack) {
+        // Relay the pod's own native error response so the caller can expose
+        // ComfyUI's validation details without rewriting them.
+        const errorBody = await upstream.json().catch(() => ({ error: `Pod returned HTTP ${upstream.status}` }));
+        return {
+            status: upstream.ok ? 502 : upstream.status,
+            response: errorBody,
+        };
+    }
 
     // ── Mode 1: server-side processing ──────────────────────────────
     // The client submits and is done — the server owns the pod stream
-    // and the generation json from here on.
+    // events and the generation json from here on.
     if (body.workflow_id && body.generation_id) {
         const root = _variables?.root as string | undefined;
         if (!root) {
             return { status: 500, response: { error: 'Server misconfigured: missing project root' } };
         }
 
-        // The native client id was generated before this asynchronous branch,
-        // so the accepted response, websocket, and generation log correlate.
-        const clientId = directClientId;
-
-        // Fire-and-forget — intentionally not awaited. The function never
-        // rejects; all failures land in the generation file.
-        void processPodPromptInBackground(
-            root,
-            body.workflow_id,
-            body.generation_id,
-            submission,
-            submit
-        );
+        // Fire-and-forget tracking: the subscriber folds every routed event
+        // into the generation .log/json until the run reaches a terminal
+        // state (or the pod socket dies — the registry emits prompt_error).
+        trackGenerationOnPod(root, body.workflow_id, body.generation_id, connection, ack);
 
         return {
             status: 202,
@@ -132,285 +166,289 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
                 accepted: true,
                 workflow_id: body.workflow_id,
                 generation_id: body.generation_id,
-                client_id: clientId
+                client_id: connection.clientId,
+                prompt_id: ack.prompt_id ?? null
             }
         };
     }
 
-    // ── Mode 2: direct websocket event stream ────────────────────────
-    try {
-        const upstream = await submit();
+    // ── Mode 2: direct event stream off the shared socket ────────────
+    const stream = buildPodEventStream(connection, ack);
 
-        if (!upstream.ok && upstream.headers.get('content-type')?.includes('application/json')) {
-            // Non-streaming error from the pod — return as-is
-            const errorBody = await upstream.json().catch(() => ({ error: `Pod returned HTTP ${upstream.status}` }));
-            return {
-                status: upstream.status,
-                response: errorBody,
-            };
-        }
+    const responseHeaders = new Headers();
+    responseHeaders.set('Content-Type', 'application/x-ndjson');
+    responseHeaders.set('Cache-Control', 'no-cache');
+    responseHeaders.set('Connection', 'keep-alive');
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
 
-        // Stream the NDJSON response back to the client as a raw Response
-        const responseHeaders = new Headers();
-        responseHeaders.set('Content-Type', 'application/x-ndjson');
-        responseHeaders.set('Cache-Control', 'no-cache');
-        responseHeaders.set('Connection', 'keep-alive');
-        responseHeaders.set('Access-Control-Allow-Origin', '*');
-
-        return {
-            status: upstream.status,
-            raw: new Response(upstream.body, {
-                status: upstream.status,
-                headers: responseHeaders,
-            }),
-        };
-    } catch (err: any) {
-        console.error(`[cloud/prompt] Error connecting to ${body.pod_url}:`, err.message);
-        return {
-            status: 502,
-            response: { error: `Failed to reach pod: ${err.message}` },
-        };
-    }
+    return {
+        status: 200,
+        raw: new Response(stream, {
+            status: 200,
+            headers: responseHeaders,
+        }),
+    };
 });
 
 // ── Server-side background processing ───────────────────────────────
 
 /**
- * Submit the prompt to the pod, consume its NDJSON stream, and persist
- * the outcome (status, results, timing, error) into the generation json
- * file. The event stream itself is traced into the sibling .log file only.
- * Never throws — failures are recorded in the generation entry itself.
+ * Consume one prompt's events off the pod's shared websocket, persist the
+ * outcome (status, results, timing, error) into the generation json file,
+ * and trace every event into the sibling .log file (one log per prompt_id —
+ * the raw events are intentionally NOT stored in the json).
  *
- * The pod-facing submission opens the native ComfyUI websocket before POST
- * /prompt and resolves to a Response whose NDJSON body this function reads.
- * `submission` records the direct URL and client id for the generation log.
+ * Driven PUSH-style by the pod registry (see pod-socket.ts — events arrive
+ * matched by prompt_id); never throws — failures land in the generation
+ * entry itself. Terminals: execution_success / execution_interrupted
+ * (completion) and execution_error / prompt_error (failure, incl. the
+ * registry's socket-death terminal).
  */
-async function processPodPromptInBackground(
+function trackGenerationOnPod(
     root: string,
     workflowId: string,
     generationId: string,
-    submission: { origin: string; clientId?: string },
-    submit: () => Promise<Response>
-): Promise<void> {
+    connection: PodSocketConnection,
+    ack: PodPromptAck
+): void {
     const startedAt = Date.now();
     const results: GenerationResultItem[] = [];
-    let failureMessage: string | null = null;
     let eventCount = 0;
+    let finished = false;
+    let unsubscribe: () => void = () => undefined;
 
     // Append a timestamped line to <generationId>.log (next to the .json)
-    // at every status change and streamed event. Best-effort — never throws.
+    // at every status change and routed event. Best-effort — never throws.
     // Fire-and-forget: appends are chained per log file inside the store,
-    // so rapid event bursts still land in strict chronological order while
-    // the NDJSON reader never waits on disk.
+    // so rapid event bursts still land in strict chronological order.
     const log = (message: string) =>
         void appendGenerationLog(root, workflowId, generationId, message);
 
-    log(`Generation started — submitting to ${submission.origin} (client_id: ${submission.clientId ?? 'n/a'})`);
+    const promptId = typeof ack.prompt_id === 'string' ? ack.prompt_id : '';
+    log(
+        `Generation started — submitting to ${connection.podUrl.toString()} ` +
+        `(ComfyUI shared websocket, client_id: ${connection.clientId}, prompt_id: ${promptId || 'n/a'})`
+    );
 
-    try {
-        // Mark the generation as picked up so pollers see live progress
-        const patched = await patchGenerationFile(root, workflowId, generationId, { status: 'processing' });
-        if (!patched) {
+    /**
+     * Persist the final state — result payloads (base64 data: urls captured
+     * from the stream) are first moved onto disk as plain asset files; the
+     * json keeps only `file:` references to them (persistResultAssets).
+     */
+    const finalize = async (failureMessage: string | null) => {
+        if (finished) return;
+        finished = true;
+        unsubscribe();
+
+        const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+        const completedDate = new Date().toISOString();
+        const persistedResults = await persistResultAssets(root, workflowId, generationId, results);
+        if (results.some((r, i) => r.url !== persistedResults[i].url)) {
+            log(`Persisted result payload(s) to asset files under generation/${generationId}/`);
+        }
+        if (failureMessage) {
+            await patchGenerationFile(root, workflowId, generationId, {
+                status: 'failed',
+                error: failureMessage,
+                result: persistedResults,
+                generatedTime: elapsed,
+                completedDate
+            });
+            log(`Generation FAILED in ${elapsed}: ${failureMessage} (${eventCount} event(s), ${results.length} result(s))`);
+            console.error(
+                `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed ` +
+                `in ${elapsed}: ${failureMessage}`
+            );
+        } else {
+            await patchGenerationFile(root, workflowId, generationId, {
+                status: 'completed',
+                error: null,
+                result: persistedResults,
+                generatedTime: elapsed,
+                completedDate
+            });
+            log(`Generation COMPLETED in ${elapsed} — ${eventCount} event(s), ${results.length} result(s)`);
+            console.log(
+                `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${connection.clientId}) completed ` +
+                `in ${elapsed} — ${eventCount} stream event(s), ${results.length} result(s)`
+            );
+        }
+    };
+
+    // ComfyUI rejected the prompt at validation time: it will never
+    // execute, so no execution events will ever arrive. Finalize directly
+    // with the same error the old stream path synthesized — no subscriber
+    // is ever registered, so the pending submission count is released
+    // explicitly (keeps GET /v1/comfy/cloud's per-pod prompt count honest).
+    const nodeErrors = ack.node_errors;
+    if (nodeErrors && typeof nodeErrors === 'object' && Object.keys(nodeErrors).length > 0) {
+        releasePodSubmission(connection);
+        log(`Prompt validation failed: ${JSON.stringify(nodeErrors)}`);
+        void finalize(`Prompt validation failed: ${JSON.stringify(nodeErrors)}`);
+        return;
+    }
+
+    // Mark the generation as picked up so pollers see live progress. If the
+    // file is already gone, drop the subscriber — there is nothing to update.
+    void patchGenerationFile(root, workflowId, generationId, { status: 'processing' }).then((patched) => {
+        if (!patched && !finished) {
             log(`Generation '${generationId}' not found — aborting background processing`);
             console.warn(`[cloud/prompt] Generation '${generationId}' not found — aborting background processing`);
-            return;
+            finished = true;
+            unsubscribe();
         }
+    });
 
-        const upstream = await submit();
-        log(`Pod responded HTTP ${upstream.status}`);
+    unsubscribe = subscribePodPrompt(connection, {
+        promptId,
+        onEvent: (event) => {
+            if (finished) return;
 
-        if (!upstream.ok) {
-            const errorBody = await upstream
-                .json()
-                .catch(() => ({ error: `Pod returned HTTP ${upstream.status}` }));
-            failureMessage =
-                (errorBody as { error?: string })?.error ?? `Pod returned HTTP ${upstream.status}`;
-            log(`Pod error response: ${failureMessage}`);
-        } else {
-            const outcome = await consumeNdjsonStream(upstream, results, log);
-            failureMessage = outcome.failure;
-            eventCount = outcome.eventCount;
+            // Count + trace every event — the .log trail replaces the old
+            // practice of persisting the raw events into the generation json.
+            eventCount++;
+            log(`Event: ${event.type} ${summarizeEventData(event.data)}`);
+
+            // Capture image previews as results
+            const preview = extractPreviewResult(event);
+            if (preview) {
+                results.push(preview);
+                log(`Captured preview image from node ${preview.nodeId} (${preview.mimeType}, ${preview.size} bytes)`);
+            }
+
+            // Capture server_client_data file payloads — the ComfyUI-CloudClient
+            // save nodes (ClientImageSaveNode / ClientVideoSaveNode) ship their
+            // PNG/GIF/MP4/WEBM output over the stream as base64 files.
+            for (const file of extractServerClientDataResults(event)) {
+                results.push(file.result);
+                log(
+                    `Captured server_client_data file '${file.filename || '(unnamed)'}' ` +
+                        `(${file.result.mimeType}, ${file.result.size} bytes)`
+                );
+            }
+
+            if (event.type === 'execution_error' || event.type === 'prompt_error') {
+                const data = event.data as Record<string, unknown>;
+                const failureMessage =
+                    (data?.exception_message as string) ??
+                    (data?.error as string) ??
+                    `Generation failed (${event.type})`;
+                log(`Terminal error (${event.type}): ${failureMessage}`);
+                void finalize(failureMessage);
+            } else if (event.type === 'execution_success' || event.type === 'execution_interrupted') {
+                // The shared socket carries native terminals (the old
+                // per-prompt envelope's prompt_done does not exist here) —
+                // a successful/interrupted execution completes the run AFTER
+                // ComfyUI's final executed outputs have been delivered.
+                void finalize(null);
+            }
         }
-    } catch (err: any) {
-        failureMessage = err.message ?? String(err);
-        log(`Exception while processing: ${failureMessage}`);
-    }
-
-    // Persist the final state — results into the generation json. Result
-    // payloads (base64 data: urls captured from the stream) are first moved
-    // onto disk as plain asset files; the json keeps only `file:` references
-    // to them (persistResultAssets). The event progression is NOT stored:
-    // the .log file next to the json already carries the full chronological
-    // trail (a line per status change and per streamed event), which is
-    // sufficient to understand the run.
-    const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
-    const completedDate = new Date().toISOString();
-    const persistedResults = await persistResultAssets(root, workflowId, generationId, results);
-    if (results.some((r, i) => r.url !== persistedResults[i].url)) {
-        log(`Persisted result payload(s) to asset files under generation/${generationId}/`);
-    }
-    if (failureMessage) {
-        await patchGenerationFile(root, workflowId, generationId, {
-            status: 'failed',
-            error: failureMessage,
-            result: persistedResults,
-            generatedTime: elapsed,
-            completedDate
-        });
-        log(`Generation FAILED in ${elapsed}: ${failureMessage} (${eventCount} event(s), ${results.length} result(s))`);
-        console.error(
-            `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed ` +
-            `in ${elapsed}: ${failureMessage}`
-        );
-    } else {
-        await patchGenerationFile(root, workflowId, generationId, {
-            status: 'completed',
-            error: null,
-            result: persistedResults,
-            generatedTime: elapsed,
-            completedDate
-        });
-        log(`Generation COMPLETED in ${elapsed} — ${eventCount} event(s), ${results.length} result(s)`);
-        console.log(
-            `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${submission.clientId}) completed ` +
-            `in ${elapsed} — ${eventCount} stream event(s), ${results.length} result(s)`
-        );
-    }
+    });
 }
 
 /**
- * Read the pod's NDJSON response to completion, capturing image previews
- * into `results` and counting events.
- * Returns `{ failure, eventCount }` — failure is the native execution_error
- * or direct connection error message, else null.
- *
- * Every event is appended to the generation's .log (via `log`), which is
- * the chronological, human-readable trail of the run. Events are NOT
- * persisted into the generation json — the .log is sufficient.
+ * Build the direct NDJSON stream for one prompt off the pod's shared
+ * websocket. Mirrors the removed per-prompt socket stream: the prompt_queued
+ * acknowledgement leads, routed prompt events follow one per line (in
+ * arrival order), and the stream ends at execution terminals (+ the
+ * synthesized prompt_done envelope on success) or when the socket dies.
  */
-async function consumeNdjsonStream(
-    upstream: Response,
-    results: GenerationResultItem[],
-    log: (message: string) => void
-): Promise<{ failure: string | null; eventCount: number }> {
-    const reader = (upstream.body as ReadableStream<Uint8Array> | null)?.getReader();
-    if (!reader) {
-        log('Pod returned an empty body — no stream to consume');
-        return { failure: 'Pod returned an empty body', eventCount: 0 };
-    }
+function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck): ReadableStream<Uint8Array> {
+    const encoder = new TextEncoder();
+    let streamFinished = false;
+    let unsubscribe: () => void = () => undefined;
 
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let failureMessage: string | null = null;
-    let eventCount = 0;
-
-    // ── Job scoping (client_id → prompt_id) ─────────────────────────
-    // Several generations may share the pod at once; ComfyUI broadcasts
-    // every execution event to all websocket subscribers, so this stream
-    // can receive events belonging to OTHER jobs. Our submission's
-    // prompt_id is learned from the prompt_queued acknowledgement; from
-    // then on, any event carrying a DIFFERENT prompt_id is dropped.
-    // Events without a prompt_id (status broadcasts, prompt_done, preview
-    // frames) cannot be attributed that way and are kept — prompt_done is
-    // emitted per direct subscription, so the stream still ends when this
-    // client id's job finishes.
-    let ourPromptId: string | null = null;
-
-    /** Returns true when the event is terminal (stop reading). */
-    const handleEvent = (event: StreamEvent): boolean => {
-        if (event.type === 'prompt_queued') {
-            const pid = (event.data as Record<string, unknown>)?.prompt_id;
-            if (typeof pid === 'string') {
-                ourPromptId = pid;
-                log(`Enqueued — prompt_id: ${pid}`);
-            }
-        } else {
-            const pid = (event.data as Record<string, unknown>)?.prompt_id;
-            if (ourPromptId && typeof pid === 'string' && pid !== ourPromptId) {
-                return false; // another job's event on this shared pod — ignore
-            }
-        }
-
-        // Count + trace every event — the .log trail replaces the old
-        // practice of persisting the raw events into the generation json.
-        eventCount++;
-        log(`Event: ${event.type} ${summarizeEventData(event.data)}`);
-
-        // Capture image previews as results
-        const preview = extractPreviewResult(event);
-        if (preview) {
-            results.push(preview);
-            log(`Captured preview image from node ${preview.nodeId} (${preview.mimeType}, ${preview.size} bytes)`);
-        }
-
-        // Capture server_client_data file payloads — the ComfyUI-CloudClient
-        // save nodes (ClientImageSaveNode / ClientVideoSaveNode) ship their
-        // PNG/GIF/MP4/WEBM output over the stream as base64 files.
-        for (const file of extractServerClientDataResults(event)) {
-            results.push(file.result);
-            log(
-                `Captured server_client_data file '${file.filename || '(unnamed)'}' ` +
-                    `(${file.result.mimeType}, ${file.result.size} bytes)`
-            );
-        }
-
-        if (event.type === 'execution_error' || event.type === 'prompt_error') {
-            const data = event.data as Record<string, unknown>;
-            failureMessage =
-                (data?.exception_message as string) ??
-                (data?.error as string) ??
-                `Generation failed (${event.type})`;
-            log(`Terminal error (${event.type}): ${failureMessage}`);
-            return true;
-        }
-        if (event.type === 'prompt_done') {
-            log('prompt_done — stream ending');
-            return true;
-        }
-        return false;
-    };
-
-    try {
-        let done = false;
-        while (!done) {
-            const { done: finished, value } = await reader.read();
-            if (finished) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() ?? '';
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed) continue;
-                let event: StreamEvent;
+    return new ReadableStream<Uint8Array>({
+        start(controller) {
+            const push = (event: StreamEvent) => {
+                if (streamFinished) return;
                 try {
-                    event = JSON.parse(trimmed) as StreamEvent;
+                    controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
                 } catch {
-                    log('Skipping malformed NDJSON line');
-                    console.warn('[cloud/prompt] Skipping malformed NDJSON line');
-                    continue;
+                    streamFinished = true;
+                    unsubscribe();
                 }
-                if (handleEvent(event)) {
-                    done = true;
-                    break;
+            };
+
+            const finishStream = (terminal?: StreamEvent) => {
+                if (streamFinished) return;
+                streamFinished = true;
+                if (terminal) {
+                    try {
+                        controller.enqueue(encoder.encode(JSON.stringify(terminal) + '\n'));
+                    } catch {
+                        // The stream is going away anyway.
+                    }
                 }
-            }
-        }
+                try {
+                    controller.close();
+                } catch {
+                    // Closing an already-closed stream is harmless.
+                }
+                unsubscribe();
+            };
 
-        // Flush any trailing line left in the buffer
-        if (!done && buffer.trim()) {
-            try {
-                handleEvent(JSON.parse(buffer.trim()) as StreamEvent);
-            } catch {
-                // Ignore trailing incomplete JSON
-            }
-        }
-    } finally {
-        reader.releaseLock();
-    }
+            // First line carries the native POST /prompt acknowledgement so
+            // the client can scope following native frames to this job.
+            push({
+                type: 'prompt_queued',
+                data: {
+                    prompt_id: ack.prompt_id ?? null,
+                    number: ack.number ?? null,
+                    node_errors: ack.node_errors ?? {}
+                }
+            });
 
-    return { failure: failureMessage, eventCount };
+            // ComfyUI rejected the prompt at validation time: it will never
+            // execute, so no execution events will ever arrive. No subscriber
+            // is registered — release the pending submission count.
+            const nodeErrors = ack.node_errors;
+            if (nodeErrors && typeof nodeErrors === 'object' && Object.keys(nodeErrors).length > 0) {
+                releasePodSubmission(connection);
+                finishStream({
+                    type: 'execution_error',
+                    data: {
+                        prompt_id: ack.prompt_id ?? null,
+                        error: `Prompt validation failed: ${JSON.stringify(nodeErrors)}`,
+                        node_errors: nodeErrors
+                    }
+                });
+                return;
+            }
+
+            // The pod socket dying before subscription leaves nothing to read.
+            if (connection.closed) {
+                releasePodSubmission(connection);
+                finishStream({
+                    type: 'prompt_error',
+                    data: { error: 'ComfyUI websocket closed before the prompt finished' }
+                });
+                return;
+            }
+
+            unsubscribe = subscribePodPrompt(connection, {
+                promptId: typeof ack.prompt_id === 'string' ? ack.prompt_id : '',
+                onEvent: (event) => {
+                    push(event);
+                    if (event.type === 'execution_error' || event.type === 'prompt_error') {
+                        // prompt_error covers the registry's socket-death
+                        // terminal — no final writes are possible after it.
+                        finishStream();
+                    } else if (event.type === 'execution_success' || event.type === 'execution_interrupted') {
+                        finishStream({ type: 'prompt_done', data: {} });
+                    }
+                }
+            });
+        },
+
+        cancel() {
+            // The consumer walked away (client disconnect) — the pod keeps
+            // executing, but this job's stream is no longer needed. The pod's
+            // shared socket is NOT touched.
+            streamFinished = true;
+            unsubscribe();
+        }
+    });
 }
 
 /**

@@ -1,11 +1,12 @@
 // =============================================================================
 // GPU-keyed spawner selection tests (endpoints/cloud/cloud.ts).
 //
-// POST /v1/comfy/cloud create mode now requires a `gpu` key; the server
-// resolves it via comfyCloudServiceEndpoint (gpu → {serverName: spawnerUrl})
-// and walks that GPU's servers IN ORDER — first spawner answering a usable
-// 302 redirect wins, failures fall through, and an exhausted list answers
-// HTTP 503 with the per-server attempts trail.
+// POST /v1/comfy/cloud create mode requires a `gpu` key; the server resolves
+// it via comfyCloudServiceEndpoint (gpu → {serverName: spawnerUrl}) and walks
+// that GPU's servers IN ORDER — first spawner answering a usable 302 redirect
+// wins, failures fall through, and an exhausted list answers HTTP 503 with
+// the per-server attempts trail. The spawned pod is only returned once its
+// ONE persistent websocket is connected and held (pod-socket.ts).
 //
 // The websocket is replaced with a deterministic native ComfyUI fake and
 // fetch is stubbed, so no real spawner or pod is contacted.
@@ -15,7 +16,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Every websocket handshake completes → spawned pods use native ComfyUI.
+const testState = vi.hoisted(() => ({
+    openBehavior: 'open' as 'open' | 'refused'
+}));
+
+// The fake opens on the next microtask, or refuses the connection
+// (error + close events, like a TCP-level refusal) per testState.
 vi.mock('undici', () => {
     class FakeWebSocket extends EventTarget {
         static readonly CONNECTING = 0;
@@ -30,6 +36,12 @@ vi.mock('undici', () => {
             this.url = url;
             queueMicrotask(() => {
                 if (this.readyState !== FakeWebSocket.CONNECTING) return;
+                if (testState.openBehavior === 'refused') {
+                    this.readyState = FakeWebSocket.CLOSED;
+                    this.dispatchEvent(new Event('error'));
+                    this.dispatchEvent(new Event('close'));
+                    return;
+                }
                 this.readyState = FakeWebSocket.OPEN;
                 this.dispatchEvent(new Event('open'));
             });
@@ -41,10 +53,15 @@ vi.mock('undici', () => {
         }
     }
 
-    return { WebSocket: FakeWebSocket, Agent: class FakeAgent { constructor(_opts?: any) {} } };
+    return {
+        WebSocket: FakeWebSocket,
+        Agent: class FakeAgent { constructor(_opts?: any) {} },
+        ping: () => undefined
+    };
 });
 
-import { createCloudPod, requestSpawn, spawnFromCandidates } from './cloud';
+import { createCloudPod, listCloudPods, requestSpawn, spawnFromCandidates } from './cloud';
+import { closeAllPodSockets } from './pod-socket';
 
 // The real registry endpoints (runtime/secret/private/modal/comfy.ts) —
 // the 4090 GPU currently has exactly one spawner server named "lancer".
@@ -60,10 +77,14 @@ function parameters(body: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+    testState.openBehavior = 'open';
     vi.stubGlobal('fetch', vi.fn());
 });
 
 afterEach(() => {
+    // Release every persistent pod socket so no registry state/heartbeat
+    // leaks between tests.
+    closeAllPodSockets();
     vi.unstubAllGlobals();
 });
 
@@ -256,5 +277,50 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
         const result = await createCloudPod(context(), parameters({}), { spawnerUrl: override });
         expect(result.status).toBe(200);
         expect(result.response).toMatchObject({ pod_url: POD_URL, spawner: 'override' });
+    });
+
+    it('answers 502 and registers nothing when the fresh pod refuses its persistent websocket', async () => {
+        testState.openBehavior = 'refused';
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(null, { status: 302, headers: { location: POD_URL } })
+        );
+
+        const result = await createCloudPod(context(), parameters({ gpu: '4090' }), {});
+        expect(result.status).toBe(502);
+        expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
+        // The refused pod is NOT handed out — the registry stays empty.
+        expect((await listCloudPods(context(), parameters({}), {})).response).toEqual({ pods: [] });
+    });
+});
+
+describe('GET /v1/comfy/cloud', () => {
+    it('returns an empty list before any pod was spawned', async () => {
+        const result = await listCloudPods(context(), parameters({}), {});
+        expect(result).toEqual({ status: 200, response: { pods: [] } });
+    });
+
+    it('lists the spawned pods as active with zero in-flight prompts', async () => {
+        vi.mocked(fetch).mockImplementation(async (input: any) => {
+            const url = String(input);
+            if (url.startsWith(SPAWNER_4090)) {
+                return new Response(null, { status: 302, headers: { location: POD_URL } });
+            }
+            return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+        });
+        await createCloudPod(context(), parameters({ gpu: '4090' }), {});
+
+        const result = await listCloudPods(context(), parameters({}), {});
+        expect(result.status).toBe(200);
+        expect(result.response).toEqual({
+            pods: [{
+                pod_url: `${POD_URL}/`,
+                gpu: '4090',
+                name: undefined,
+                client_id: expect.any(String),
+                active: true,
+                prompts: 0,
+                connectedAt: expect.any(String)
+            }]
+        });
     });
 });

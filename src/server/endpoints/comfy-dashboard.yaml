@@ -3,11 +3,16 @@ info:
   title: ComfyUI Dashboard API
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
-    CRUD for workflows, generation snapshots, a unified endpoint for
-    spawning/checking Beam cloud pods. Prompt processing happens
-    server-side: POST /v1/comfy/cloud/prompt (with workflow_id +
-    generation_id) consumes the pod's NDJSON stream in the background and
-    keeps the generation json updated — clients poll
+    CRUD for workflows, generation snapshots, and direct-access Beam cloud
+    pods. Every spawned pod gets ONE persistent ComfyUI websocket held in
+    server memory (opened during POST /v1/comfy/cloud, which blocks until
+    the socket connects, and kept alive until the cloud server closes it);
+    GET /v1/comfy/cloud lists those active pods with their in-flight prompt
+    counts. Prompt processing happens server-side: POST
+    /v1/comfy/cloud/prompt (with workflow_id + generation_id) submits over
+    the pod's shared socket, demultiplexes events by prompt_id, records
+    every routed event into the prompt's .log file (one log per prompt),
+    and keeps the generation json updated — clients poll
     GET /v1/comfy/workflows/{id}/generate for progress instead of
     streaming. Result media (images/videos/audio) is persisted on disk as
     plain asset files and served per item from
@@ -16,8 +21,8 @@ info:
     disk with byte-range support) — usable directly in <img>/<video>/<audio>
     tags, and the generation json only carries small file references.
     Multiple generations may be queued on the same pod
-    concurrently; each submission is scoped by its own client_id so only
-    its job's events land in its generation json.
+    concurrently; the shared websocket carries them all and prompt_id
+    scoping keeps each job's events in its own generation json/log.
   version: 0.8.0
 servers:
   - url: http://127.0.0.1:8188
@@ -28,7 +33,9 @@ tags:
   - name: Workflows
     description: CRUD for ComfyUI workflows
   - name: Cloud
-    description: Beam cloud pod management — spawn pods and check pod status
+    description: >-
+      Beam cloud pod management — spawn pods (each gets one persistent
+      server-held websocket), list active pods, and check pod status
 paths:
   # ── Workflows ──────────────────────────────────────────────────────
 
@@ -587,8 +594,9 @@ paths:
       summary: Get a generation's .log event trail
       description: >-
         Returns the timestamped .log file written next to the generation
-        json by POST /v1/comfy/cloud/prompt while it consumes the pod's
-        NDJSON stream server-side — the chronological trail of status
+        json by POST /v1/comfy/cloud/prompt while it consumes the run's
+        events off the pod's shared persistent websocket (matched by
+        prompt_id — one log per prompt) — the chronological trail of status
         changes and per-event summaries (submission, enqueue, progress,
         captured results, terminal error). Intended for DEBUGGING failed
         runs: the dashboard's OUTPUT tab opens this from failed/error
@@ -637,9 +645,49 @@ paths:
   # ── Cloud ──────────────────────────────────────────────────────────
 
   /v1/comfy/cloud:
+    get:
+      operationId: listCloudPods
+      summary: List active cloud pods
+      description: >-
+        Returns every cloud pod whose server-managed websocket is currently
+        held in memory. Pods enter the list when spawned via
+        POST /v1/comfy/cloud (or adopted by a status check) and drop out as
+        soon as the cloud server terminates their socket. There is exactly
+        one websocket per pod — it carries every prompt that pod processes.
+
+        Each entry reports whether the pod's websocket is connected
+        (`active`) and how many prompts the pod is currently processing
+        (`prompts` — all of the pod's concurrent generations, demultiplexed
+        on the shared socket by prompt_id). Dashboards poll this endpoint
+        to keep their pod buttons in sync automatically instead of probing
+        every pod individually.
+      tags:
+        - Cloud
+      responses:
+        '200':
+          description: The active pods (empty list when none are connected)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudPodListResponse'
+              example:
+                pods:
+                  - pod_url: "https://test-pod-abc123.beam.cloud:8188/"
+                    gpu: "4090"
+                    name: "my-comfy-pod"
+                    client_id: "abc123def4567890fedcba0987654321"
+                    active: true
+                    prompts: 2
+                    connectedAt: "2026-08-05T10:15:30.000Z"
+                  - pod_url: "https://b300-pod-def456.beam.cloud:8188/"
+                    gpu: B300
+                    client_id: "000aaaaabbbbccccddddeeeeffff0123"
+                    active: true
+                    prompts: 0
+                    connectedAt: "2026-08-05T10:20:41.000Z"
     post:
       operationId: cloudPod
-      summary: Create a cloud pod or check pod status
+      summary: Create a cloud pod (blocks until its websocket connects) or check pod status
       description: >-
         Dual-purpose endpoint for Beam cloud pod management:
 
@@ -648,31 +696,26 @@ paths:
         server list registered under `comfyCloudServiceEndpoint`
         (gpu → {serverName: spawnerUrl}); the servers are tried IN ORDER:
         a GET to the spawner URL returns a 302 redirect to the spawned
-        pod's public proxy URL. A failed attempt (unreachable server,
+        pod's public ComfyUI URL. A failed attempt (unreachable server,
         non-redirect status, redirect without Location) falls through to
         the next server; when every server for the GPU has failed, the
         endpoint answers 503 — no server is available to spawn the
-        requested GPU. The pod runs ComfyUI with a FastAPI proxy on its
-        public port and scales to zero ~120s after the last active
-        connection.
+        requested GPU.
 
-        **Check pod status** — Send `{"pod_url": "<pod_url>"}`. Probes the
-        Tier 2 proxy of an existing pod and returns its health, system stats,
-        and available models. Use this to verify a pod is ready before
-        submitting prompts.
+        Once the spawner answers, the server opens the pod's native
+        ComfyUI websocket — the SINGLE persistent socket that will carry
+        every prompt this pod ever processes — and **only answers once the
+        websocket is connected and held in server memory**. The connection
+        is maintained forever (protocol pings) until the cloud server
+        terminates it. A fresh pod that refuses the websocket is NOT handed
+        out: the endpoint answers 502 and nothing is registered.
 
-        **Direct ComfyUI detection** — The pod_url can front a DIRECT
-        ComfyUI server instead of the Tier 2 ComfyProxy. Both modes detect
-        this by attempting the native ComfyUI websocket handshake at
-        `<pod_url>/ws?clientId=<id>`: a completed handshake means direct
-        (`is_direct: true`), a refused/failed one means proxy
-        (`is_direct: false`). A direct ComfyUI has NO health JSON — its
-        GET / serves the frontend HTML — so its health check is simply
-        "base URL answered HTTP 200" plus "websocket available"; the
-        synthesized report is enriched with the native GET /system_stats
-        when it answers, and the models listing stays empty. Feed the
-        `is_direct` flag back into POST /v1/comfy/cloud/prompt to drive
-        the pod over its native websocket.
+        **Check pod status** — Send `{"pod_url": "<pod_url>"}`. Registry-
+        backed: the pod's server-managed websocket is reused, or — when the
+        server does not track the pod yet (e.g. after a restart) — opened
+        and registered (adopted), so the answer always reflects the single
+        shared socket. Returns the pod's health, system stats, and empty
+        model-list fields. A pod refusing the websocket answers 502.
       tags:
         - Cloud
       requestBody:
@@ -698,9 +741,10 @@ paths:
       responses:
         '200':
           description: >-
-            Pod created or status returned successfully.
+            Pod websocket connected and held in server memory (create), or
+            pod status returned over its server-managed socket (status).
             The response shape depends on the request:
-              - **Create**: `{ pod_url }`
+              - **Create**: `{ pod_url, gpu, spawner, health, models_dir, models }`
             - **Status**: `{ health, models_dir, models }`
           content:
             application/json:
@@ -710,14 +754,12 @@ paths:
                   - $ref: '#/components/schemas/CloudPodStatusResponse'
               examples:
                 create_result:
-                  summary: Pod created successfully (direct ComfyUI pod)
+                  summary: Pod created successfully (persistent websocket held)
                   value:
                     pod_url: "https://test-pod-abc123.beam.cloud:8188"
-                    is_direct: true
                 status_result:
-                  summary: Pod status returned (Tier 2 proxy pod)
+                  summary: Pod status returned (native ComfyUI pod)
                   value:
-                    is_direct: false
                     health:
                       healthy: true
                       system_stats:
@@ -749,7 +791,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '502':
-          description: Spawner unavailable, pod creation failed, or pod unreachable
+          description: >-
+            Spawner unavailable, or the pod refused its persistent ComfyUI
+            websocket — a pod that cannot hold the socket is never handed
+            out and never registered.
           content:
             application/json:
               schema:
@@ -774,51 +819,43 @@ paths:
   /v1/comfy/cloud/prompt:
     post:
       operationId: cloudPrompt
-      summary: Submit a prompt to a spawned pod — server-side processing (202) or NDJSON proxy stream (200)
+      summary: Submit a prompt to a spawned pod — server-side processing (202) or direct event stream (200)
       description: >-
         Two modes:
 
         **Server-side processing** — include `workflow_id` and
         `generation_id` in the body. The server submits the prompt to the
-        pod, consumes the resulting NDJSON event stream in the background,
+        pod over HTTP POST /prompt (bound to the shared socket's client_id),
+        registers a prompt_id subscriber on the pod's persistent websocket,
         and keeps the generation json updated by itself (status →
         processing/completed/failed, results, timing — the same file
-        written by /v1/comfy/workflows/{id}/generate). The event
-        progression itself is traced into the sibling .log file — it is
-        intentionally NOT stored in the generation json. Returns 202
+        written by /v1/comfy/workflows/{id}/generate). Every event routed
+        to the prompt_id is traced into the sibling .log file — one log per
+        prompt — intentionally NOT stored in the generation json. Returns 202
         immediately; clients poll GET /v1/comfy/workflows/{id}/generate
         for progress.
 
-        **Legacy proxy mode** — no workflow reference. Streams the pod's
-        results back as `application/x-ndjson` — one JSON object per line.
-        The connection stays open while ComfyUI executes the prompt; each
-        WS event is forwarded as an NDJSON line. **Clients must read the
-        response body as a stream**, parsing one JSON document per line,
-        until they receive:
-        - `{"type":"proxy_done","data":{}}` — run completed normally, or
-        - `{"type":"execution_error",...}` / `{"type":"proxy_error",...}` — failure.
+        **Direct stream mode** — no workflow reference. Streams the pod's
+        shared-socket events for this prompt_id (plus unattributed
+        broadcasts) back as `application/x-ndjson` — one JSON object per
+        line. **Clients must read the response body as a stream**, parsing
+        one JSON document per line, until they receive:
+        - `{"type":"prompt_done","data":{}}` — run completed normally, or
+        - `{"type":"execution_error",...}` / `{"type":"prompt_error",...}` — failure
+          (prompt_error also covers the pod socket dying mid-run).
 
-        Two pod branches (orthogonal to the modes above):
-
-        - `is_direct` omitted/false → **proxy branch**: the payload is
-          POSTed to the Tier 2 ComfyProxy at pod_url and its NDJSON stream
-          is consumed. Self-healing: if pod_url answers the POST with
-          HTTP 405 (a native ComfyUI server has no POST / route — i.e. a
-          stale is_direct flag, e.g. the create-time probe raced a booting
-          pod), the submission is transparently retried over the direct
-          websocket flow instead of failing.
-        - `is_direct: true` → **direct ComfyUI branch**: a websocket is
-          opened at `<pod_url>/ws` and the prompt is POSTed to the native
-          `<pod_url>/prompt`. EVERY request gets a FRESH client_id
-          (caller-provided client_id is overridden) — ComfyUI routes a
-          prompt's execution events only to the websocket whose client_id
-          submitted it, so every job owns its stream and jobs can never
-          cross-read each other's events. The websocket messages are
-          translated back into the proxy's NDJSON event vocabulary
-          (proxy_enqueue, passthrough execution events, binary preview
-          frames → imagepreview.update, execution_success → proxy_done),
-          so both modes consume the stream with the exact same logic as
-          the proxy branch.
+        The pod must be registered and websocket-connected on this server:
+        pods are spawned (or adopted) via POST /v1/comfy/cloud, which holds
+        ONE persistent websocket per pod in memory until the cloud server
+        closes it. This endpoint NEVER opens another websocket — unknown or
+        terminated pods are rejected with 502. ComfyUI routes each prompt's
+        execution events to the socket whose client_id submitted it, so all
+        submissions share the pod-level client_id and the server
+        demultiplexes the single stream by prompt_id. Native websocket
+        frames pass through; binary previews are translated to
+        imagepreview.update (attributed to the last executing node/prompt)
+        and the direct envelope events are prompt_queued, prompt_done, and
+        prompt_error.
       tags:
         - Cloud
       requestBody:
@@ -829,7 +866,7 @@ paths:
               $ref: '#/components/schemas/CloudPromptRequest'
             examples:
               basic_prompt:
-                summary: Legacy proxy mode — client reads the NDJSON stream
+                summary: Direct ComfyUI mode — client reads the NDJSON stream
                 value:
                   pod_url: "https://test-pod-abc123.beam.cloud:8188"
                   prompt:
@@ -882,10 +919,11 @@ paths:
         '202':
           description: >-
             Accepted for server-side processing (workflow_id and
-            generation_id were provided). The server consumes the pod's
-            NDJSON stream in the background and updates the generation
-            json file itself (the raw events are traced into the sibling
-            .log file, not into the json). There is no response stream —
+            generation_id were provided). The server consumes the prompt's
+            events off the pod's shared persistent websocket (matched by
+            prompt_id) and updates the generation json file itself (the raw
+            events are traced into the sibling .log file — one log per
+            prompt — not into the json). There is no response stream —
             poll GET /v1/comfy/workflows/{id}/generate for progress.
           content:
             application/json:
@@ -902,18 +940,29 @@ paths:
                   client_id:
                     type: string
                     description: >-
-                      The 32-char hex client_id this submission was scoped
-                      with (generated by the server when not provided).
-                      Every generation queued on the same pod gets its own.
+                      The 32-char hex client_id of the pod's SHARED
+                      persistent websocket — every prompt on this pod is
+                      submitted under it, and the server demultiplexes the
+                      socket's events by prompt_id.
                     example: abc123def4567890fedcba0987654321
+                  prompt_id:
+                    type: string
+                    nullable: true
+                    description: >-
+                      The ComfyUI prompt_id assigned by the pod (from the
+                      POST /prompt acknowledgement) — the routing key for
+                      this run's events and its .log trail on the shared
+                      socket.
+                    example: f0c1a2b3-1234-5678-9abc-def012345678
                 required: [accepted, workflow_id, generation_id, client_id]
         '200':
           description: >-
-            Chunked NDJSON stream of progress events from the ComfyUI pod
-            (legacy proxy mode — no workflow reference provided).
-            See beam_comfy_service.yaml ProxyStreamEvent for the full event
-            vocabulary (proxy_enqueue, progress, executing, executed,
-            execution_success, execution_error, proxy_done, etc.).
+            Chunked NDJSON stream of progress events from the pod's shared
+            persistent websocket (direct stream mode — no workflow reference
+            provided), demultiplexed to this prompt_id plus unattributed
+            broadcasts. Native ComfyUI events and the prompt_queued,
+            prompt_done, and prompt_error envelope events are emitted one
+            per line.
           content:
             application/x-ndjson:
               schema:
@@ -922,7 +971,7 @@ paths:
                 happy_path:
                   summary: A successful txt2img run
                   value: |
-                    {"type":"proxy_enqueue","data":{"prompt_id":"f0c...","number":1,"node_errors":{}}}
+                    {"type":"prompt_queued","data":{"prompt_id":"f0c...","number":1,"node_errors":{}}}
                     {"type":"status","data":{"status":{"queue_running":[],"queue_pending":[]},"sid":"abc..."}}
                     {"type":"execution_start","data":{"prompt_id":"f0c..."}}
                     {"type":"progress","data":{"value":1,"max":20,"prompt_id":"f0c...","node":"3"}}
@@ -931,7 +980,7 @@ paths:
                     {"type":"executed","data":{"node":"9","output":{"images":[{"filename":"ComfyUI_00001_.png","subfolder":"","type":"output"}]},"prompt_id":"f0c..."}}
                     {"type":"executing","data":{"node":null,"prompt_id":"f0c..."}}
                     {"type":"execution_success","data":{"prompt_id":"f0c..."}}
-                    {"type":"proxy_done","data":{}}
+                    {"type":"prompt_done","data":{}}
         '400':
           description: Invalid request (missing prompt, invalid pod_url)
           content:
@@ -947,7 +996,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '502':
-          description: Pod unreachable or proxy error
+          description: >-
+            Pod not connected (unknown pod_url or its persistent websocket
+            was terminated — spawn/adopt it via POST /v1/comfy/cloud first),
+            or the HTTP prompt submission to the pod failed.
           content:
             application/json:
               schema:
@@ -1378,9 +1430,10 @@ components:
           type: string
           format: uri
           description: >-
-            Tier 2 proxy URL of an existing pod. When provided, the endpoint
-            returns the pod's health and models listing instead of creating
-            a new pod.
+            Native ComfyUI URL of an existing pod. When provided, the
+            endpoint reuses (or opens and registers) the pod's single
+            persistent websocket and returns the pod's health and empty
+            model-list fields instead of creating a new pod.
           example: https://test-pod-abc123.beam.cloud:8188
 
     CloudCreateResponse:
@@ -1388,22 +1441,21 @@ components:
       description: >-
         Response from spawning a new ComfyUI pod via the Beam spawner.
         The spawner URL returns a 302 redirect; pod_url is the Location
-        URL. The server additionally probes the fresh pod right away and
-        merges the result into this response — so health, models_dir, and
-        models are present when the pod already answers, or error when the
-        initial probe failed (the pod may still be booting; retry with a
-        status check). The probe also detects — via the native websocket
-        handshake — whether pod_url fronts a direct ComfyUI server
-        (is_direct).
+        URL. This response is only sent AFTER the pod's persistent
+        websocket connected and is held in server memory — a fresh pod that
+        refuses the socket answers 502 instead. With the socket held, the
+        server merges the status probe into this response — so health,
+        models_dir, and models are present, or error when the post-connect
+        system_stats enrichment itself failed.
       properties:
         pod_url:
           type: string
           format: uri
           description: >-
-            Public URL of the spawned pod (obtained from the 302 redirect
-            Location header) — a Tier 2 API proxy, or a direct ComfyUI
-            server when is_direct is true. Use this URL for status checks
-            and prompt submission.
+            Public native ComfyUI URL of the spawned pod (obtained from the
+            302 redirect Location header). Its websocket is already
+            connected and registered — use this URL for prompt submission
+            and pod-list matching.
           example: https://test-pod-abc123.beam.cloud:8188
         gpu:
           type: string
@@ -1415,16 +1467,8 @@ components:
             Name of the spawner server (within the GPU's server list) that
             won the fallback chain and produced this pod.
           example: lancer
-        is_direct:
-          type: boolean
-          description: >-
-            True when pod_url fronts a DIRECT ComfyUI server — detected by
-            opening its native websocket at <pod_url>/ws (a refused
-            connection means the Tier 2 ComfyProxy fronts it). Pass this
-            flag back as `is_direct` to POST /v1/comfy/cloud/prompt.
-          example: false
         health:
-          $ref: '#/components/schemas/ProxyHealthResponse'
+          $ref: '#/components/schemas/ComfyHealthResponse'
         models_dir:
           type: string
           example: /ComfyUI/models
@@ -1432,7 +1476,7 @@ components:
           $ref: '#/components/schemas/ModelsListing'
         error:
           type: string
-          description: Present only when the immediate post-spawn probe failed.
+          description: Present only when the post-connect stats enrichment failed.
       required: [pod_url]
 
     CloudPodStatusResponse:
@@ -1440,22 +1484,14 @@ components:
       description: >-
         Health and model listing for a running ComfyUI pod.
         Returned when POST /v1/comfy/cloud is called with a pod_url.
-        Mirrors the Tier 2 proxy GET / response from the Beam ComfyUI
-        service; for a direct ComfyUI pod (is_direct: true) the health is
-        the successful HTTP 200 base-URL answer plus the completed
-        websocket handshake (health.checked records both signals),
-        enriched with the native GET /system_stats when it answers, and
-        the models listing stays empty.
+         The health is based on the pod's server-managed persistent
+         websocket (reused or adopted by this call), records the optional
+         root HTTP check, and is enriched with native GET /system_stats when
+         it answers. The model listing is empty because prompt execution
+         uses the websocket protocol.
       properties:
         health:
-          $ref: '#/components/schemas/ProxyHealthResponse'
-        is_direct:
-          type: boolean
-          description: >-
-            True when pod_url fronts a DIRECT ComfyUI server — detected by
-            opening its native websocket at <pod_url>/ws (a refused
-            connection means the Tier 2 ComfyProxy fronts it).
-          example: false
+          $ref: '#/components/schemas/ComfyHealthResponse'
         models_dir:
           type: string
           example: /ComfyUI/models
@@ -1464,11 +1500,73 @@ components:
             direct ComfyUI pods — the native server lists no models.
         models:
           $ref: '#/components/schemas/ModelsListing'
-      required: [health, is_direct, models_dir, models]
+      required: [health, models_dir, models]
 
-    ProxyHealthResponse:
+    CloudPodListEntry:
       type: object
-      description: Result of probing the backgrounded ComfyUI's GET /system_stats.
+      description: >-
+        One cloud pod tracked by the server. There is exactly one persistent
+        websocket per cloud pod, opened when the pod was created via
+        POST /v1/comfy/cloud and held in memory until the cloud server
+        terminates it (at which point the pod drops out of this list).
+      properties:
+        pod_url:
+          type: string
+          format: uri
+          description: >-
+            Normalized native ComfyUI URL of the pod (the registry key —
+            URL.toString() form, so a bare host carries a trailing slash).
+          example: "https://test-pod-abc123.beam.cloud:8188/"
+        gpu:
+          type: string
+          description: GPU the pod was spawned on, when known (create echo).
+          example: "4090"
+        name:
+          type: string
+          description: Optional name given at spawn time.
+          example: my-comfy-pod
+        client_id:
+          type: string
+          description: >-
+            The 32-char hex client_id of the pod's SHARED persistent
+            websocket. Every prompt submitted to this pod is bound to it;
+            the server demultiplexes the socket's events by prompt_id.
+          example: abc123def4567890fedcba0987654321
+        active:
+          type: boolean
+          description: >-
+            The pod's server-managed websocket is currently connected
+            (false is only observable in the instant between a remote close
+            and the registry dropping the pod).
+        prompts:
+          type: integer
+          description: >-
+            Number of prompts currently being processed by this pod (all of
+            its concurrent generations riding the shared socket).
+          example: 2
+        connectedAt:
+          type: string
+          format: date-time
+          description: ISO timestamp when the persistent websocket connected.
+      required: [pod_url, client_id, active, prompts, connectedAt]
+
+    CloudPodListResponse:
+      type: object
+      description: >-
+        The server's active cloud pods — what GET /v1/comfy/cloud returns.
+        Dashboards poll this to add/refresh their pod buttons automatically.
+      properties:
+        pods:
+          type: array
+          items:
+            $ref: '#/components/schemas/CloudPodListEntry'
+      required: [pods]
+
+    ComfyHealthResponse:
+      type: object
+      description: >-
+        Status of a pod whose persistent ComfyUI websocket is connected,
+        enriched with GET /system_stats when it answers.
       properties:
         healthy:
           type: boolean
@@ -1564,15 +1662,20 @@ components:
       type: object
       description: >-
         Request body for POST /v1/comfy/cloud/prompt.
-        Sends a ComfyUI workflow graph to a spawned pod's Tier 2 proxy.
-        Mirrors the beam_comfy_service PromptRequest schema.
+        Sends a ComfyUI workflow graph to a spawned native ComfyUI pod.
+        The pod must already hold its single server-managed websocket
+        (spawned/adopted via POST /v1/comfy/cloud); this endpoint submits
+        over HTTP POST /prompt bound to the shared socket's client_id and
+        consumes the run's events from the shared socket, demultiplexed by
+        prompt_id.
       properties:
         pod_url:
           type: string
           format: uri
           description: >-
-            Tier 2 proxy URL of the spawned pod (obtained from the
-            create endpoint's pod_url field).
+            Native ComfyUI URL of the spawned pod (obtained from the create
+            endpoint's pod_url field). Must be registered and
+            websocket-connected on this server, otherwise 502.
           example: "https://test-pod-abc123.beam.cloud:8188"
         prompt:
           type: object
@@ -1583,30 +1686,13 @@ components:
             converts it to the flat API prompt ({"<nodeId>": {"class_type",
             "inputs"}}) before forwarding to the pod; documents already in
             API prompt format are passed through unchanged.
-        is_direct:
-          type: boolean
-          description: >-
-            Optional (default false). True selects the DIRECT ComfyUI
-            branch: the server opens the pod's native websocket at
-            <pod_url>/ws under a FRESH client_id per request (any
-            client_id sent here is overridden — every job owns its stream,
-            no cross-talk) and POSTs <pod_url>/prompt natively, translating
-            the socket back into the proxy's NDJSON event vocabulary. Use
-            the `is_direct` value reported by POST /v1/comfy/cloud.
-          example: false
         client_id:
           type: string
           description: >-
-            Optional 32-char hex identifier for the submission (proxy
-            branch only — the direct branch always generates a fresh one
-            per request). In server-side processing mode the server
-            generates one per submission when omitted (or invalid),
-            forwards it to the pod, and uses it to scope the shared pod's
-            broadcast stream: the job's prompt_id is learned from the
-            proxy_enqueue event and stream events carrying a different
-            prompt_id are dropped, so each generation json only receives
-            its own job's events even when multiple generations are queued
-            on the same pod.
+            Optional compatibility field — ignored. Every prompt is
+            submitted under the pod's SHARED websocket client_id, and the
+            server demultiplexes the single socket by prompt_id to keep
+            concurrent jobs isolated.
           example: abc123def4567890fedcba0987654321
         extra_data:
           type: object
@@ -1622,9 +1708,11 @@ components:
           type: string
           description: >-
             Optional. When provided together with generation_id, enables
-            server-side processing: the server consumes the pod's NDJSON
-            stream in the background and keeps the generation json updated
-            (same file written by /v1/comfy/workflows/{id}/generate).
+            server-side processing: the server registers a prompt_id
+            subscriber on the pod's shared websocket, traces every routed
+            event into the generation's sibling .log file (one log per
+            prompt), and keeps the generation json updated (same file
+            written by /v1/comfy/workflows/{id}/generate).
             The request returns 202 immediately — clients poll
             GET /v1/comfy/workflows/{id}/generate for progress instead of
             reading the stream.
@@ -1651,7 +1739,7 @@ components:
           type: string
           description: >-
             Event type discriminator. Common values:
-            proxy_enqueue, proxy_done, proxy_error, status,
+            prompt_queued, prompt_done, prompt_error, status,
             execution_start, execution_cached, progress, executing,
             executed, execution_error, execution_success,
             execution_interrupted, binary.

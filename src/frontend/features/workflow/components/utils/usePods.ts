@@ -1,6 +1,7 @@
 // Cloud pod lifecycle — pod creation/reuse for the New / GPU-labeled pod
-// / Auto buttons, run-state sync from polled generations, and the native
-// websocket health heartbeat that detects dead pod_urls.
+// / Auto buttons, run-state sync from polled generations, server pod-list
+// polling (GET /v1/comfy/cloud auto-adds buttons for pods the server
+// tracks), and the heartbeat that detects dead pod_urls.
 //
 // Extracted from the original CloudTab.tsx. Behaviour notes preserved:
 //   - New is NEVER blocked: the GPU picker dialog (GpuSelectDialog) asks
@@ -8,15 +9,18 @@
 //     spawns a fresh pod for that GPU. Per-pod status lives on the pod
 //     button (labeled e.g. "4090x3" = a 4090 pod with 3 jobs queued).
 //   - Pods accept concurrent jobs: each "#N" click queues another job; the
-//     server scopes each submission with its own client_id. "Auto" queues
-//     on the least-loaded ready pod (see pickLeastLoadedPod).
-//   - Heartbeat probes every POD_HEARTBEAT_MS verify every native pod;
-//     MAX_POD_FAILURES consecutive failures remove the pod. A pod is also
-//     removed after POD_IDLE_MS with no accepted generation queue.
+//     server rides all of them on the pod's one persistent websocket and
+//     scopes events by prompt_id. "Auto" queues on the least-loaded ready
+//     pod (see pickLeastLoadedPod).
+//   - Server pod-list polling every POD_HEARTBEAT_MS adds buttons for
+//     server-tracked pods the UI does not know yet; heartbeat status probes
+//     verify every known pod — MAX_POD_FAILURES consecutive failures remove
+//     the pod. A pod is also removed after POD_IDLE_MS with no accepted
+//     generation queue.
 
 import React from 'react';
 import type { CloudPodStatusResult, GenerationEntry, GenerationSummary } from '../../../../api';
-import { cloud, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
+import { cloud, cloudListPods, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
 import { MAX_POD_FAILURES, POD_HEARTBEAT_MS, POD_IDLE_MS } from './constants';
@@ -39,6 +43,19 @@ function localTimestampFile(date: Date): string {
         pad(date.getMinutes()) +
         pad(date.getSeconds())
     );
+}
+
+/**
+ * Normalize a pod URL for cross-side comparisons. The server registry keys
+ * pods by URL.toString() (a bare host gains a trailing slash), while the UI
+ * stores the spawner's Location verbatim — raw string equality would miss.
+ */
+function normalizePodUrl(url: string): string {
+    try {
+        return new URL(url).toString();
+    } catch {
+        return url;
+    }
 }
 
 export type UsePodsParams = {
@@ -355,12 +372,18 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         }
         console.log(`[Generate] Pod#${podNumber} spawned: ${podUrl} (ComfyUI websocket)`);
 
-        // Step 3 — pod_url exists: the pod is now usable
-        setPods((prev) =>
-            prev.map((p) =>
-                p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p
-            )
-        );
+        // Step 3 — pod_url exists: the pod is now usable. Merge race: the
+        // server pod-list poll may have already added this pod's button
+        // (normalized URL match) while the spawn request was in flight —
+        // drop that duplicate so exactly one button survives.
+        setPods((prev) => {
+            const normalized = normalizePodUrl(podUrl);
+            return prev
+                .filter((p) => p.id === podEntry.id || !p.pod_url || normalizePodUrl(p.pod_url) !== normalized)
+                .map((p) =>
+                    p.id === podEntry.id ? { ...p, pod_url: podUrl, status: 'ready', failCount: 0 } : p
+                );
+        });
 
         // Step 4 — snapshot + submit for server-side processing.
         // A failure here keeps the pod — its button shows the run error
@@ -420,6 +443,75 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         },
         [handlePodGenerate]
     );
+
+    // ── Server pod-list polling (auto-update the pod buttons) ────────
+    // GET /v1/comfy/cloud returns every pod whose persistent websocket the
+    // server currently holds. Pods the UI does not know yet — spawned by
+    // another client, or surviving a page refresh while the server kept
+    // running — are added as ready pod buttons automatically.
+    //
+    // Removal is intentionally NOT done here: disappearing from the list
+    // means the cloud server terminated the pod's socket, and the per-pod
+    // heartbeat strikes (below) already own the error → removal path.
+    React.useEffect(() => {
+        let running = false;
+        const syncServerPods = async () => {
+            if (running) return;
+            running = true;
+            try {
+                const { pods: serverPods } = await cloudListPods(baseUrl);
+                const activePods = serverPods.filter((sp) => sp.active);
+                if (activePods.length === 0) return;
+
+                // Compare against the freshest state via the ref — a slow
+                // poll must not re-add a pod the user already removed.
+                const knownUrls = new Set(
+                    podsRef.current.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
+                );
+                const additions: PodEntry[] = [];
+                for (const serverPod of activePods) {
+                    const normalized = normalizePodUrl(serverPod.pod_url);
+                    if (knownUrls.has(normalized)) continue;
+                    knownUrls.add(normalized);
+                    podCounterRef.current += 1;
+                    const podNumber = podCounterRef.current;
+                    additions.push({
+                        id: `gen-pod-${Date.now()}-${podNumber}`,
+                        podNumber,
+                        name: podLetter(podNumber),
+                        gpu: serverPod.gpu,
+                        pod_url: serverPod.pod_url,
+                        status: 'ready',
+                        failCount: 0,
+                        activeGenerationIds: [],
+                        run: { status: 'idle' }
+                    });
+                }
+                if (additions.length === 0) return;
+                console.log(
+                    `[Pods] Server reported ${additions.length} unknown pod(s) — adding buttons: ` +
+                        additions.map((a) => a.pod_url).join(', ')
+                );
+                // Re-check inside the updater: a pod added between the
+                // async fetch and this commit must not duplicate.
+                setPods((prev) => {
+                    const prevUrls = new Set(
+                        prev.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
+                    );
+                    const fresh = additions.filter((a) => !prevUrls.has(normalizePodUrl(a.pod_url)));
+                    return fresh.length > 0 ? [...prev, ...fresh] : prev;
+                });
+            } catch {
+                // Best-effort — the heartbeat's strike path still owns
+                // dead-pod detection when the list endpoint is unreachable.
+            } finally {
+                running = false;
+            }
+        };
+        void syncServerPods();
+        const interval = setInterval(() => void syncServerPods(), POD_HEARTBEAT_MS);
+        return () => clearInterval(interval);
+    }, [baseUrl]);
 
     // ── Native ComfyUI heartbeat ─────────────────────────────────────
     // Every websocket-backed status probe resets the pod's strike counter on

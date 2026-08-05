@@ -10,8 +10,8 @@
 //      picked GPU key; the backdrop dismisses it without a separate cancel button.
 //   2. Pod buttons show the GPU name and a numeric top-right badge while jobs
 //      are queued (per-pod predicate: activeGenerationIds).
-//   3. The pod button border STYLE carries the pod shape: solid = direct
-//      ComfyUI, dashed = Tier 2 proxy.
+//   3. Every pod button advertises the native ComfyUI websocket transport
+//      and uses the same solid border style.
 // =============================================================================
 
 import React from 'react';
@@ -187,17 +187,17 @@ describe('FooterActions — GPU-labeled pod buttons', () => {
         expect(getComputedStyle(firstBusyBadge).right).toBe('-8px');
     });
 
-    it('draws a solid border for direct pods and a dashed border for proxy pods', () => {
+    it('draws a solid border for every native ComfyUI pod', () => {
         renderFooter([
-            makePod({ id: 'p1', podNumber: 1, gpu: '4090', is_direct: true }),
-            makePod({ id: 'p2', podNumber: 2, gpu: 'B300', is_direct: false })
+            makePod({ id: 'p1', podNumber: 1, gpu: '4090' }),
+            makePod({ id: 'p2', podNumber: 2, gpu: 'B300' })
         ]);
 
         const direct = container.querySelector('[data-testid="pod-generate-1"]') as HTMLElement;
-        const proxy = container.querySelector('[data-testid="pod-generate-2"]') as HTMLElement;
+        const second = container.querySelector('[data-testid="pod-generate-2"]') as HTMLElement;
         expect(getComputedStyle(direct).borderStyle).toBe('solid');
-        expect(getComputedStyle(proxy).borderStyle).toBe('dashed');
-        expect(direct.getAttribute('data-direct')).toBe('direct');
-        expect(proxy.getAttribute('data-direct')).toBe('proxy');
+        expect(getComputedStyle(second).borderStyle).toBe('solid');
+        expect(direct.getAttribute('data-transport')).toBe('websocket');
+        expect(second.getAttribute('data-transport')).toBe('websocket');
     });
 });

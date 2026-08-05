@@ -1,18 +1,28 @@
-// Cloud pod endpoint — POST /v1/comfy/cloud.
+// Cloud pod endpoints — POST + GET /v1/comfy/cloud.
 //
-// The endpoint has two request modes:
-//   - create: select a GPU, ask the configured spawner for a pod URL, and
-//     return the URL plus the direct ComfyUI health snapshot;
-//   - status: probe an existing pod's native ComfyUI websocket and return its
-//     direct health snapshot.
+// POST has two request modes:
+//   - create: select a GPU, ask the configured spawner for a pod URL, then
+//     open the pod's ONE persistent ComfyUI websocket (pod-socket.ts). The
+//     endpoint answers ONLY once the websocket is connected and held in
+//     server memory — a pod that refuses its socket is NOT returned (502).
+//     The connection is then maintained forever (protocol pings) until the
+//     cloud server terminates it.
+//   - status: report an existing pod through the registry. A pod the server
+//     does not track yet (e.g. after a restart) is adopted — its persistent
+//     websocket is opened and registered — so the status answer always
+//     reflects the single server-managed socket.
 //
-// Every pod is a native ComfyUI server. The websocket handshake is therefore
-// the authoritative connection check; no alternate HTTP transport or server
-// shape is detected, selected, or reported by this endpoint.
+// GET returns the list of active pods straight from the registry, each with
+// its liveness flag and in-flight prompt count, so dashboards can keep
+// their pod buttons in sync without probing every pod individually.
+//
+// Every pod is a native ComfyUI server. The persistent websocket is the
+// authoritative connection; /system_stats remains best-effort enrichment.
 
 import { asHandlerMethod } from '@underload/service';
 import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
-import { probeDirectComfyUI, probeDirectHealth } from './direct-comfy';
+import { probeDirectHealth } from './direct-comfy';
+import { connectPodSocket, listPodSockets } from './pod-socket';
 
 // GPU-keyed spawner registry — gpu → { serverName: spawnerUrl }. The map is
 // keyed loosely because JSON request keys are strings even for numeric GPUs.
@@ -26,18 +36,17 @@ type CloudRequestBody = {
     gpu?: string;
 };
 
-// The probe result contains only native ComfyUI data. A null status means the
-// websocket did not open and the URL cannot be used for a direct run.
-type PodProbe = {
-    statusData: Record<string, unknown> | null;
-    error?: string;
-    detail?: string;
-};
+// GET /v1/comfy/cloud — active pods + per-pod in-flight prompt counts.
+// Pure registry read: no pod is contacted, so the answer is instant.
+export const listCloudPods = asHandlerMethod(async () => {
+    return { status: 200, response: { pods: listPodSockets() } };
+});
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
     const body = (parameters.body ?? {}) as CloudRequestBody;
 
-    // Status mode validates and checks an already-spawned native server.
+    // Status mode reports (and when needed adopts) an already-spawned pod
+    // through the single server-managed websocket.
     if (body.pod_url) {
         let podUrl: URL;
         try {
@@ -49,19 +58,25 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
             };
         }
 
-        const probe = await probePod(podUrl);
-        if (probe.statusData) {
-            return { status: 200, response: probe.statusData };
+        try {
+            // Reuses the existing persistent socket or opens/registers it.
+            await connectPodSocket(podUrl);
+        } catch (error: any) {
+            console.error(`[cloud] Direct ComfyUI connect failed for ${body.pod_url}: ${error?.message ?? String(error)}`);
+            return {
+                status: 502,
+                response: { error: `Pod refused the direct ComfyUI websocket: ${error?.message ?? String(error)}` }
+            };
         }
 
-        console.error(`[cloud] Direct ComfyUI probe failed for ${body.pod_url}: ${probe.error}`);
-        return {
-            status: 502,
-            response: {
-                error: probe.error ?? 'Failed to reach direct ComfyUI pod',
-                detail: probe.detail
-            }
-        };
+        try {
+            return { status: 200, response: await probeDirectHealth(podUrl) };
+        } catch (error: any) {
+            return {
+                status: 502,
+                response: { error: `Direct ComfyUI health probe failed: ${error?.message ?? String(error)}` }
+            };
+        }
     }
 
     // Create mode requires a GPU so the server can choose its registered
@@ -108,13 +123,28 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
         };
     }
 
+    // The pod only becomes usable once its ONE persistent websocket is
+    // connected and registered. Until then the create request blocks; a pod
+    // that refuses its socket is not handed out at all.
     const location = spawned.location;
+    try {
+        await connectPodSocket(new URL(location), { gpu: body.gpu, name: podName });
+    } catch (error: any) {
+        console.error(`[cloud] Spawned pod ${location} refused its websocket:`, error?.message ?? String(error));
+        return {
+            status: 502,
+            response: {
+                error: `Spawned pod refused the direct ComfyUI websocket: ${error?.message ?? String(error)}`
+            }
+        };
+    }
+
+    // With the socket held, /system_stats is best-effort enrichment only.
     let statusData: Record<string, unknown>;
     try {
-        const probe = await probePod(new URL(location));
-        statusData = probe.statusData ?? { error: `Status probe failed: ${probe.error}` };
+        statusData = await probeDirectHealth(new URL(location));
     } catch (error: any) {
-        console.error(`[cloud] Initial direct ComfyUI probe failed for ${location}:`, error?.message ?? String(error));
+        console.error(`[cloud] Initial direct ComfyUI health probe failed for ${location}:`, error?.message ?? String(error));
         statusData = { error: `Status probe failed: ${error?.message ?? String(error)}` };
     }
 
@@ -183,25 +213,4 @@ export async function requestSpawn(spawnerUrl: string, podName?: string): Promis
     throw new Error(
         `Spawner returned HTTP ${upstream.status} (expected 302 redirect)` + (errorBody ? `: ${errorBody}` : '')
     );
-}
-
-// Probe only the native websocket. The direct health snapshot performs the
-// optional HTTP metadata requests after this handshake succeeds.
-async function probePod(podUrl: URL): Promise<PodProbe> {
-    const connected = await probeDirectComfyUI(podUrl);
-    if (!connected) {
-        return {
-            statusData: null,
-            error: 'Pod refused the direct ComfyUI websocket'
-        };
-    }
-
-    try {
-        return { statusData: await probeDirectHealth(podUrl) };
-    } catch (error: any) {
-        return {
-            statusData: null,
-            error: `Direct ComfyUI health probe failed: ${error?.message ?? String(error)}`
-        };
-    }
 }

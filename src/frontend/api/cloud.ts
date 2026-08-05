@@ -1,21 +1,31 @@
 // API client for the ComfyUI cloud dashboard endpoints.
 //
 // All calls go through the dashboard service at baseUrl (default
-// http://192.168.8.128:5000). See src/server/endpoints/comfy-dashboard.yml.
+// http://192.168.8.128:5000). See src/server/endpoints/comfy-dashboard.yaml.
 //
 // Routes:
+//   GET  /v1/comfy/cloud          → { pods: CloudPodListEntry[] } — the
+//                                server's active pods (one persistent
+//                                websocket per pod) with in-flight prompt
+//                                counts. The UI polls this to keep its pod
+//                                buttons in sync automatically.
 //   POST /v1/comfy/cloud          → { pod_url, health, models_dir, models }
-//                                (create — spawner 302 redirect or status)
-//   POST /v1/comfy/cloud/prompt   → 202 { accepted } when workflow_id +
-//                                generation_id are given (server consumes the
-//                                pod stream and updates the generation json
-//                                itself — poll /workflows/:id/generate for
-//                                progress); otherwise NDJSON stream (raw
-//                                Response) for the client to consume.
+//                                (create blocks until the pod's persistent
+//                                websocket is connected and held; status
+//                                reuses/adopts that same socket)
+//   POST /v1/comfy/cloud/prompt   → 202 { accepted, client_id, prompt_id }
+//                                when workflow_id + generation_id are given
+//                                (server consumes the run off the pod's
+//                                shared socket — matched by prompt_id —
+//                                and updates the generation json/log itself;
+//                                poll /workflows/:id/generate for progress);
+//                                otherwise NDJSON stream (raw Response) off
+//                                the same shared socket for the client.
 //
-// The spawner creates a fresh native ComfyUI pod and returns its pod_url.
-// Prompt submission always uses the native websocket plus POST /prompt; the
-// server creates a fresh client id for each request so jobs do not cross-talk.
+// The spawner creates a fresh native ComfyUI pod; the server then keeps ONE
+// websocket per pod in memory forever (until the cloud server closes it).
+// Every prompt rides that single socket — jobs are isolated by prompt_id,
+// not by connection.
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -50,6 +60,35 @@ export type CloudPodStatusResult = {
     models_dir?: string;
     /** Empty for direct ComfyUI pods — the native server lists no models. */
     models?: Record<string, string[]>;
+};
+
+/**
+ * One active cloud pod reported by GET /v1/comfy/cloud — the server's
+ * single persistent websocket per pod, with its in-flight prompt count.
+ */
+export type CloudPodListEntry = {
+    /**
+     * Normalized native ComfyUI URL (the server's registry key —
+     * URL.toString() form, so a bare host carries a trailing slash).
+     * Compare with `new URL(u).toString()` normalization, not raw strings.
+     */
+    pod_url: string;
+    /** GPU the pod was spawned on (create echo), when known. */
+    gpu?: string;
+    /** Optional spawn-time pod name. */
+    name?: string;
+    /** The shared websocket's client id — every prompt on the pod uses it. */
+    client_id: string;
+    /** The pod's server-managed websocket is currently connected. */
+    active: boolean;
+    /** How many prompts the pod is currently processing (all generations). */
+    prompts: number;
+    /** ISO timestamp when the persistent websocket connected. */
+    connectedAt: string;
+};
+
+export type CloudPodListResult = {
+    pods: CloudPodListEntry[];
 };
 
 /** A single line in the NDJSON stream from POST /v1/comfy/cloud/prompt. */
@@ -196,6 +235,32 @@ async function cloudStatus(
     }
 
     return (await response.json()) as CloudPodStatusResult;
+}
+
+// ── Pod listing ───────────────────────────────────────────────────────
+
+/**
+ * List the server's active cloud pods (GET <baseUrl>/cloud).
+ *
+ * Pure registry read on the server — every pod whose persistent websocket
+ * is currently held, each with its `active` flag and the number of prompts
+ * it is processing. The UI polls this to keep its pod buttons in sync:
+ * pods spawned elsewhere (or surviving a page refresh) appear
+ * automatically.
+ */
+export async function cloudListPods(baseUrl: string): Promise<CloudPodListResult> {
+    const response = await fetch(`${baseUrl}/cloud`, { method: 'GET' });
+
+    if (!response.ok) {
+        let message = `Failed to list cloud pods (HTTP ${response.status})`;
+        try {
+            const data = await response.json();
+            if (data?.error) message = data.error;
+        } catch { /* ignore */ }
+        throw new Error(message);
+    }
+
+    return (await response.json()) as CloudPodListResult;
 }
 
 // ── Prompt streaming ──────────────────────────────────────────────────
