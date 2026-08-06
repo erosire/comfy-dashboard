@@ -149,7 +149,9 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
         statusData = { error: `Status probe failed: ${error?.message ?? String(error)}` };
     }
 
-    console.log('[cloud] spawn status response:', JSON.stringify(statusData, null, 2));
+    // Keep the server log compact while passing the URL as its own console
+    // argument so terminal integrations can recognize and open it directly.
+    console.log('[cloud] spawn status success:', location);
     return {
         status: 200,
         response: {

@@ -7,15 +7,6 @@ export const VIEWER_SWIPE_THRESHOLD_PX = 50;
 export const MAX_SIDEBAR_ITEMS = 100;
 
 /**
- * Server pod-list poll interval (GET /v1/comfy/cloud). The list response is
- * the ONLY liveness source for pod buttons: pods the server no longer lists
- * have dead sockets (the server already exhausted its reconnect schedule)
- * and their buttons are removed on that tick. There are NO per-pod client
- * probes — the server's persistent-websocket registry is authoritative.
- */
-export const POD_LIST_POLL_MS = 30_000;
-
-/**
  * Dim accent track for the pod button's circular loading border — the
  * static border color while the sg-ring-loading arc sweeps over it.
  */

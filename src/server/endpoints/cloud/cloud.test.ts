@@ -262,6 +262,7 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
     });
 
     it('honours the spawnerUrl override as a single-candidate list', async () => {
+        const spawnLog = vi.spyOn(console, 'log').mockImplementation(() => undefined);
         const override = 'https://ops-spawner.example/spawn';
         vi.mocked(fetch).mockImplementation(async (input: any) => {
             const url = String(input);
@@ -277,6 +278,12 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
         const result = await createCloudPod(context(), parameters({}), { spawnerUrl: override });
         expect(result.status).toBe(200);
         expect(result.response).toMatchObject({ pod_url: POD_URL, spawner: 'override' });
+        // Only the clickable pod URL is logged; health/system_stats remain API
+        // response data and are never serialized into the success log.
+        expect(spawnLog.mock.calls).toEqual([
+            ['[cloud] spawn status success:', POD_URL]
+        ]);
+        spawnLog.mockRestore();
     });
 
     it('answers 502 and registers nothing when the fresh pod refuses its persistent websocket', async () => {

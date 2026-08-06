@@ -4,6 +4,7 @@
 // Uses plain React context + useState (same pattern as the story-generator).
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
+import { GENERATION_STATUS_POLL_INTERVAL_MS } from '../config';
 import {
     deleteWorkflow as deleteWorkflowApi,
     fetchWorkflows,
@@ -144,7 +145,9 @@ type DashboardStoreContextValue = {
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
     baseUrl: 'http://192.168.8.128:5000/v1/comfy',
-    pollIntervalMs: 5000
+    // Keep the store's exposed timing metadata aligned with the generation
+    // polling hook, whose actual interval is sourced from frontend/config.ts.
+    pollIntervalMs: GENERATION_STATUS_POLL_INTERVAL_MS
 };
 
 const DashboardStoreContext = createContext<DashboardStoreContextValue | null>(null);

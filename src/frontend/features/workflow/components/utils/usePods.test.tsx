@@ -9,9 +9,9 @@ import { act } from 'react-dom/test-utils';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerationEntry } from '../../../../api';
+import { GPU_LIST_POLL_INTERVAL_MS } from '../../../../config';
 import type { UINode } from '../../../../nodes/node-type';
 import { usePods } from './usePods';
-import { POD_LIST_POLL_MS } from './constants';
 import type { PodEntry } from './types';
 
 // Mock only the network-facing functions used by the hook. The preference
@@ -373,7 +373,7 @@ describe('usePods server pod-list reconciliation', () => {
             expect(api.cloudCreate.mock.calls).toEqual([]);
 
             await act(async () => {
-                await vi.advanceTimersByTimeAsync(POD_LIST_POLL_MS);
+                await vi.advanceTimersByTimeAsync(GPU_LIST_POLL_INTERVAL_MS);
             });
 
             // Both vanished from the server list → both buttons removed,
@@ -403,7 +403,7 @@ describe('usePods server pod-list reconciliation', () => {
             expect(seen.current.map((p) => [p.pod_url, p.status])).toEqual([['', 'spawning']]);
 
             await act(async () => {
-                await vi.advanceTimersByTimeAsync(POD_LIST_POLL_MS);
+                await vi.advanceTimersByTimeAsync(GPU_LIST_POLL_INTERVAL_MS);
             });
 
             // The empty poll must NOT remove the spawning placeholder.
@@ -441,7 +441,7 @@ describe('usePods server pod-list reconciliation', () => {
             expect(seen.current.map((p) => p.pod_url)).toEqual(['https://pod-a.example/']);
 
             await act(async () => {
-                await vi.advanceTimersByTimeAsync(POD_LIST_POLL_MS * 2);
+                await vi.advanceTimersByTimeAsync(GPU_LIST_POLL_INTERVAL_MS * 2);
             });
 
             // Two failed polls later the pod STILL has its button: removals

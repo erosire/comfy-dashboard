@@ -11,7 +11,7 @@
 //     server rides all of them on the pod's one persistent websocket and
 //     scopes events by prompt_id. "Auto" queues on the least-loaded ready
 //     pod (see pickLeastLoadedPod).
-//   - LIVENESS IS THE SERVER'S JOB: every POD_LIST_POLL_MS the hook fetches
+//   - LIVENESS IS THE SERVER'S JOB: every GPU_LIST_POLL_INTERVAL_MS the hook fetches
 //     GET /v1/comfy/cloud — the registry of pods whose persistent websocket
 //     the server still holds. A pod drops out of the list the moment its
 //     socket dies: pods are designed to terminate when idle and never come
@@ -33,10 +33,10 @@
 
 import React from 'react';
 import type { GenerationEntry, GenerationSummary } from '../../../../api';
+import { GPU_LIST_POLL_INTERVAL_MS } from '../../../../config';
 import { cloudCreate, cloudListPods, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
 import type { PodEntry, RunState } from './types';
-import { POD_LIST_POLL_MS } from './constants';
 import { podLetter, pickLeastLoadedPod } from './pod-utils';
 import { replacePreferenceVariables } from './workflow-prompt';
 
@@ -468,7 +468,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             }
         };
         void syncServerPods();
-        const interval = setInterval(() => void syncServerPods(), POD_LIST_POLL_MS);
+        const interval = setInterval(() => void syncServerPods(), GPU_LIST_POLL_INTERVAL_MS);
         return () => clearInterval(interval);
     }, [baseUrl]);
 
