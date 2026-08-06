@@ -65,7 +65,7 @@ import { closeAllPodSockets } from './pod-socket';
 
 // The real registry endpoints (runtime/secret/private/modal/comfy.ts) —
 // the 4090 GPU currently has exactly one spawner server named "lancer".
-const SPAWNER_4090 = 'https://50f90002-77b2-4668-96ef-5a5e1bcd6dbc-8000.app.beam.cloud';
+const SPAWNER_4090 = 'https://20c754e5-506f-43b3-b033-2bcad614949f-8000.app.beam.cloud';
 const POD_URL = 'https://pod-a.example';
 
 function context() {
@@ -253,11 +253,13 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
     it('answers 503 with the attempts trail when every spawner for the GPU fails', async () => {
         vi.mocked(fetch).mockRejectedValue(new Error('connect ECONNREFUSED'));
 
-        const result = await createCloudPod(context(), parameters({ gpu: 'B300' }), {});
+        // RTX6000 has one active registry candidate; B300 is intentionally
+        // empty in the deployment registry and would be rejected as unknown.
+        const result = await createCloudPod(context(), parameters({ gpu: 'RTX6000' }), {});
         expect(result.status).toBe(503);
         expect(result.response).toEqual({
-            error: 'No server available to spawn gpu=B300 — every spawner failed',
-            attempts: [{ server: 'brianJohnson', error: 'connect ECONNREFUSED' }]
+            error: 'No server available to spawn gpu=RTX6000 — every spawner failed',
+            attempts: [{ server: 'devin', error: 'connect ECONNREFUSED' }]
         });
     });
 
