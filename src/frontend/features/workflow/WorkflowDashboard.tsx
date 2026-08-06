@@ -412,7 +412,6 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             searchText={searchText}
                             onSearchChange={handleSearchChange}
                             onSelect={handleLoadWorkflow}
-                            scrollSignal={pods}
                         />
                     }
                     content={

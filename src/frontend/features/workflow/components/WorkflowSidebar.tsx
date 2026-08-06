@@ -2,9 +2,9 @@
 //
 // Extracted verbatim from the original CloudTab.tsx sidebar fragment.
 // Shows at most MAX_SIDEBAR_ITEMS entries with a "+N more" hint beyond
-// that. Auto-scrolls to the bottom whenever `scrollSignal` changes
-// (the parent passes the pods list — the original auto-scrolled the
-// sidebar on every pod update).
+// that. On startup and whenever the selected workflow changes, the list
+// scrolls the selected item into view instead of following unrelated pod
+// updates. Pod status changes must never change the user's workflow position.
 
 import React from 'react';
 import styled from '@emotion/styled';
@@ -111,8 +111,6 @@ export type WorkflowSidebarProps = {
     searchText: string;
     onSearchChange: (value: string) => void;
     onSelect: (workflow: WorkflowMeta) => void;
-    /** Auto-scrolls the list to the bottom whenever this value changes. */
-    scrollSignal?: unknown;
 };
 
 export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
@@ -120,21 +118,41 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
     selectedId,
     searchText,
     onSearchChange,
-    onSelect,
-    scrollSignal
+    onSelect
 }) => {
     const sidebarScrollRef = React.useRef<HTMLDivElement>(null);
+    // The ref follows the active row so the startup effect can target the
+    // actual rendered element after either the cached or server workflow list
+    // arrives. A single ref is sufficient because exactly one row is active.
+    const selectedItemRef = React.useRef<HTMLDivElement>(null);
 
-    // Auto-scroll results sidebar
-    React.useEffect(() => {
-        if (sidebarScrollRef.current) {
-            sidebarScrollRef.current.scrollTop = sidebarScrollRef.current.scrollHeight;
-        }
-    }, [scrollSignal]);
+    // Restore the selected workflow's position after the list is mounted or
+    // replaced. `useLayoutEffect` runs after refs are attached but before the
+    // browser paints, preventing the visible random-bottom/random-top jump
+    // caused by the former pod-driven scroll effect.
+    React.useLayoutEffect(() => {
+        const selectedItem = selectedItemRef.current;
+        if (!selectedItem || !sidebarScrollRef.current) return;
+        // `nearest` keeps an already-visible selection stable while bringing a
+        // selection outside the viewport into view. The explicit alignment
+        // avoids browser default differences and intentionally does not use a
+        // smooth animation during initial hydration.
+        selectedItem.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }, [selectedId, searchText, workflows]);
 
     const displayedWorkflows = React.useMemo(() => {
-        return workflows.slice(0, MAX_SIDEBAR_ITEMS);
-    }, [workflows]);
+        const firstPage = workflows.slice(0, MAX_SIDEBAR_ITEMS);
+        // A persisted selection can be older than the first page returned by
+        // the server. Replace the last visible row in that case so every valid
+        // selected workflow still has a DOM target for deterministic scrolling.
+        if (selectedId && !firstPage.some((workflow) => workflow.id === selectedId)) {
+            const selectedWorkflow = workflows.find((workflow) => workflow.id === selectedId);
+            if (selectedWorkflow) {
+                return [...workflows.slice(0, Math.max(0, MAX_SIDEBAR_ITEMS - 1)), selectedWorkflow];
+            }
+        }
+        return firstPage;
+    }, [workflows, selectedId]);
 
     return (
         <SidebarPanel>
@@ -166,10 +184,9 @@ export const WorkflowSidebar: React.FC<WorkflowSidebarProps> = ({
                     return (
                         <Item
                             key={wf.id}
+                            ref={isActive ? selectedItemRef : undefined}
                             onClick={() => onSelect(wf)}
                             data-testid={`workflow-item-${wf.id}`}
-                            style={isActive ? {} : undefined}
-                            className={isActive ? '' : ''}
                         >
                             <WorkflowItemName>{wf.name}</WorkflowItemName>
                         </Item>
