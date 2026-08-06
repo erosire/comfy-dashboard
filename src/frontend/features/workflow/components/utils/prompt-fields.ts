@@ -16,6 +16,12 @@ import type { PromptWidgetRef } from './types';
 /** Where the selection lives inside the workflow json's `extra` object. */
 export const PROMPT_FIELDS_EXTRA_KEY = 'promptFields' as const;
 
+/** Where user-defined PROMPT-tab labels live inside the workflow `extra` object. */
+export const PROMPT_FIELD_LABELS_EXTRA_KEY = 'promptFieldLabels' as const;
+
+/** User-facing label overrides keyed by the same stable widget keys as `promptFields`. */
+export type PromptFieldLabelMap = Map<string, string>;
+
 /**
  * Stable key for a widget: "<nodeId>:<apiInputName>". The registry input
  * name is preferred (it is the canonical API key); unregistered nodes fall
@@ -61,6 +67,27 @@ export function readSavedPromptFields(raw: Record<string, unknown>, nodes: UINod
     return set;
 }
 
+/**
+ * Read custom PROMPT-tab labels while dropping labels for widgets that no
+ * longer resolve. A malformed `extra.promptFieldLabels` value is ignored so
+ * older or externally-authored workflow JSON remains loadable.
+ */
+export function readSavedPromptFieldLabels(raw: Record<string, unknown>, nodes: UINode[]): PromptFieldLabelMap {
+    const saved = (raw.extra as Record<string, unknown> | undefined)?.[PROMPT_FIELD_LABELS_EXTRA_KEY];
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return new Map();
+
+    const valid = collectPromptWidgets(nodes);
+    const labels = new Map<string, string>();
+    for (const [key, value] of Object.entries(saved as Record<string, unknown>)) {
+        // Blank labels intentionally mean "use the built-in widget label" and
+        // are not retained in state, keeping serialization compact and stable.
+        if (valid.has(key) && typeof value === 'string' && value.trim().length > 0) {
+            labels.set(key, value.trim());
+        }
+    }
+    return labels;
+}
+
 /** Copy of raw with the selection stored under extra (removed entirely when empty). */
 export function writePromptFieldsToRaw(raw: Record<string, unknown>, fields: Set<string>): Record<string, unknown> {
     const extra = { ...((raw.extra as Record<string, unknown> | undefined) ?? {}) };
@@ -69,6 +96,38 @@ export function writePromptFieldsToRaw(raw: Record<string, unknown>, fields: Set
     } else {
         delete extra[PROMPT_FIELDS_EXTRA_KEY];
     }
+    const clone: Record<string, unknown> = { ...raw };
+    if (Object.keys(extra).length > 0) {
+        clone.extra = extra;
+    } else {
+        delete clone.extra;
+    }
+    return clone;
+}
+
+/**
+ * Copy of raw with custom PROMPT-tab labels persisted under `extra`. Labels
+ * are sorted by stable widget key for deterministic JSON and empty overrides
+ * are removed so clearing a rename restores the built-in display label.
+ */
+export function writePromptFieldLabelsToRaw(
+    raw: Record<string, unknown>,
+    labels: PromptFieldLabelMap
+): Record<string, unknown> {
+    const extra = { ...((raw.extra as Record<string, unknown> | undefined) ?? {}) };
+    const entries = [...labels.entries()]
+        .map(([key, label]) => [key, label.trim()] as const)
+        .filter(([, label]) => label.length > 0)
+        .sort(([left], [right]) => left.localeCompare(right));
+
+    if (entries.length > 0) {
+        const serialized: Record<string, string> = {};
+        for (const [key, label] of entries) serialized[key] = label;
+        extra[PROMPT_FIELD_LABELS_EXTRA_KEY] = serialized;
+    } else {
+        delete extra[PROMPT_FIELD_LABELS_EXTRA_KEY];
+    }
+
     const clone: Record<string, unknown> = { ...raw };
     if (Object.keys(extra).length > 0) {
         clone.extra = extra;

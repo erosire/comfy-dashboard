@@ -19,7 +19,14 @@ import type { EditorContentTab, PromptWidgetRef } from './types';
 import { parseWorkflowJson } from './workflow-parser';
 import { renumberNodes, sortNodesDeep } from './workflow-sort';
 import { applyWidgetEditsToRaw } from './workflow-serialize';
-import { collectPromptWidgets, promptWidgetKey, readSavedPromptFields, writePromptFieldsToRaw } from './prompt-fields';
+import {
+    collectPromptWidgets,
+    promptWidgetKey,
+    readSavedPromptFieldLabels,
+    readSavedPromptFields,
+    writePromptFieldLabelsToRaw,
+    writePromptFieldsToRaw
+} from './prompt-fields';
 import { readSavedInputFields, writeInputFieldsToRaw } from './input-fields';
 import { useNodeTree } from './useNodeTree';
 
@@ -61,6 +68,10 @@ export function useWorkflowEditor({
     // widget label in the JSON layout toggles its key here. Persisted into
     // the workflow json (extra.promptFields) via Save so it survives reload.
     const [promptFields, setPromptFields] = React.useState<Set<string>>(new Set());
+    // Optional user-facing labels for PROMPT cards. The underlying widget
+    // names and serialized API keys remain unchanged by these display-only
+    // overrides.
+    const [promptFieldLabels, setPromptFieldLabels] = React.useState(new Map<string, string>());
     // Keys of widgets marked as workflow "Inputs" from the PROMPT tab —
     // external data entry points the result viewer can feed (a Universal
     // Data Input takes the viewed image's base64 stream). Persisted into
@@ -85,6 +96,9 @@ export function useWorkflowEditor({
             // the PROMPT tab becomes the active view.
             const fields = readSavedPromptFields(selectedWorkflow.raw, parsed);
             setPromptFields(fields);
+            // Restore display-only PROMPT labels independently of field
+            // selection so a temporarily removed field keeps its rename.
+            setPromptFieldLabels(readSavedPromptFieldLabels(selectedWorkflow.raw, parsed));
             // Restore the saved Input markings alongside.
             setInputFields(readSavedInputFields(selectedWorkflow.raw, parsed));
             setContentTab(fields.size > 0 ? 'prompt' : 'json');
@@ -127,6 +141,7 @@ export function useWorkflowEditor({
                     // Dropped files may carry a saved PROMPT selection too.
                     const fields = readSavedPromptFields(parsed, uiNodes);
                     setPromptFields(fields);
+                    setPromptFieldLabels(readSavedPromptFieldLabels(parsed, uiNodes));
                     // …and saved Input markings.
                     setInputFields(readSavedInputFields(parsed, uiNodes));
                     setContentTab(fields.size > 0 ? 'prompt' : 'json');
@@ -175,6 +190,18 @@ export function useWorkflowEditor({
             const next = new Set(prev);
             if (next.has(key)) next.delete(key);
             else next.add(key);
+            return next;
+        });
+    }, []);
+
+    // Update one display label without changing the widget value or its stable
+    // selection key. Empty drafts remain in the map while the input is being
+    // edited so the controlled field can be cleared before new text is typed;
+    // serialization trims and omits empty overrides.
+    const updatePromptFieldLabel = React.useCallback((key: string, label: string) => {
+        setPromptFieldLabels((previous) => {
+            const next = new Map(previous);
+            next.set(key, label);
             return next;
         });
     }, []);
@@ -251,10 +278,13 @@ export function useWorkflowEditor({
     const serializeCurrentRaw = React.useCallback((): Record<string, unknown> | null => {
         if (!rawJson) return null;
         return writeInputFieldsToRaw(
-            writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields),
+            writePromptFieldLabelsToRaw(
+                writePromptFieldsToRaw(applyWidgetEditsToRaw(rawJson, nodes), promptFields),
+                promptFieldLabels
+            ),
             inputFields
         );
-    }, [rawJson, nodes, promptFields, inputFields]);
+    }, [rawJson, nodes, promptFields, promptFieldLabels, inputFields]);
 
     // ── Save workflow edits ────────────────────────────────────────────
     // Persist the editor tree's widget edits back into the stored workflow
@@ -285,6 +315,7 @@ export function useWorkflowEditor({
         setRawJson(null);
         setFileName('');
         setPromptFields(new Set());
+        setPromptFieldLabels(new Map());
         setInputFields(new Set());
         setContentTab('json');
     }, [setNodes]);
@@ -298,11 +329,13 @@ export function useWorkflowEditor({
         setContentTab,
         promptFields,
         promptEntries,
+        promptFieldLabels,
         inputFields,
         saving,
         updateNodeWidget,
         toggleNodeBypass,
         togglePromptField,
+        updatePromptFieldLabel,
         toggleInputField,
         handleDrop,
         handleDragOver,

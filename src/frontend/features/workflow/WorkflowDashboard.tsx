@@ -12,6 +12,7 @@
 // upwards through ./components and imported here.
 
 import React from 'react';
+import { useStateHook } from '@presource/react';
 import type { WorkflowMeta } from '../../api';
 import { fetchWorkflow as fetchWorkflowApi, generationResultUrl } from '../../api';
 import { ComfyDashboard } from '../../components';
@@ -38,6 +39,8 @@ import {
     useResultViewer,
     useWorkflowActions,
     useWorkflowEditor,
+    getViewerInputTargetId,
+    setViewerInputTargetId as rememberViewerInputTargetId,
     type GenerationSnapshot,
     type OutputViewMode,
     type PodEntry
@@ -147,18 +150,16 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             [store.workflows]
         );
 
-        // Selected dropdown target — null means "Default" (rerun the
-        // viewed image's own stored prompt).
-        const [viewerInputTargetId, setViewerInputTargetId] = React.useState<string | null>(null);
-
-        // The selection belongs to an open viewer session — reset it when
-        // the viewer closes or the loaded workflow changes.
-        React.useEffect(() => {
-            if (!viewer.viewerOpen) setViewerInputTargetId(null);
-        }, [viewer.viewerOpen]);
-        React.useEffect(() => {
-            setViewerInputTargetId(null);
-        }, [editingWorkflowId]);
+        // Selected dropdown target — null means "Default" (rerun the viewed
+        // image's own stored prompt). The module-level session memory keeps
+        // this choice when another gallery is opened or this viewer remounts;
+        // it still resets naturally on a full browser refresh.
+        const viewerInputTarget = useStateHook<string | null>(getViewerInputTargetId());
+        const viewerInputTargetId = viewerInputTarget();
+        const setViewerInputTargetId = React.useCallback((targetId: string | null) => {
+            viewerInputTarget(targetId);
+            rememberViewerInputTargetId(targetId);
+        }, [viewerInputTarget]);
 
         // Build the fed snapshot for an armed Input target: an in-memory
         // COPY of the selected workflow's document with the viewed image's
@@ -428,10 +429,12 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                             onSelectTab={editor.setContentTab}
                             promptFields={editor.promptFields}
                             promptEntries={editor.promptEntries}
+                            promptFieldLabels={editor.promptFieldLabels}
                             inputFields={editor.inputFields}
                             updateNodeWidget={editor.updateNodeWidget}
                             toggleNodeBypass={editor.toggleNodeBypass}
                             togglePromptField={editor.togglePromptField}
+                            updatePromptFieldLabel={editor.updatePromptFieldLabel}
                             toggleInputField={editor.toggleInputField}
                             onCopyJson={editor.handleCopyJson}
                             onClone={actions.handleClone}

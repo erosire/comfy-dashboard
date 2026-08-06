@@ -12,7 +12,7 @@ import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
 import type { UINode } from '../../../nodes/node-type';
-import type { EditorContentTab, OutputViewMode, PromptWidgetRef } from './utils';
+import type { EditorContentTab, OutputViewMode, PromptFieldLabelMap, PromptWidgetRef } from './utils';
 import { NodeList } from './ui';
 import { DropReplaceInset, EditorDropZone } from './EditorDropZone';
 import { ContentTabStrip } from './ContentTabStrip';
@@ -42,11 +42,15 @@ export type WorkflowEditorContentProps = {
     onSelectTab: (tab: EditorContentTab) => void;
     promptFields: Set<string>;
     promptEntries: PromptWidgetRef[];
+    /** Display-only PROMPT-tab label overrides keyed by widget key. */
+    promptFieldLabels: PromptFieldLabelMap;
     /** Keys of widgets marked as workflow Inputs (PROMPT-tab Input chips). */
     inputFields: Set<string>;
     updateNodeWidget: (nodeId: string, widgetIdx: number, rawValue: string) => void;
     toggleNodeBypass: (nodeId: string) => void;
     togglePromptField: (node: UINode, widgetIdx: number) => void;
+    /** Updates one display-only PROMPT-tab label. */
+    updatePromptFieldLabel: (key: string, label: string) => void;
     /** Toggle a PROMPT-tab field's Input marking. */
     toggleInputField: (node: UINode, widgetIdx: number) => void;
     onCopyJson: () => void;
@@ -79,10 +83,12 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
     onSelectTab,
     promptFields,
     promptEntries,
+    promptFieldLabels,
     inputFields,
     updateNodeWidget,
     toggleNodeBypass,
     togglePromptField,
+    updatePromptFieldLabel,
     toggleInputField,
     onCopyJson,
     onClone,
@@ -154,7 +160,9 @@ export const WorkflowEditorContent: React.FC<WorkflowEditorContentProps> = ({
                     {contentTab === 'prompt' && (
                         <PromptFieldsPane
                             entries={promptEntries}
+                            promptFieldLabels={promptFieldLabels}
                             togglePromptField={togglePromptField}
+                            updatePromptFieldLabel={updatePromptFieldLabel}
                             updateNodeWidget={updateNodeWidget}
                             inputFields={inputFields}
                             toggleInputField={toggleInputField}

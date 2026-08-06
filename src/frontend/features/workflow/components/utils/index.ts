@@ -16,6 +16,7 @@ export * from './prompt-fields';
 export * from './input-fields';
 export * from './formatting';
 export * from './viewer-audio';
+export * from './viewer-input-target';
 export * from './useMediaQuery';
 export * from './useDebouncedSearch';
 export * from './useGenerationsPolling';
