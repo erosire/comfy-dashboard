@@ -65,6 +65,19 @@ async function pathExists(p: string): Promise<boolean> {
     }
 }
 
+/**
+ * Mark the parent workflow as recently used when a generation is accepted.
+ * The workflow list endpoint already sorts by meta.modifiedDate, so touching
+ * this field here makes every newly requested generation move its workflow to
+ * the top for all clients, not only the browser that submitted the request.
+ */
+async function touchWorkflowModifiedDate(workflowDir: string, modifiedDate: string): Promise<void> {
+    const metaPath = path.join(workflowDir, 'meta.json');
+    const meta = JSON.parse(await fs.readFile(metaPath, 'utf-8')) as Record<string, unknown>;
+    meta.modifiedDate = modifiedDate;
+    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+}
+
 function timestampFile(date: Date): string {
     const pad = (n: number) => String(n).padStart(2, '0');
     return (
@@ -249,6 +262,11 @@ export const workflowGenerateCreate = asHandlerMethod(async (_, parameters, vari
     };
 
     await fs.writeFile(filePath, JSON.stringify(generation, null, 2), 'utf-8');
+
+    // A generation request is a workflow activity even before the pod returns
+    // its first result. Use the generation's single captured timestamp so the
+    // persisted list order and the generated response agree exactly.
+    await touchWorkflowModifiedDate(workflowDir, nowIso);
 
     return {
         status: 200,

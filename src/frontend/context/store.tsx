@@ -55,6 +55,34 @@ export const setSelectedIdToStorage = (id: string | null) => {
     }
 };
 
+/**
+ * Keep every workflow collection in the same order as the server list route:
+ * newest `modifiedDate` first. The copy prevents local state updates from
+ * mutating an array owned by a caller or by a previous React state snapshot.
+ */
+export const sortWorkflowsByModifiedDate = (workflows: WorkflowMeta[]): WorkflowMeta[] => {
+    return [...workflows].sort((a, b) => (b.modifiedDate || '').localeCompare(a.modifiedDate || ''));
+};
+
+/**
+ * Apply the generation timestamp to one workflow and put that workflow first.
+ * The explicit first-position seed guarantees the active workflow wins even
+ * when another client supplied a future-dated metadata timestamp. A missing id
+ * is retained as a no-op except for normalizing the existing collection.
+ */
+export const touchWorkflowInList = (
+    workflows: WorkflowMeta[],
+    workflowId: string,
+    modifiedDate: string
+): WorkflowMeta[] => {
+    const workflow = workflows.find((item) => item.id === workflowId);
+    if (!workflow) return sortWorkflowsByModifiedDate(workflows);
+
+    const touched = { ...workflow, modifiedDate };
+    const remaining = workflows.filter((item) => item.id !== workflowId);
+    return [touched, ...sortWorkflowsByModifiedDate(remaining)];
+};
+
 // Debounced write to localStorage for workflows.
 let pendingHandle: number | null = null;
 export const scheduleSaveWorkflowsToStorage = (workflows: WorkflowMeta[]): void => {
@@ -160,7 +188,11 @@ export const DashboardStoreProvider: React.FC<{
     const refreshWorkflows = useCallback(async () => {
         try {
             const { workflows } = await fetchWorkflows(`${store.config.baseUrl}/workflows`);
-            setStore((prev) => ({ ...prev, workflows, loadWarning: undefined }));
+            setStore((prev) => ({
+                ...prev,
+                workflows: sortWorkflowsByModifiedDate(workflows),
+                loadWarning: undefined
+            }));
         } catch (err) {
             setStore((prev) => ({
                 ...prev,
@@ -192,7 +224,7 @@ export const DashboardStoreProvider: React.FC<{
             const { workflow } = await createWorkflowApi(`${store.config.baseUrl}/workflows`, body);
             setStore((prev) => ({
                 ...prev,
-                workflows: [workflow, ...prev.workflows]
+                workflows: sortWorkflowsByModifiedDate([workflow, ...prev.workflows])
             }));
             return workflow;
         },
@@ -204,19 +236,21 @@ export const DashboardStoreProvider: React.FC<{
             const { workflow } = await updateWorkflowApi(`${store.config.baseUrl}/workflows`, id, body);
             setStore((prev) => ({
                 ...prev,
-                workflows: prev.workflows.map((w) =>
-                    w.id === id
-                        ? {
-                              id: workflow.id,
-                              name: workflow.name,
-                              description: workflow.description,
-                              nodeCount: workflow.nodeCount,
-                              createdDate: workflow.createdDate,
-                              modifiedDate: workflow.modifiedDate,
-                              tags: workflow.tags,
-                              inputFields: workflow.inputFields
-                          }
-                        : w
+                workflows: sortWorkflowsByModifiedDate(
+                    prev.workflows.map((w) =>
+                        w.id === id
+                            ? {
+                                  id: workflow.id,
+                                  name: workflow.name,
+                                  description: workflow.description,
+                                  nodeCount: workflow.nodeCount,
+                                  createdDate: workflow.createdDate,
+                                  modifiedDate: workflow.modifiedDate,
+                                  tags: workflow.tags,
+                                  inputFields: workflow.inputFields
+                              }
+                            : w
+                    )
                 ),
                 selectedWorkflow: prev.selectedId === id ? workflow : prev.selectedWorkflow
             }));
@@ -252,7 +286,7 @@ export const DashboardStoreProvider: React.FC<{
             });
             setStore((prev) => ({
                 ...prev,
-                workflows: [cloned, ...prev.workflows]
+                workflows: sortWorkflowsByModifiedDate([cloned, ...prev.workflows])
             }));
             return cloned;
         },
@@ -281,7 +315,11 @@ export const DashboardStoreProvider: React.FC<{
             setStore((prev) => ({ ...prev, searchQuery: query }));
             try {
                 const { workflows } = await fetchWorkflows(`${store.config.baseUrl}/workflows`, { query });
-                setStore((prev) => ({ ...prev, workflows, loadWarning: undefined }));
+                setStore((prev) => ({
+                    ...prev,
+                    workflows: sortWorkflowsByModifiedDate(workflows),
+                    loadWarning: undefined
+                }));
             } catch {
                 // Search failures are non-fatal
             }
@@ -292,6 +330,13 @@ export const DashboardStoreProvider: React.FC<{
     const generateWorkflow = useCallback(
         async (workflowId: string, prompt?: Record<string, unknown>, name?: string) => {
             const { generation } = await generateWorkflowApi(`${store.config.baseUrl}`, workflowId, prompt, name);
+            // The server updates meta.modifiedDate when this generation file is
+            // created. Mirror that timestamp locally immediately so the active
+            // workflow moves to the top without waiting for another list fetch.
+            setStore((prev) => ({
+                ...prev,
+                workflows: touchWorkflowInList(prev.workflows, workflowId, generation.createdDate)
+            }));
             // Refresh generations after creating one
             try {
                 const { generations } = await fetchGenerationsApi(`${store.config.baseUrl}`, workflowId);
