@@ -12,10 +12,16 @@ describe('comfyNodeRegistry missing node entries', () => {
             'EasyCache',
             'MiniMaxH3ImageToVideo',
             'MiniMaxH3ScheduledSolAttentionPatch',
+            'MiniMaxH3SigmaShift',
+            'MiniMaxH3TurboLoRA',
+            'MiniMaxH3TurboSampler',
             'ResizeImageMaskNode',
             'LTXVImgToVideoInplace',
             'VAEDecodeAudio',
         ].map(isNodeRegistered)).toEqual([
+            true,
+            true,
+            true,
             true,
             true,
             true,
@@ -85,6 +91,7 @@ describe('comfyNodeRegistry missing node entries', () => {
             { name: 'thresh_type', widgetType: 'COMBO', default: 'diag' },
             { name: 'int8_qk', widgetType: 'BOOLEAN', default: false },
             { name: 'sink_conditioning', widgetType: 'COMBO', default: 'exact_kv' },
+            { name: 'dense_blocks', widgetType: 'STRING', default: '' },
         ]);
     });
 
@@ -223,5 +230,78 @@ describe('comfyNodeRegistry missing node entries', () => {
         expect(comfyNodeRegistry.VAEDecodeAudio.widgets).toEqual([]);
         expect(getWidgetLabel('ComfyMathExpression', 0)).toBe('Expression');
         expect(getWidgetLabel('VAEDecodeAudio', 0)).toBe('#1');
+    });
+
+    // The turbo sampler is connection-only, so no phantom widget labels may be
+    // introduced into the positional widgets_values mapping.
+    it('registers MiniMax H3 Turbo Sampler without widget slots', () => {
+        expect(comfyNodeRegistry.MiniMaxH3TurboSampler).toEqual({
+            nodeType: 'MiniMaxH3TurboSampler',
+            displayName: 'MiniMax-H3 Turbo Sampler (4-step)',
+            category: 'MiniMaxH3Turbo',
+            github: {
+                repo: 'https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo',
+                path: '__init__.py',
+                extension: 'ComfyUI-MiniMax-H3-Turbo',
+            },
+            widgets: [],
+        });
+    });
+
+    // The model connection is omitted from widgets_values; the three remaining
+    // inputs must stay in the custom node's source order for prompt emission.
+    it('maps MiniMax H3 Turbo LoRA widgets in source order', () => {
+        expect(comfyNodeRegistry.MiniMaxH3TurboLoRA.widgets).toEqual([
+            {
+                name: 'lora_name',
+                label: 'LoRA Name',
+                widgetType: 'COMBO',
+                options: [],
+            },
+            {
+                name: 'strength',
+                label: 'Strength',
+                widgetType: 'FLOAT',
+                default: 1.0,
+                min: -10.0,
+                max: 10.0,
+                step: 0.01,
+                display: 'number',
+            },
+            {
+                name: 'low_vram',
+                label: 'Low VRAM',
+                widgetType: 'BOOLEAN',
+                default: false,
+                tooltip: 'Merge the LoRA for lower VRAM use at the cost of softer output on quantized bases.',
+            },
+        ]);
+    });
+
+    // The v0.30.0 comfy-core model connection is not a widget; both shift
+    // controls therefore begin at widgets_values index zero.
+    it('maps MiniMax H3 Sigma Shift controls in source order', () => {
+        expect(comfyNodeRegistry.MiniMaxH3SigmaShift.widgets).toEqual([
+            {
+                name: 'shift_video',
+                label: 'Shift Video',
+                widgetType: 'FLOAT',
+                default: 12.0,
+                min: 0.01,
+                max: 100.0,
+                step: 0.01,
+                display: 'number',
+            },
+            {
+                name: 'shift_audio',
+                label: 'Shift Audio',
+                widgetType: 'FLOAT',
+                default: 3.0,
+                min: 0.01,
+                max: 100.0,
+                step: 0.01,
+                display: 'number',
+            },
+        ]);
     });
 });

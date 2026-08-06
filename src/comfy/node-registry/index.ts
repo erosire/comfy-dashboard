@@ -102,7 +102,12 @@ import { ComfyMathExpression } from './ComfyMathExpression';
 import { EasyCache } from './EasyCache';
 import { MiniMaxH3ImageToVideo } from './MiniMaxH3ImageToVideo';
 import { MiniMaxH3ScheduledSolAttentionPatch } from './MiniMaxH3ScheduledSolAttentionPatch';
+import { MiniMaxH3SigmaShift } from './MiniMaxH3SigmaShift';
 import { VAEDecodeAudio } from './VAEDecodeAudio';
+
+// MiniMax H3 Turbo custom nodes
+import { MiniMaxH3TurboLoRA } from './MiniMaxH3TurboLoRA';
+import { MiniMaxH3TurboSampler } from './MiniMaxH3TurboSampler';
 
 // LTXV nodes
 import { LTXVPreprocess } from './LTXVPreprocess';
@@ -269,7 +274,12 @@ export const comfyNodeRegistry: Record<string, NodeWidgetLayout> = {
     EasyCache,
     MiniMaxH3ImageToVideo,
     MiniMaxH3ScheduledSolAttentionPatch,
+    MiniMaxH3SigmaShift,
     VAEDecodeAudio,
+
+    // MiniMax H3 Turbo custom nodes
+    MiniMaxH3TurboLoRA,
+    MiniMaxH3TurboSampler,
 
     // LTXV nodes
     LTXVPreprocess,

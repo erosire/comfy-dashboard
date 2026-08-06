@@ -2,6 +2,9 @@ import type { NodeWidgetLayout } from './types';
 
 // The model input is a connection; the remaining attention-patch controls are
 // kept in this exact order because ComfyUI serializes them as widget slots.
+// `dense_blocks` is required by the current ComfyUI-sol-attn node and must be
+// included even when its default empty string means that every block is eligible
+// for sparse attention; omitting it makes ComfyUI reject the whole prompt.
 export const MiniMaxH3ScheduledSolAttentionPatch: NodeWidgetLayout = {
     nodeType: 'MiniMaxH3ScheduledSolAttentionPatch',
     displayName: 'MiniMax H3 Scheduled Sol Attention Patch',
@@ -90,6 +93,13 @@ export const MiniMaxH3ScheduledSolAttentionPatch: NodeWidgetLayout = {
             widgetType: 'COMBO',
             options: ['exact_kv', 'exact_kv_and_rows', 'off'],
             default: 'exact_kv',
+        },
+        {
+            name: 'dense_blocks',
+            label: 'Dense Blocks',
+            widgetType: 'STRING',
+            default: '',
+            tooltip: "Transformer blocks to keep dense, e.g. '0-2,-1'. Empty sparsifies all blocks.",
         },
     ],
 };
