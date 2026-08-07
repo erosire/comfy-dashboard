@@ -109,6 +109,13 @@ export interface NodeWidgetLayout {
     /** GitHub source repository where this node originates. */
     github?: GitHubSource;
     /**
+     * Required API inputs introduced after older workflows were saved.
+     * These values are emitted only when the workflow does not already carry
+     * the corresponding input, allowing updated nodes to remain compatible
+     * with legacy widget arrays without replacing an explicit user value.
+     */
+    promptDefaults?: Record<string, unknown>;
+    /**
      * Custom widget→API-input serializer for nodes whose widgets are
      * DYNAMIC (e.g. rgthree's Power Lora Loader: a variable number of
      * `lora_N` object widgets bracketed by header/divider/button widgets

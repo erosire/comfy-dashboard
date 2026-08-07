@@ -14,8 +14,8 @@ import {
     objectHasKey,
     toString
 } from '@presource/core';
-import { comfyNodeRegistry } from '../../../../../comfy';
-import type { UINode } from '../../../../nodes/node-type';
+import { comfyNodeRegistry, type DataType } from '../../../../../comfy';
+import type { UIInputConnection, UINode } from '../../../../nodes/node-type';
 import { parseWorkflowJson } from './workflow-parser';
 import { renumberNodes, sortNodesDeep } from './workflow-sort';
 
@@ -137,6 +137,97 @@ export const replacePreferenceVariables = <T>(
     preferences: PromptPreferences = {}
 ): T => resolvePromptValue(value, preferences, new Set()) as T;
 
+// ── Bypass rejoin (mode 4 pass-through) ─────────────────────────────────────
+//
+// ComfyUI's stored bypass semantic is "inputs pass directly to outputs
+// unchanged" (LGraphEventMode.BYPASS, comfy/node-structure.ts:192). A
+// bypassed node must still disappear from the API prompt (the server
+// executes anything it contains — there is no mode concept), but wires
+// crossing it must not be lost: when the bypassed node has a connected
+// input whose type matches the output slot a downstream node consumes, the
+// downstream connection is rejoined to the bypassed node's upstream source
+// instead of being dropped.
+
+/** Normalize a slot DataType (string | string[] | number, comfy/node-structure.ts:42) into one comparable key. */
+const slotTypeKey = (type: DataType | undefined): string =>
+    Array.isArray(type) ? type.join('|') : String(type ?? '*');
+
+/**
+ * Find the connected input of a bypassed node that passes data through to
+ * the output slot type a downstream node consumes — the bypassed node acts
+ * as a wire for that type, so the downstream connection rejoins to whatever
+ * feeds this input.
+ *
+ * Declared slot types come from the raw workflow node (`UINode._raw.inputs`)
+ * because a UIInputConnection's `type` is the *link's* dataType (set by the
+ * producing end of the wire — see resolveConnections in workflow-parser.ts:298),
+ * not the input slot's own declaration. When the raw node is unavailable
+ * (hand-built UINodes) the link type is the best remaining proxy.
+ *
+ * Exact type equality wins first; a '*' (any) input is only a fallback —
+ * wildcard inputs genuinely accept any type, but a node with both an exact
+ * and a wildcard input must rejoin through the exact one. A wildcard
+ * *output* never matches concrete input types: with several concrete inputs
+ * present, picking one arbitrarily would be wrong.
+ */
+const findBypassPassThroughInput = (node: UINode, outputType: DataType): UIInputConnection | null => {
+    const declaredInputs = node._raw?.inputs ?? [];
+    const outputKey = slotTypeKey(outputType);
+    let wildcard: UIInputConnection | null = null;
+    for (const conn of node.connections) {
+        const inputType = declaredInputs.find((i) => i.name === conn.name)?.type ?? conn.type;
+        const inputKey = slotTypeKey(inputType);
+        if (inputKey === outputKey) return conn;
+        if (inputKey === '*' && !wildcard) wildcard = conn;
+    }
+    return wildcard;
+};
+
+/**
+ * Walk a connection's source through any bypassed (mode 4) nodes between it
+ * and the real producer, returning the [nodeId, slot] of the active node
+ * that actually feeds the wire. Chains of consecutive bypassed nodes
+ * resolve transitively.
+ *
+ * Returns null when the chain cannot be rejoined: the matching pass-through
+ * input is unconnected or wrongly typed, a disabled (mode 2) node sits in
+ * the chain (disabled keeps the plain exclude-and-drop behavior — pass-
+ * through is a mode-4 semantic only), the source node id is unknown, or
+ * bypassed nodes form a cycle. The caller then drops the input, preserving
+ * the "no dangling [nodeId, slot] references" guarantee, and a converted-
+ * widget input that loses its link this way keeps its widget value fallback.
+ */
+const resolveThroughBypassedNodes = (
+    sourceNodeId: string,
+    sourceSlot: number,
+    nodeById: ReadonlyMap<string, UINode>
+): { nodeId: string; slot: number } | null => {
+    let nodeId = sourceNodeId;
+    let slot = sourceSlot;
+    // Keyed on id+slot so distinct wires through the same bypassed node
+    // still resolve, while a true bypass loop terminates immediately.
+    const visited = new Set<string>();
+    for (;;) {
+        const node = nodeById.get(nodeId);
+        if (!node) return null; // Dangling source id — nothing to rejoin to.
+        if (node.mode !== 4) {
+            // Reached a real node: active nodes are the producer; disabled
+            // (mode 2) nodes break the wire (previous plain-exclusion behavior).
+            return node.mode === 2 ? null : { nodeId, slot };
+        }
+        const key = `${nodeId}:${slot}`;
+        if (visited.has(key)) return null;
+        visited.add(key);
+        // The consumed output slot decides which input type may pass through.
+        const output = node.outputs.find((o) => o.slotIndex === slot) ?? node.outputs[slot];
+        if (!output) return null;
+        const upstream = findBypassPassThroughInput(node, output.type);
+        if (!upstream) return null;
+        nodeId = upstream.sourceNodeId;
+        slot = upstream.sourceSlot;
+    }
+};
+
 /**
  * Assemble a flat API prompt from a list of already-flattened UI nodes.
  *
@@ -151,15 +242,23 @@ export const replacePreferenceVariables = <T>(
  * Disabled (mode 2) and bypassed (mode 4) nodes are never serialized:
  * the API prompt has no mode concept — anything in it is executed by the
  * server as a normal node — so these must be excluded here, exactly like
- * ComfyUI's own frontend does. Connections referencing excluded nodes are
- * dropped with them ("remove inputs connected to removed nodes"), so no
- * dangling [nodeId, slot] references reach the server; a converted-widget
- * input that loses its link this way keeps the widget value emitted
- * above, which matches ComfyUI's fallback semantics.
+ * ComfyUI's own frontend does. Bypass is special: ComfyUI defines it as
+ * "inputs pass directly to outputs unchanged", so a connection sourcing a
+ * bypassed node is rejoined to that node's upstream source whenever a
+ * connected input with the same type as the consumed output exists (chains
+ * of bypassed nodes resolve transitively — see resolveThroughBypassedNodes).
+ * Connections that cannot be rejoined — and every connection sourcing a
+ * disabled node — are dropped with the excluded node ("remove inputs
+ * connected to removed nodes"), so no dangling [nodeId, slot] references
+ * reach the server; a converted-widget input that loses its link this way
+ * keeps the widget value emitted above, which matches ComfyUI's fallback
+ * semantics.
  */
 export function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
     const active = flat.filter((n) => n.mode !== 2 && n.mode !== 4);
-    const activeIds = new Set(active.map((n) => n.id));
+    // Index EVERY node (including excluded ones) so connection resolution
+    // can walk through bypassed intermediates to the real producer.
+    const nodeById = new Map(flat.map((n) => [n.id, n]));
     const prompt: Record<string, unknown> = {};
     for (const node of active) {
         const inputs: Record<string, unknown> = {};
@@ -189,14 +288,28 @@ export function uiNodesToApiPrompt(flat: UINode[]): Record<string, unknown> {
             }
         }
 
+        // Updated ComfyUI nodes can add required inputs after workflows have
+        // already been saved. Apply only the node-specific compatibility
+        // defaults declared by the registry, and never replace an explicit
+        // widget value; linked connections below still take final precedence.
+        if (registryEntry?.promptDefaults) {
+            objectEach(registryEntry.promptDefaults, ({ key, value }) => {
+                if (!objectHasKey(inputs, key)) inputs[key] = value;
+            });
+        }
+
         // ── Linked connections → [sourceNodeId, sourceSlot] ──
         // Processed AFTER widgets so a connected converted-widget input
-        // overrides the (stale) widget value. References to excluded
-        // (disabled/bypassed) nodes are dropped — a severed widget-input
-        // link therefore falls back to the widget value.
+        // overrides the (stale) widget value. Sources pointing at bypassed
+        // (mode 4) nodes are rejoined through them when the slot types
+        // match (see resolveThroughBypassedNodes above); sources that
+        // cannot be rejoined — including anything fed by a disabled
+        // (mode 2) node — are dropped, so a severed widget-input link
+        // falls back to the widget value.
         for (const conn of node.connections) {
-            if (!activeIds.has(conn.sourceNodeId)) continue;
-            inputs[conn.name] = [conn.sourceNodeId, conn.sourceSlot];
+            const resolved = resolveThroughBypassedNodes(conn.sourceNodeId, conn.sourceSlot, nodeById);
+            if (!resolved) continue;
+            inputs[conn.name] = [resolved.nodeId, resolved.slot];
         }
 
         prompt[node.id] = { class_type: node.classType, inputs };

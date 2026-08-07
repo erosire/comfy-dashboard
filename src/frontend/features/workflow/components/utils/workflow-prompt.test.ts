@@ -57,3 +57,71 @@ describe('uiNodesToApiPrompt MiniMax H3 Sol attention inputs', () => {
         });
     });
 });
+
+// MiniMaxH3TurboLoRA gained a required `low_vram` input after older workflows
+// were serialized with only `lora_name` and `strength`; the prompt compiler must
+// provide the backend's false default without changing those saved widget slots.
+describe('uiNodesToApiPrompt MiniMax H3 Turbo LoRA compatibility', () => {
+    it('backfills low_vram for a legacy two-widget workflow', () => {
+        const node: UINode = {
+            id: '8',
+            classType: 'MiniMaxH3TurboLoRA',
+            connections: [],
+            outputs: [],
+            widgets: [
+                { index: 0, value: 'minimax_h3_turbo.safetensors' },
+                { index: 1, value: 1 },
+            ],
+            mode: 0,
+            order: 0,
+            properties: {},
+            flags: {},
+            position: [0, 0],
+            size: [200, 100],
+            _sourceFormat: 'workflow-v04',
+        };
+
+        expect(uiNodesToApiPrompt([node])).toEqual({
+            '8': {
+                class_type: 'MiniMaxH3TurboLoRA',
+                inputs: {
+                    lora_name: 'minimax_h3_turbo.safetensors',
+                    strength: 1,
+                    low_vram: false,
+                },
+            },
+        });
+    });
+
+    it('preserves an explicit low_vram widget value', () => {
+        const node: UINode = {
+            id: '8',
+            classType: 'MiniMaxH3TurboLoRA',
+            connections: [],
+            outputs: [],
+            widgets: [
+                { index: 0, value: 'minimax_h3_turbo.safetensors' },
+                { index: 1, value: 1 },
+                { index: 2, value: true },
+            ],
+            mode: 0,
+            order: 0,
+            properties: {},
+            flags: {},
+            position: [0, 0],
+            size: [200, 100],
+            _sourceFormat: 'workflow-v04',
+        };
+
+        expect(uiNodesToApiPrompt([node])).toEqual({
+            '8': {
+                class_type: 'MiniMaxH3TurboLoRA',
+                inputs: {
+                    lora_name: 'minimax_h3_turbo.safetensors',
+                    strength: 1,
+                    low_vram: true,
+                },
+            },
+        });
+    });
+});

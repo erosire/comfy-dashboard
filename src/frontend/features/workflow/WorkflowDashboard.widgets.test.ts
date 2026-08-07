@@ -897,6 +897,359 @@ describe('workflowToApiPrompt — disabled/bypassed nodes are excluded', () => {
     });
 });
 
+describe('workflowToApiPrompt — bypassed nodes rejoin the flow when types match', () => {
+    // Helper: an active LoadImage feeding an IMAGE output through `links`.
+    const makeLoadImage = (id: number, outLinkIds: number[]): Record<string, unknown> => ({
+        id,
+        type: 'LoadImage',
+        pos: [0, 0],
+        size: [200, 100],
+        flags: {},
+        order: 0,
+        mode: 0,
+        properties: {},
+        inputs: [],
+        outputs: [{ name: 'IMAGE', type: 'IMAGE', links: outLinkIds, slot_index: 0 }],
+        widgets_values: ['example.png'],
+    });
+
+    it('rejoins the flow through a bypassed node whose input and output types match', () => {
+        // LoadImage → [bypassed IMAGE→IMAGE node] → PreviewImage.
+        // The bypassed node is omitted from the prompt, but the sink must be
+        // rewired directly to LoadImage instead of losing its images input
+        // (ComfyUI bypass semantic: "inputs pass directly to outputs unchanged").
+        const raw = makeWorkflow(
+            [
+                makeLoadImage(100, [10]),
+                {
+                    id: 200,
+                    type: 'ImagePassThrough',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'image', type: 'IMAGE', link: 10 }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [
+                { id: 10, origin_id: 100, origin_slot: 0, target_id: 200, target_slot: 0, type: 'IMAGE' },
+                makeSinkLink(200, 0, 'IMAGE'),
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        // Execution sort order LoadImage → pass-through → sink renumbers to
+        // 1, 2, 3; the bypassed node ("2") is omitted and the sink points
+        // straight at LoadImage's output slot 0.
+        expect(prompt).toEqual({
+            '1': { class_type: 'LoadImage', inputs: { image: 'example.png' } },
+            '3': { class_type: 'PreviewImage', inputs: { images: ['1', 0] } },
+        });
+    });
+
+    it('rejoins through a chain of consecutive bypassed nodes transitively', () => {
+        // LoadImage → bypassed A → bypassed B → PreviewImage.
+        const raw = makeWorkflow(
+            [
+                makeLoadImage(100, [10]),
+                {
+                    id: 200,
+                    type: 'ImagePassThroughA',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'image', type: 'IMAGE', link: 10 }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [11], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                {
+                    id: 300,
+                    type: 'ImagePassThroughB',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 2,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'image', type: 'IMAGE', link: 11 }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [
+                { id: 10, origin_id: 100, origin_slot: 0, target_id: 200, target_slot: 0, type: 'IMAGE' },
+                { id: 11, origin_id: 200, origin_slot: 0, target_id: 300, target_slot: 0, type: 'IMAGE' },
+                makeSinkLink(300, 0, 'IMAGE'),
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        // Sort order: LoadImage(1) → A(2) → B(3) → sink(4); both bypassed
+        // nodes collapse away and the sink links straight to LoadImage.
+        expect(prompt).toEqual({
+            '1': { class_type: 'LoadImage', inputs: { image: 'example.png' } },
+            '4': { class_type: 'PreviewImage', inputs: { images: ['1', 0] } },
+        });
+    });
+
+    it('still drops the downstream link when the matching input of the bypassed node is unconnected', () => {
+        // The bypassed node DECLARES a matching IMAGE input slot, but no
+        // wire feeds it — there is no upstream to rejoin to, so the sink
+        // falls back to the old drop behavior.
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 200,
+                    type: 'ImagePassThrough',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'image', type: 'IMAGE', link: null }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [makeSinkLink(200, 0, 'IMAGE')]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        // Sort order: pass-through(1) → sink(2); the bypassed node is
+        // omitted and the sink's images input is dropped, not dangling.
+        expect(prompt).toEqual({
+            '2': { class_type: 'PreviewImage', inputs: {} },
+        });
+    });
+
+    it('does not rejoin when the bypassed node input type differs from the consumed output type', () => {
+        // CheckpointLoaderSimple —MODEL→ [bypassed node: MODEL in, IMAGE out] → PreviewImage.
+        // MODEL ≠ IMAGE, so there is no valid pass-through input for the
+        // IMAGE output the sink consumes; the link is dropped.
+        const raw = makeWorkflow(
+            [
+                {
+                    id: 100,
+                    type: 'CheckpointLoaderSimple',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 0,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [
+                        { name: 'MODEL', type: 'MODEL', links: [10], slot_index: 0 },
+                        { name: 'CLIP', type: 'CLIP', links: null, slot_index: 1 },
+                        { name: 'VAE', type: 'VAE', links: null, slot_index: 2 },
+                    ],
+                    widgets_values: ['model.safetensors'],
+                },
+                {
+                    id: 200,
+                    type: 'MixedPassThrough',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'model', type: 'MODEL', link: 10 }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [
+                { id: 10, origin_id: 100, origin_slot: 0, target_id: 200, target_slot: 0, type: 'MODEL' },
+                makeSinkLink(200, 0, 'IMAGE'),
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        expect(prompt).toEqual({
+            '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'model.safetensors' } },
+            '3': { class_type: 'PreviewImage', inputs: {} },
+        });
+    });
+
+    it('rejoins through a wildcard (*) input when it is the only pass-through candidate', () => {
+        // Reroute-style bypassed node: the declared input slot type is '*',
+        // which genuinely accepts the IMAGE type the sink consumes.
+        const raw = makeWorkflow(
+            [
+                makeLoadImage(100, [10]),
+                {
+                    id: 200,
+                    type: 'AnyPassThrough',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'anything', type: '*', link: 10 }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [
+                { id: 10, origin_id: 100, origin_slot: 0, target_id: 200, target_slot: 0, type: 'IMAGE' },
+                makeSinkLink(200, 0, 'IMAGE'),
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        expect(prompt).toEqual({
+            '1': { class_type: 'LoadImage', inputs: { image: 'example.png' } },
+            '3': { class_type: 'PreviewImage', inputs: { images: ['1', 0] } },
+        });
+    });
+
+    it('matches pass-through per output slot when a bypassed node carries multiple channels', () => {
+        // One bypassed node with two lanes: IMAGE in → IMAGE out (slot 0)
+        // and MASK in → MASK out (slot 1). Each downstream consumer must
+        // rejoin to the upstream of its OWN lane, not the other one.
+        const raw = makeWorkflow(
+            [
+                makeLoadImage(100, [10]),
+                {
+                    id: 150,
+                    type: 'MaskSource',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 0,
+                    properties: {},
+                    inputs: [],
+                    outputs: [{ name: 'MASK', type: 'MASK', links: [11], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                {
+                    id: 200,
+                    type: 'DualChannelNode',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 2,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [
+                        { name: 'image', type: 'IMAGE', link: 10 },
+                        { name: 'mask', type: 'MASK', link: 11 },
+                    ],
+                    outputs: [
+                        { name: 'IMAGE', type: 'IMAGE', links: [20], slot_index: 0 },
+                        { name: 'MASK', type: 'MASK', links: [21], slot_index: 1 },
+                    ],
+                    widgets_values: [],
+                },
+                {
+                    id: 901,
+                    type: 'PreviewImage',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 3,
+                    mode: 0,
+                    properties: {},
+                    inputs: [{ name: 'images', type: 'IMAGE', link: 20 }],
+                    outputs: [],
+                },
+                {
+                    id: 902,
+                    type: 'PreviewImage',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 4,
+                    mode: 0,
+                    properties: {},
+                    inputs: [{ name: 'images', type: 'MASK', link: 21 }],
+                    outputs: [],
+                },
+            ],
+            [
+                { id: 10, origin_id: 100, origin_slot: 0, target_id: 200, target_slot: 0, type: 'IMAGE' },
+                { id: 11, origin_id: 150, origin_slot: 0, target_id: 200, target_slot: 1, type: 'MASK' },
+                { id: 20, origin_id: 200, origin_slot: 0, target_id: 901, target_slot: 0, type: 'IMAGE' },
+                { id: 21, origin_id: 200, origin_slot: 1, target_id: 902, target_slot: 0, type: 'MASK' },
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        // Sort order LoadImage(1), MaskSource(2), dual-channel(3),
+        // image-sink(4), mask-sink(5): the IMAGE consumer rejoins to
+        // LoadImage and the MASK consumer to MaskSource — never crossed.
+        expect(prompt).toEqual({
+            '1': { class_type: 'LoadImage', inputs: { image: 'example.png' } },
+            '2': { class_type: 'MaskSource', inputs: {} },
+            '4': { class_type: 'PreviewImage', inputs: { images: ['1', 0] } },
+            '5': { class_type: 'PreviewImage', inputs: { images: ['2', 0] } },
+        });
+    });
+
+    it('keeps the drop behavior when the bypass chain ends at a disabled (mode 2) node', () => {
+        // Disabled LoadImage → bypassed IMAGE pass-through → PreviewImage.
+        // Pass-through is a mode-4 semantic only — a disabled node has no
+        // output at all — so the sink input is dropped, not rejoined.
+        const raw = makeWorkflow(
+            [
+                {
+                    ...makeLoadImage(100, [10]),
+                    mode: 2, // DISABLED
+                },
+                {
+                    id: 200,
+                    type: 'ImagePassThrough',
+                    pos: [0, 0],
+                    size: [200, 100],
+                    flags: {},
+                    order: 1,
+                    mode: 4, // BYPASS
+                    properties: {},
+                    inputs: [{ name: 'image', type: 'IMAGE', link: 10 }],
+                    outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [SINK_LINK_ID], slot_index: 0 }],
+                    widgets_values: [],
+                },
+                makeSinkNode(),
+            ],
+            [
+                { id: 10, origin_id: 100, origin_slot: 0, target_id: 200, target_slot: 0, type: 'IMAGE' },
+                makeSinkLink(200, 0, 'IMAGE'),
+            ]
+        );
+
+        const prompt = workflowToApiPrompt(raw);
+
+        // Sort order LoadImage(1) → pass-through(2) → sink(3): both the
+        // disabled node and the bypassed node are omitted and the sink's
+        // images input is dropped outright.
+        expect(prompt).toEqual({
+            '3': { class_type: 'PreviewImage', inputs: {} },
+        });
+    });
+});
+
 describe('parseWorkflowJson — node titles', () => {
     it('carries the workflow node title onto the UINode', () => {
         const raw = makeWorkflow(
