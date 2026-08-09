@@ -104,7 +104,9 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 on an existing native ComfyUI websocket. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';
-                const inFlight = p.activeGenerationIds.length;
+                // The server-reported queue (GET /v1/comfy/cloud) is the
+                // ONLY in-flight source — nothing is counted client-side.
+                const inFlight = p.queue.length;
                 const isLoading = isSpawning || inFlight > 0;
                 const letter = podLetter(p.podNumber);
                 const isDisabled = isSpawning || nodeCount === 0 || !p.pod_url;
@@ -161,7 +163,7 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                         nodeCount === 0
                             ? 'Load a workflow first'
                             : `Queue on Pod ${podLetter(autoTarget.podNumber)} — the least-loaded pod ` +
-                              `(${autoTarget.activeGenerationIds.length} job${autoTarget.activeGenerationIds.length !== 1 ? 's' : ''} in flight)`
+                              `(${autoTarget.queue.length} job${autoTarget.queue.length !== 1 ? 's' : ''} in flight)`
                     }
                     data-testid="auto-generate"
                 >

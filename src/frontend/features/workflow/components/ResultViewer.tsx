@@ -514,7 +514,9 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                     </BtnPrimary>
                     {pods.map((p) => {
                         const isSpawning = p.status === 'spawning';
-                        const inFlight = p.activeGenerationIds.length;
+                        // The server-reported queue is the ONLY in-flight
+                        // source — mirrors FooterActions.
+                        const inFlight = p.queue.length;
                         const isLoading = isSpawning || inFlight > 0;
                         const letter = podLetter(p.podNumber);
                         const isDisabled = actionBusy || isSpawning || !p.pod_url;
@@ -572,10 +574,10 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                                 inputTargetName
                                     ? `Feed this image into "${inputTargetName}"'s Inputs — queue the run on ` +
                                       `Pod ${podLetter(autoTarget.podNumber)}, the least-loaded pod ` +
-                                      `(${autoTarget.activeGenerationIds.length} job${autoTarget.activeGenerationIds.length !== 1 ? 's' : ''} in flight; ` +
+                                      `(${autoTarget.queue.length} job${autoTarget.queue.length !== 1 ? 's' : ''} in flight; ` +
                                       'the generation saves on this workflow)'
                                     : `Queue this image's prompt on Pod ${podLetter(autoTarget.podNumber)} — ` +
-                                      `the least-loaded pod (${autoTarget.activeGenerationIds.length} job${autoTarget.activeGenerationIds.length !== 1 ? 's' : ''} in flight)`
+                                      `the least-loaded pod (${autoTarget.queue.length} job${autoTarget.queue.length !== 1 ? 's' : ''} in flight)`
                             }
                             data-testid="viewer-auto-generate"
                         >

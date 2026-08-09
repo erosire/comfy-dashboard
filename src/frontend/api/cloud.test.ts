@@ -50,7 +50,7 @@ describe('cloudPrompt', () => {
 });
 
 describe('cloudListPods', () => {
-    it('GETs /cloud and returns the active pod list', async () => {
+    it('GETs /cloud and returns the active pod list with each pod queue', async () => {
         const pods = [
             {
                 pod_url: 'https://pod-a.example/',
@@ -59,6 +59,27 @@ describe('cloudListPods', () => {
                 client_id: 'abc123def4567890fedcba0987654321',
                 active: true,
                 prompts: 2,
+                // The server-tracked queue — the ONLY queue source the UI uses.
+                queue: [
+                    {
+                        prompt_id: 'prompt-1',
+                        number: 1,
+                        status: 'running',
+                        workflow_id: 'wf-1',
+                        generation_id: 'gen-1',
+                        queuedAt: '2026-08-05T10:15:31.000Z',
+                        startedAt: '2026-08-05T10:15:32.000Z'
+                    },
+                    {
+                        prompt_id: 'prompt-2',
+                        number: 2,
+                        status: 'queued',
+                        workflow_id: 'wf-1',
+                        generation_id: 'gen-2',
+                        queuedAt: '2026-08-05T10:15:33.000Z',
+                        startedAt: null
+                    }
+                ],
                 connectedAt: '2026-08-05T10:15:30.000Z'
             },
             {
@@ -66,6 +87,7 @@ describe('cloudListPods', () => {
                 client_id: '000aaaaabbbbccccddddeeeeffff0123',
                 active: true,
                 prompts: 0,
+                queue: [],
                 connectedAt: '2026-08-05T10:20:41.000Z'
             }
         ];

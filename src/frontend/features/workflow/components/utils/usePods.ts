@@ -1,38 +1,37 @@
 // Cloud pod lifecycle — pod creation/reuse for the New / GPU-labeled pod
-// / Auto buttons, run-state sync from polled generations, and the server
-// pod-list poll that owns pod button liveness.
+// / Auto buttons, and the server pod-list poll that owns pod button
+// liveness AND queue state.
 //
 // Extracted from the original CloudTab.tsx. Behaviour notes:
 //   - New is NEVER blocked: the GPU picker dialog (GpuSelectDialog) asks
 //     for the GPU ("4090" / "B300", see GPU_OPTIONS), and every pick
 //     spawns a fresh pod for that GPU. Per-pod status lives on the pod
-//     button (labeled e.g. "4090x3" = a 4090 pod with 3 jobs queued).
-//   - Pods accept concurrent jobs: each "#N" click queues another job; the
+//     button (labeled e.g. "4090" + a badge with the queued job count).
+//   - Pods accept concurrent jobs: each click queues another job; the
 //     server rides all of them on the pod's one persistent websocket and
 //     scopes events by prompt_id. "Auto" queues on the least-loaded ready
 //     pod (see pickLeastLoadedPod).
-//   - LIVENESS IS THE SERVER'S JOB: every GPU_LIST_POLL_INTERVAL_MS the hook fetches
-//     GET /v1/comfy/cloud — the registry of pods whose persistent websocket
-//     the server still holds. A pod drops out of the list the moment its
-//     socket dies: pods are designed to terminate when idle and never come
-//     back (see server pod-socket.ts — no reconnection is attempted). The
-//     pod buttons are a pure MIRROR of that list:
-//       * listed but unknown locally      → add a ready button (spawned by
-//         another client, page refresh, …);
-//       * known locally but NOT listed    → the pod is dead for good;
-//         remove the button (its in-flight generations already failed
-//         server-side with prompt_error and settle through generation
-//         polling);
-//       * listed and known                → stays;
-//       * local placeholder with no pod_url yet (create in flight) → the
-//         list cannot judge it; untouched either way.
-//     There are deliberately NO per-pod status probes / heartbeat strikes /
-//     idle expiry timers — pinging pods is the server-side socket's job.
-//     A failed LIST fetch skips the whole tick: an unreachable server never
-//     clears local buttons (removals need a definitive server answer).
+//   - THE SERVER TRACKS EVERYTHING (pod-socket.ts): every cloud instance
+//     it created and each instance's queue (prompt ids, queued/running
+//     status, workflow/generation ids). The UI PULLS this from GET
+//     /v1/comfy/cloud and keeps NO queue bookkeeping of its own:
+//       * badge counts and the Auto balancer read each entry's
+//         server-reported `queue` length verbatim;
+//       * a successful submit triggers an immediate list refresh so the
+//         accepted job shows without waiting for the next poll tick;
+//       * the server terminates idle pods itself (empty queue + idle
+//         timeout) and unreachable pods (socket death) — both leave the
+//         list, so the buttons mirror the list and nothing else.
+//   - Run-state SETTLE (the done/error border ring): queue entries vanish
+//     server-side at the run's terminal event, so a poll sees "entry gone"
+//     but not WHY. The vanished generation ids are remembered in
+//     settleWatchRef (per pod) and evaluated against the generations poll:
+//     all settled → done, any failed → error, foreign ids (other
+//     workflows) → no local verdict. This is comparison of two API
+//     snapshots, not own state.
 
 import React from 'react';
-import type { GenerationEntry, GenerationSummary } from '../../../../api';
+import type { CloudPodListEntry, GenerationEntry, GenerationSummary } from '../../../../api';
 import { GPU_LIST_POLL_INTERVAL_MS } from '../../../../config';
 import { cloudCreate, cloudListPods, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
 import type { UINode } from '../../../../nodes/node-type';
@@ -79,7 +78,10 @@ export type UsePodsParams = {
     editingWorkflowId: string | null;
     /** Name of the workflow being edited — names new generations by default. */
     workflowName: string | null;
-    /** Polled generations (store.generations) — settles pod run state. */
+    /**
+     * Polled generations (store.generations) — the verdict source for
+     * settling a pod's run state once its server-reported queue drains.
+     */
     generations: GenerationSummary[];
     /**
      * Serialize the CURRENT editor page (same snapshot Clone takes:
@@ -102,52 +104,242 @@ export type UsePodsParams = {
  */
 export type GenerationSnapshot = Record<string, unknown>;
 
+/**
+ * Verdict for a pod whose server-reported queue drained: all watched
+ * generation ids settled → done / error; any still pending/processing →
+ * keep waiting (the generations poll runs on the same 3 s cadence and
+ * re-evaluates). Ids unknown to this workflow's generation list are
+ * foreign (another workflow's jobs) — they carry NO local verdict.
+ */
+type SettleVerdict = { state: 'pending' } | { state: 'settled'; run: RunState };
+
+function evaluateSettledGenerations(ids: string[], generations: GenerationSummary[]): SettleVerdict {
+    let failed: GenerationSummary | null = null;
+    let waiting = false;
+    for (const id of ids) {
+        const generation = generations.find((g) => g.id === id);
+        if (!generation) continue; // foreign workflow — dropped from the watch
+        if (generation.status === 'pending' || generation.status === 'processing') {
+            waiting = true;
+            continue;
+        }
+        if (generation.status === 'failed' && !failed) failed = generation;
+    }
+    if (waiting) return { state: 'pending' };
+    if (failed) {
+        return { state: 'settled', run: { status: 'error', events: [], message: failed.error ?? 'Generation failed' } };
+    }
+    return { state: 'settled', run: { status: 'done', events: [] } };
+}
+
+/**
+ * Merge one listed pod's SERVER-REPORTED queue into its button entry.
+ * Queue membership is replaced verbatim (the UI tracks nothing); the only
+ * derived concern is the run-state ring:
+ *   - queue non-empty → running (busy ring);
+ *   - queue drained → entries that vanished since the last poll are joined
+ *     into the pod's settle-watch and evaluated against the generations
+ *     poll (see evaluateSettledGenerations); while a verdict is pending the
+ *     ring stays running.
+ * `watch` is the per-pod-id settle-watch map (lost, not-yet-settled
+ * generation ids) — snapshot-diff data, never queue bookkeeping.
+ */
+function reconcilePodQueue(
+    pod: PodEntry,
+    serverPod: CloudPodListEntry,
+    generations: GenerationSummary[],
+    watch: Map<string, string[]>
+): PodEntry {
+    const nextQueue = serverPod.queue ?? [];
+    const nextIds = new Set(nextQueue.map((q) => q.prompt_id));
+    // Entries present in the last snapshot but gone now settled server-side
+    // — remember their generation ids until the generations poll answers.
+    const lostGenerationIds = pod.queue
+        .filter((q) => !nextIds.has(q.prompt_id) && typeof q.generation_id === 'string' && q.generation_id)
+        .map((q) => q.generation_id as string);
+    const watched = watch.get(pod.id) ?? [];
+    for (const id of lostGenerationIds) {
+        if (!watched.includes(id)) watched.push(id);
+    }
+
+    if (nextQueue.length > 0) {
+        // Busy (again) — an open settle verdict is superseded.
+        if (watch.has(pod.id)) watch.delete(pod.id);
+        const run: RunState = pod.run.status === 'running' ? pod.run : { status: 'running', events: [] };
+        return { ...pod, queue: nextQueue, run };
+    }
+
+    if (watched.length > 0) {
+        watch.set(pod.id, watched);
+        const verdict = evaluateSettledGenerations(watched, generations);
+        if (verdict.state === 'pending') {
+            // The generations poll has not caught up with the settled
+            // server queue yet — keep the ring spinning and re-evaluate
+            // from the generations-change effect.
+            const run: RunState = pod.run.status === 'running' ? pod.run : { status: 'running', events: [] };
+            return { ...pod, queue: nextQueue, run };
+        }
+        watch.delete(pod.id);
+        return { ...pod, queue: nextQueue, run: verdict.run };
+    }
+
+    return { ...pod, queue: nextQueue };
+}
+
 export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, generations, getCurrentRaw, generateWorkflow }: UsePodsParams) {
     const [pods, setPods] = React.useState<PodEntry[]>([]);
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
     const podsRef = React.useRef(pods);
     podsRef.current = pods;
+    // Fresh generations for the poll closure — the poll's cadence is
+    // decoupled from the generations poll, so the reconcile path reads
+    // the newest snapshot through this ref instead of a stale closure.
+    const generationsRef = React.useRef(generations);
+    generationsRef.current = generations;
+    // Per-pod ids of generations that left the server queue and have not
+    // settled in the generations poll yet (see reconcilePodQueue).
+    const settleWatchRef = React.useRef(new Map<string, string[]>());
 
-    // ── Sync pod buttons from polled generations ────────────────────
-    // Pod processing lives on the server; polling the generation list is
-    // what settles each "#N" button's state. A pod can have several
-    // jobs in flight — it stays "running" until the LAST one settles,
-    // then shows done (all succeeded) or error (any failed).
-
+    // ── Settle runs whose queue entries settled while the generations
+    // poll was lagging behind the pod-list poll ───────────────────────
+    // The pod-list reconcile defers to this effect whenever a watched id
+    // is still pending/processing in the generations snapshot; each fresh
+    // generations snapshot re-evaluates until the verdict lands.
     React.useEffect(() => {
+        const watch = settleWatchRef.current;
+        if (watch.size === 0) return;
         setPods((prev) => {
             let changed = false;
-            const next = prev.map((p): PodEntry => {
-                if (p.activeGenerationIds.length === 0) return p;
-
-                const stillActive: string[] = [];
-                const settled: GenerationSummary[] = [];
-                for (const genId of p.activeGenerationIds) {
-                    const gen = generations.find((g) => g.id === genId);
-                    if (!gen || gen.status === 'pending' || gen.status === 'processing') {
-                        stillActive.push(genId);
-                    } else {
-                        settled.push(gen);
-                    }
-                }
-                if (settled.length === 0) return p;
+            const next = prev.map((p) => {
+                const ids = watch.get(p.id);
+                if (!ids || ids.length === 0 || p.queue.length > 0) return p;
+                const verdict = evaluateSettledGenerations(ids, generations);
+                if (verdict.state === 'pending') return p;
+                watch.delete(p.id);
                 changed = true;
-
-                // Some jobs still running — prune the settled ones, keep spinning
-                if (stillActive.length > 0) {
-                    return { ...p, activeGenerationIds: stillActive };
-                }
-                // Last job settled — pod goes done, or error if any failed
-                const failed = settled.find((g) => g.status === 'failed');
-                const run: RunState = failed
-                    ? { status: 'error', events: [], message: failed.error ?? 'Generation failed' }
-                    : { status: 'done', events: [] };
-                return { ...p, activeGenerationIds: stillActive, run };
+                return { ...p, run: verdict.run };
             });
             return changed ? next : prev;
         });
     }, [generations]);
+
+    // ── Server pod-list poll — liveness AND queue truth ──────────────
+    // GET /v1/comfy/cloud returns every pod whose persistent websocket the
+    // server still holds, each with its server-tracked queue. The pod
+    // buttons are a pure mirror:
+    //   * unknown listed pods are ADDED as ready buttons (spawned
+    //     elsewhere, page refresh) — queue included;
+    //   * local pods that STOP being listed are REMOVED (idle-timeout or
+    //     unreachable termination — both are definitive server verdicts);
+    //   * listed known pods get their `queue` replaced verbatim and their
+    //     run-state ring settled from the snapshot diff.
+    // A failed LIST request skips the tick: an unreachable server never
+    // clears or rewrites local buttons (removals need a definitive answer).
+    const refreshPods = React.useCallback(async () => {
+        const { pods: serverPods } = await cloudListPods(baseUrl);
+        // The authoritative liveness set, keyed the same way the server
+        // keys its registry (URL.toString() normalization).
+        const serverUrls = new Set(serverPods.map((sp) => normalizePodUrl(sp.pod_url)));
+        const serverByUrl = new Map(serverPods.map((sp) => [normalizePodUrl(sp.pod_url), sp] as const));
+
+        // Additions are computed against the freshest state (ref) — a slow
+        // poll must not re-add a pod the user lost since; the commit below
+        // re-dedupes atomically.
+        const knownUrls = new Set(
+            podsRef.current.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
+        );
+        const additions: PodEntry[] = [];
+        for (const serverPod of serverPods) {
+            const normalized = normalizePodUrl(serverPod.pod_url);
+            if (knownUrls.has(normalized)) continue;
+            knownUrls.add(normalized);
+            podCounterRef.current += 1;
+            const podNumber = podCounterRef.current;
+            const queue = serverPod.queue ?? [];
+            additions.push({
+                id: `gen-pod-${Date.now()}-${podNumber}`,
+                podNumber,
+                name: podLetter(podNumber),
+                gpu: serverPod.gpu,
+                pod_url: serverPod.pod_url,
+                status: 'ready',
+                queue,
+                // An adopted pod with a loaded queue already spins.
+                run: queue.length > 0 ? { status: 'running', events: [] } : { status: 'idle' }
+            });
+        }
+
+        setPods((prev) => {
+            // Removals: resolved pods the server stopped listing.
+            // Placeholders (pod_url === '' — create still in flight) are
+            // invisible to the server list and never judged.
+            const removed: PodEntry[] = [];
+            const kept = prev.filter((p) => {
+                if (!p.pod_url) return true;
+                if (serverUrls.has(normalizePodUrl(p.pod_url))) return true;
+                removed.push(p);
+                return false;
+            });
+
+            // Queue reconcile: replace each kept pod's queue with the
+            // server answer and settle/advance its run-state ring.
+            const merged = kept.map((p) => {
+                if (!p.pod_url) return p;
+                const serverPod = serverByUrl.get(normalizePodUrl(p.pod_url));
+                if (!serverPod) return p;
+                return reconcilePodQueue(p, serverPod, generationsRef.current, settleWatchRef.current);
+            });
+
+            // Re-dedupe the additions against the commit-time state: a pod
+            // added between the fetch and this commit (spawn resolution,
+            // earlier poll) must not duplicate.
+            const prevUrls = new Set(
+                merged.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
+            );
+            const fresh = additions.filter((a) => {
+                const normalized = normalizePodUrl(a.pod_url);
+                if (prevUrls.has(normalized)) return false;
+                prevUrls.add(normalized);
+                return true;
+            });
+
+            const queueChanged = merged.some((p, i) => p !== kept[i]);
+            if (removed.length === 0 && fresh.length === 0 && !queueChanged) return prev;
+            if (removed.length > 0) {
+                console.warn(
+                    `[Pods] Server no longer holds ${removed.length} pod(s) — removing button(s): ` +
+                        removed.map((p) => `Pod#${p.podNumber} (${p.pod_url})`).join(', ')
+                );
+            }
+            if (fresh.length > 0) {
+                console.log(
+                    `[Pods] Server reported ${fresh.length} unknown pod(s) — adding buttons: ` +
+                        fresh.map((a) => a.pod_url).join(', ')
+                );
+            }
+            return [...merged, ...fresh];
+        });
+    }, [baseUrl]);
+
+    React.useEffect(() => {
+        let running = false;
+        const tick = async () => {
+            if (running) return; // previous tick still in flight — skip
+            running = true;
+            try {
+                await refreshPods();
+            } catch {
+                // The LIST endpoint itself failed — skip the tick. Buttons
+                // are only ever reconciled from a definitive server answer.
+            } finally {
+                running = false;
+            }
+        };
+        void tick();
+        const interval = setInterval(() => void tick(), GPU_LIST_POLL_INTERVAL_MS);
+        return () => clearInterval(interval);
+    }, [refreshPods]);
 
     // ── Run a generation on a cloud pod ────────────────────────────
     // Shared by "New" (spawns a fresh pod), "#N" (reuses a pod), "Auto"
@@ -166,9 +358,10 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     //    workflow json to the flat API prompt (workflowToApiPrompt),
     //    consumes the pod's stream and updates the generation json by
     //    itself — this call returns immediately (202).
-    // 4. Client-side we are done: the continuous generations polling
-    //    updates the sidebar with progress, and settles the pod button's
-    //    running → done/error state (see the sync effect above).
+    // 4. Client-side we are done: the server now owns the pod's queue
+    //    entry (extra_data carries the workflow/generation ids), so an
+    //    immediate pod-list refresh reflects the accepted job; the
+    //    continuous polls keep the queue + generations up to date.
 
     const runGenerationOnPod = React.useCallback(
         async (podUrl: string, podId?: string, generationOverride?: GenerationSnapshot) => {
@@ -197,9 +390,9 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
 
             try {
                 // Step 3 — submit the already-prepared workflow and be done.
-                // The server owns the native websocket and POST /prompt
-                // connection from this point; the client only tracks the
-                // accepted generation through polling.
+                // The server owns the native websocket, the POST /prompt
+                // connection AND the pod's queue entry from this point; the
+                // client only mirrors the server answers.
                 await cloudPrompt(baseUrl, {
                     pod_url: podUrl,
                     prompt: generation.prompt,
@@ -210,30 +403,18 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                         generation_id: generation.id
                     }
                 });
-                // Accepted — add to the pod's in-flight set; polling
-                // settles each entry. Pods accept concurrent jobs, so an
-                // existing run does not block this one.
-                if (podId) {
-                    setPods((prev) =>
-                        prev.map((p) =>
-                            p.id === podId
-                                ? {
-                                      ...p,
-                                      run: { status: 'running', events: [] },
-                                      activeGenerationIds: [...p.activeGenerationIds, generation.id]
-                                  }
-                                : p
-                        )
-                    );
-                }
+                // Accepted — pull the fresh queue NOW (the 202 already
+                // implies the server-side queue entry; the next poll tick
+                // is up to GPU_LIST_POLL_INTERVAL_MS away).
+                refreshPods().catch(() => undefined);
             } catch (err: any) {
                 const message = err.message ?? String(err);
-                // Submission itself failed — only surface an error on the
-                // button when nothing else is still running on this pod.
+                // Submission itself failed — surface an error on the
+                // button; the next successful poll still owns the truth.
                 if (podId) {
                     setPods((prev) =>
                         prev.map((p) =>
-                            p.id === podId && p.activeGenerationIds.length === 0
+                            p.id === podId && p.queue.length === 0
                                 ? { ...p, run: { status: 'error', events: [], message } }
                                 : p
                         )
@@ -242,7 +423,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
                 throw err;
             }
         },
-        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow]
+        [baseUrl, editingWorkflowId, workflowName, getCurrentRaw, generateWorkflow, refreshPods]
     );
 
     // ── New workflow ───────────────────────────────────────────────
@@ -280,7 +461,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             gpu,
             pod_url: '',
             status: 'spawning',
-            activeGenerationIds: [],
+            queue: [],
             run: { status: 'idle' }
         };
         setPods((prev) => [...prev, podEntry]);
@@ -325,11 +506,11 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         }
     }, [nodes.length, editingWorkflowId, baseUrl, runGenerationOnPod]);
 
-    // ── Pod button (A00): same as New but reuses an existing pod_url ──
+    // ── Pod button: same as New but reuses an existing pod_url ─────
     // NEVER blocked while running: each click queues ANOTHER job on the
-    // pod. The server marks each submission with its own prompt_id and
-    // demultiplexes the shared pod stream by it, so every generation
-    // json only receives its own job's events.
+    // pod. The server marks each submission with its own prompt_id, tracks
+    // it in the pod's queue list, and demultiplexes the shared pod stream
+    // by it, so every generation json only receives its own job's events.
     //
     // generationOverride: rerun with a stored generation snapshot (result
     // viewer) instead of building from the editor tree.
@@ -350,8 +531,9 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
 
     // ── Auto button: queue on the least-loaded ready pod ───────────
     // The load balancer — never spawns anything; just delegates to the
-    // pod button path with pickLeastLoadedPod's choice. No-ops when no
-    // pod is ready (the button renders disabled then anyway).
+    // pod button path with pickLeastLoadedPod's choice (least-loaded by
+    // the SERVER-REPORTED queue). No-ops when no pod is ready (the button
+    // renders disabled then anyway).
     //
     // generationOverride: rerun with a stored generation snapshot (result
     // viewer) instead of building from the editor tree.
@@ -367,110 +549,12 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
             }
             console.log(
                 `[Auto] Pod#${pod.podNumber} picked — least loaded ` +
-                    `(${pod.activeGenerationIds.length} job${pod.activeGenerationIds.length !== 1 ? 's' : ''} in flight)`
+                    `(${pod.queue.length} job${pod.queue.length !== 1 ? 's' : ''} in flight)`
             );
             await handlePodGenerate(pod, generationOverride);
         },
         [handlePodGenerate]
     );
-
-    // ── Server pod-list polling — the pod buttons' ONLY liveness source ─
-    // GET /v1/comfy/cloud returns every pod whose persistent websocket the
-    // server still holds; the pod buttons are a pure mirror of it:
-    // unknown listed pods are ADDED as ready buttons (spawned elsewhere,
-    // page refresh), and local pods that STOP being listed are REMOVED —
-    // pods are designed to die when idle and never reconnect, so the server
-    // deregistering one is a definitive death verdict, not a timeout guess.
-    //
-    // A failed LIST request skips the tick entirely: an unreachable server
-    // must never clear the local buttons.
-    React.useEffect(() => {
-        let running = false;
-        const syncServerPods = async () => {
-            if (running) return; // previous tick still in flight — skip
-            running = true;
-            try {
-                const { pods: serverPods } = await cloudListPods(baseUrl);
-                // The authoritative liveness set, keyed the same way the
-                // server keys its registry (URL.toString() normalization).
-                const serverUrls = new Set(serverPods.map((sp) => normalizePodUrl(sp.pod_url)));
-
-                // Additions are computed against the freshest state (ref) —
-                // a slow poll must not re-add a pod the user lost since;
-                // the commit below re-dedupes atomically.
-                const knownUrls = new Set(
-                    podsRef.current.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
-                );
-                const additions: PodEntry[] = [];
-                for (const serverPod of serverPods) {
-                    const normalized = normalizePodUrl(serverPod.pod_url);
-                    if (knownUrls.has(normalized)) continue;
-                    knownUrls.add(normalized);
-                    podCounterRef.current += 1;
-                    const podNumber = podCounterRef.current;
-                    additions.push({
-                        id: `gen-pod-${Date.now()}-${podNumber}`,
-                        podNumber,
-                        name: podLetter(podNumber),
-                        gpu: serverPod.gpu,
-                        pod_url: serverPod.pod_url,
-                        status: 'ready',
-                        activeGenerationIds: [],
-                        run: { status: 'idle' }
-                    });
-                }
-
-                setPods((prev) => {
-                    // Removals: resolved pods the server stopped listing.
-                    // Placeholders (pod_url === '' — create still in flight)
-                    // are invisible to the server list and never judged.
-                    const removed: PodEntry[] = [];
-                    const kept = prev.filter((p) => {
-                        if (!p.pod_url) return true;
-                        if (serverUrls.has(normalizePodUrl(p.pod_url))) return true;
-                        removed.push(p);
-                        return false;
-                    });
-
-                    // Re-dedupe the additions against the commit-time state:
-                    // a pod added between the fetch and this commit (spawn
-                    // resolution, earlier poll) must not duplicate.
-                    const prevUrls = new Set(
-                        kept.filter((p) => p.pod_url).map((p) => normalizePodUrl(p.pod_url))
-                    );
-                    const fresh = additions.filter((a) => {
-                        const normalized = normalizePodUrl(a.pod_url);
-                        if (prevUrls.has(normalized)) return false;
-                        prevUrls.add(normalized);
-                        return true;
-                    });
-
-                    if (removed.length === 0 && fresh.length === 0) return prev;
-                    if (removed.length > 0) {
-                        console.warn(
-                            `[Pods] Server no longer holds ${removed.length} pod(s) — removing button(s): ` +
-                                removed.map((p) => `Pod#${p.podNumber} (${p.pod_url})`).join(', ')
-                        );
-                    }
-                    if (fresh.length > 0) {
-                        console.log(
-                            `[Pods] Server reported ${fresh.length} unknown pod(s) — adding buttons: ` +
-                                fresh.map((a) => a.pod_url).join(', ')
-                        );
-                    }
-                    return [...kept, ...fresh];
-                });
-            } catch {
-                // The LIST endpoint itself failed — skip the tick. Buttons
-                // are only ever reconciled from a definitive server answer.
-            } finally {
-                running = false;
-            }
-        };
-        void syncServerPods();
-        const interval = setInterval(() => void syncServerPods(), GPU_LIST_POLL_INTERVAL_MS);
-        return () => clearInterval(interval);
-    }, [baseUrl]);
 
     return { pods, handleGenerate, handlePodGenerate, handleAutoGenerate };
 }

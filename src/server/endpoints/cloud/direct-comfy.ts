@@ -20,9 +20,11 @@
 // as an NDJSON stream) was removed: pods now keep a single server-managed
 // socket forever, and prompt events are demultiplexed by prompt_id in
 // pod-socket.ts. Execution quiet-time is no longer treated as failure —
-// only remote close/error (or a failed protocol ping) terminates a pod,
-// and that death is final: pods are designed to terminate when idle and
-// never restart without the create-pod endpoint, so no reconnect is tried.
+// only remote close/error (or a failed protocol ping), or the server's
+// idle-queue timeout (pod-socket.ts, COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS),
+// terminates a pod, and that death is final: pods are designed to terminate
+// when idle and never restart without the create-pod endpoint, so no
+// reconnect is tried.
 
 import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'undici';

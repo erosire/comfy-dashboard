@@ -86,7 +86,9 @@ import {
     connectPodSocket,
     getPodSocket,
     listPodSockets,
+    POD_IDLE_TIMEOUT_DEFAULT_MS,
     POD_WS_HEARTBEAT_MS,
+    setPodIdleTimeoutMs,
     subscribePodPrompt,
     submitPodPrompt
 } from './pod-socket';
@@ -193,6 +195,7 @@ describe('connectPodSocket', () => {
                 client_id: CLIENT_ID,
                 active: true,
                 prompts: 0,
+                queue: [],
                 connectedAt: expect.any(String)
             }
         ]);
@@ -200,7 +203,7 @@ describe('connectPodSocket', () => {
 });
 
 describe('getPodSocket / listPodSockets', () => {
-    it('returns null for unknown pods and reports prompt counts from subscribers + pending submissions', async () => {
+    it('returns null for unknown pods and counts the queue (from submit to the pod terminal)', async () => {
         expect(getPodSocket('https://unknown.example')).toBeNull();
         expect(getPodSocket('not a url')).toBeNull();
 
@@ -217,10 +220,19 @@ describe('getPodSocket / listPodSockets', () => {
         await submitPodPrompt(connection, { promptPayload: { prompt: {} } });
         expect(listPodSockets()[0].prompts).toBe(1);
 
-        // Subscribing transfers the pending count into a live subscriber.
+        // Subscribing transfers the pending count into the queue entry —
+        // the queue tracks the POD's execution, NOT the consumer: an
+        // unsubscribe leaves the prompt queued until the terminal event.
         const unsubscribe = subscribePodPrompt(connection, { promptId: 'prompt-1', onEvent: () => undefined });
         expect(listPodSockets()[0].prompts).toBe(1);
         unsubscribe();
+        expect(listPodSockets()[0].prompts).toBe(1);
+
+        // The pod's terminal event for the prompt_id drains the queue.
+        testState.sockets[0].emitMessage(
+            JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-1' } })
+        );
+        await flushSocketDelivery();
         expect(listPodSockets()[0].prompts).toBe(0);
     });
 });
@@ -396,9 +408,10 @@ describe('pod termination', () => {
         expect(getPodSocket(POD_URL)).toBeNull();
     });
 
-    it('keeps an idle pod connected forever — no response-silence watchdog', async () => {
+    it('keeps a BUSY pod connected — no response-silence watchdog while the queue is loaded', async () => {
         vi.useFakeTimers();
-        await connectPodSocket(new URL(POD_URL));
+        const connection = await connectPodSocket(new URL(POD_URL));
+        subscribePodPrompt(connection, { promptId: 'prompt-a', onEvent: () => undefined });
 
         // Long past the old per-prompt 300s response watchdog: pongs are not
         // required — only a failed ping write or remote close terminates.
@@ -406,6 +419,178 @@ describe('pod termination', () => {
 
         expect(getPodSocket(POD_URL)).not.toBeNull();
         expect(listPodSockets()[0].active).toBe(true);
+    });
+});
+
+describe('per-pod queue registry', () => {
+    it('tracks queued → running → drained across the pod lifecycle (with workflow/generation ids)', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        const socket = testState.sockets[0];
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(JSON.stringify({ prompt_id: 'prompt-q1', number: 7, node_errors: {} }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' }
+            })
+        );
+
+        // extra_data carries the dashboard ids onto the queue entry.
+        await submitPodPrompt(connection, {
+            promptPayload: { prompt: {}, extra_data: { workflow_id: 'wf-9', generation_id: 'gen-9' } }
+        });
+        const unsubscribe = subscribePodPrompt(connection, { promptId: 'prompt-q1', onEvent: () => undefined });
+
+        // Accepted — queued.
+        expect(listPodSockets()[0].queue).toEqual([
+            {
+                prompt_id: 'prompt-q1',
+                number: 7,
+                status: 'queued',
+                workflow_id: 'wf-9',
+                generation_id: 'gen-9',
+                queuedAt: expect.any(String),
+                startedAt: null
+            }
+        ]);
+        expect(listPodSockets()[0].prompts).toBe(1);
+
+        // execution_start flips the entry to running.
+        socket.emitMessage(JSON.stringify({ type: 'execution_start', data: { prompt_id: 'prompt-q1' } }));
+        await flushSocketDelivery();
+        expect(listPodSockets()[0].queue).toEqual([
+            {
+                prompt_id: 'prompt-q1',
+                number: 7,
+                status: 'running',
+                workflow_id: 'wf-9',
+                generation_id: 'gen-9',
+                queuedAt: expect.any(String),
+                startedAt: expect.any(String)
+            }
+        ]);
+
+        // Terminal drains the entry — even though the consumer is still
+        // attached (its unsubscribe is NOT what drives queue membership).
+        socket.emitMessage(JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-q1' } }));
+        await flushSocketDelivery();
+        expect(listPodSockets()[0].queue).toEqual([]);
+        expect(listPodSockets()[0].prompts).toBe(0);
+        unsubscribe();
+    });
+
+    it('removes the queue entry at the terminal even when the consumer never unsubscribes', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        const socket = testState.sockets[0];
+        subscribePodPrompt(connection, { promptId: 'prompt-z', onEvent: () => undefined });
+
+        socket.emitMessage(JSON.stringify({ type: 'execution_error', data: { prompt_id: 'prompt-z' } }));
+        await flushSocketDelivery();
+
+        expect(listPodSockets()[0].queue).toEqual([]);
+        expect(listPodSockets()[0].prompts).toBe(0);
+    });
+
+    it('drops entries for unsubscribed (buffered) prompts at their terminal too', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        const socket = testState.sockets[0];
+        // A subscriber arrives, then disconnects mid-run (direct-stream
+        // cancel) — the pod keeps executing, so the queue must follow the
+        // POD's terminal, not the unsubscribe.
+        const unsubscribe = subscribePodPrompt(connection, { promptId: 'prompt-c', onEvent: () => undefined });
+        unsubscribe();
+        // The prompt still rides the pod: it is still queued.
+        expect(listPodSockets()[0].queue).toEqual([
+            {
+                prompt_id: 'prompt-c',
+                number: null,
+                status: 'queued',
+                queuedAt: expect.any(String),
+                startedAt: null
+            }
+        ]);
+
+        socket.emitMessage(JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-c' } }));
+        await flushSocketDelivery();
+        expect(listPodSockets()[0].queue).toEqual([]);
+    });
+});
+
+describe('idle pod termination (configurable timeout)', () => {
+    it('terminates a pod whose queue stayed empty for the idle timeout (default 30s)', async () => {
+        vi.useFakeTimers();
+        await connectPodSocket(new URL(POD_URL));
+
+        // Just before the grace period ends the pod is still held.
+        await vi.advanceTimersByTimeAsync(POD_IDLE_TIMEOUT_DEFAULT_MS - 1);
+        expect(getPodSocket(POD_URL)).not.toBeNull();
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(getPodSocket(POD_URL)).toBeNull();
+        expect(listPodSockets()).toEqual([]);
+    });
+
+    it('a new submission cancels the idle countdown; the drained queue restarts it', async () => {
+        vi.useFakeTimers();
+        const connection = await connectPodSocket(new URL(POD_URL));
+        const socket = testState.sockets[0];
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(JSON.stringify({ prompt_id: 'prompt-run', number: 1, node_errors: {} }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' }
+            })
+        );
+
+        // Half the idle window passes, then a submission arrives — the
+        // countdown must restart from the DRAIN, not from connect time.
+        await vi.advanceTimersByTimeAsync(POD_IDLE_TIMEOUT_DEFAULT_MS / 2);
+        await submitPodPrompt(connection, { promptPayload: { prompt: {} } });
+        const unsubscribe = subscribePodPrompt(connection, { promptId: 'prompt-run', onEvent: () => undefined });
+
+        // Well past the original 30s mark — the busy pod stays.
+        await vi.advanceTimersByTimeAsync(POD_IDLE_TIMEOUT_DEFAULT_MS);
+        expect(getPodSocket(POD_URL)).not.toBeNull();
+
+        // The run drains → the idle countdown restarts NOW. (Delivery is a
+        // microtask chain — a zero-time advance flushes it under fake
+        // timers, where flushSocketDelivery's real setTimeout would hang.)
+        socket.emitMessage(JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-run' } }));
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(POD_IDLE_TIMEOUT_DEFAULT_MS - 1);
+        expect(getPodSocket(POD_URL)).not.toBeNull();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(getPodSocket(POD_URL)).toBeNull();
+        unsubscribe();
+    });
+
+    it('honours a custom idle timeout via setPodIdleTimeoutMs', async () => {
+        vi.useFakeTimers();
+        const restore = setPodIdleTimeoutMs(500);
+        try {
+            await connectPodSocket(new URL(POD_URL));
+            await vi.advanceTimersByTimeAsync(499);
+            expect(getPodSocket(POD_URL)).not.toBeNull();
+            await vi.advanceTimersByTimeAsync(1);
+            expect(getPodSocket(POD_URL)).toBeNull();
+        } finally {
+            setPodIdleTimeoutMs(restore);
+        }
+    });
+
+    it('never terminates a pod with a loaded queue, even far past the idle timeout', async () => {
+        vi.useFakeTimers();
+        const connection = await connectPodSocket(new URL(POD_URL));
+        subscribePodPrompt(connection, { promptId: 'prompt-busy', onEvent: () => undefined });
+
+        await vi.advanceTimersByTimeAsync(POD_IDLE_TIMEOUT_DEFAULT_MS * 10);
+        expect(getPodSocket(POD_URL)).not.toBeNull();
+        expect(listPodSockets()[0].queue).toEqual([
+            {
+                prompt_id: 'prompt-busy',
+                number: null,
+                status: 'queued',
+                queuedAt: expect.any(String),
+                startedAt: null
+            }
+        ]);
     });
 });
 
@@ -495,7 +680,7 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
         expect(listPodSockets()).toEqual([]);
     });
 
-    it('GET /v1/comfy/cloud lists the active pods with their prompt counts', async () => {
+    it('GET /v1/comfy/cloud lists the active pods with their prompt counts and queue', async () => {
         await connectPodSocket(new URL(POD_URL), { gpu: '4090' });
         subscribePodPrompt(getPodSocket(POD_URL)!, { promptId: 'prompt-1', onEvent: () => undefined });
 
@@ -510,6 +695,15 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
                     client_id: CLIENT_ID,
                     active: true,
                     prompts: 1,
+                    queue: [
+                        {
+                            prompt_id: 'prompt-1',
+                            number: null,
+                            status: 'queued',
+                            queuedAt: expect.any(String),
+                            startedAt: null
+                        }
+                    ],
                     connectedAt: expect.any(String)
                 }
             ]

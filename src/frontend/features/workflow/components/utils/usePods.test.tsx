@@ -52,7 +52,7 @@ const pod: PodEntry = {
     name: 'A',
     pod_url: 'https://pod.example',
     status: 'ready',
-    activeGenerationIds: [],
+    queue: [],
     run: { status: 'idle' }
 };
 
@@ -113,6 +113,14 @@ describe('usePods preference preparation', () => {
             await Promise.resolve();
             await Promise.resolve();
         });
+
+        // The accepted submission triggers an IMMEDIATE pod-list refresh
+        // (the server already holds the queue entry) — one call from the
+        // mount tick, one from the refresh; no local queue bookkeeping.
+        expect(api.cloudListPods.mock.calls).toEqual([
+            ['http://host:5000/v1/comfy'],
+            ['http://host:5000/v1/comfy']
+        ]);
 
         const preparedSnapshot = {
             '1': {
@@ -216,13 +224,15 @@ describe('usePods server pod-list polling', () => {
         expect(api.cloudListPods.mock.calls).toContainEqual(['http://host:5000/v1/comfy']);
         // The server's normalized URL (URL.toString() with trailing slash)
         // is stored verbatim — prompt submission normalizes it server-side.
+        // A fixture without a queue field still reconciles to an EMPTY queue
+        // (the `?? []` fallback) — queue truth is always the server's.
         expect(seen.map((p) => ({
             pod_url: p.pod_url,
             status: p.status,
             gpu: p.gpu,
             name: p.name,
             podNumber: p.podNumber,
-            activeGenerationIds: p.activeGenerationIds,
+            queue: p.queue,
             run: p.run
         }))).toEqual([{
             pod_url: 'https://server-pod.example/',
@@ -230,7 +240,7 @@ describe('usePods server pod-list polling', () => {
             gpu: '4090',
             name: 'A',
             podNumber: 1,
-            activeGenerationIds: [],
+            queue: [],
             run: { status: 'idle' }
         }]);
     });
@@ -448,6 +458,200 @@ describe('usePods server pod-list reconciliation', () => {
             // require a definitive server answer, never a guess.
             expect(api.cloudListPods.mock.calls.length).toBe(3);
             expect(seen.current.map((p) => p.pod_url)).toEqual(['https://pod-a.example/']);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+});
+
+// ── Server-reported queue mirroring (the UI tracks NOTHING itself) ─────
+//
+// The pod's queue list comes VERBATIM from GET /v1/comfy/cloud (server
+// pod-socket.ts queue registry): badges/balancer read its length, run-state
+// settles through the snapshots' diff + the generations poll verdict.
+
+import type { CloudPodQueueEntry, GenerationSummary } from '../../../../api';
+
+// One server queue entry for generation `<genId>` (mirrors the server shape).
+function queueEntry(genId: string): CloudPodQueueEntry {
+    return {
+        prompt_id: `prompt-${genId}`,
+        number: null,
+        status: 'queued',
+        workflow_id: 'workflow-1',
+        generation_id: genId,
+        queuedAt: '2026-08-05T10:15:30.000Z',
+        startedAt: null
+    };
+}
+
+// A polled generation summary with the given status/verdict.
+function generationSummary(id: string, status: GenerationSummary['status'], error: string | null = null): GenerationSummary {
+    return {
+        id,
+        status,
+        createdDate: '2026-08-05T10:15:30.000Z',
+        completedDate: status === 'completed' || status === 'failed' ? '2026-08-05T10:16:30.000Z' : null,
+        generatedTime: null,
+        error,
+        resultCount: 0,
+        resultItems: []
+    };
+}
+
+// One listed pod fixture carrying the given server-side queue.
+function serverPodWithQueue(queue: CloudPodQueueEntry[]) {
+    return {
+        pod_url: 'https://pod-a.example/',
+        gpu: '4090',
+        client_id: 'aaaaaaaabbbbccccddddeeeeffff0001',
+        active: true,
+        prompts: queue.length,
+        queue,
+        connectedAt: '2026-08-05T10:15:30.000Z'
+    };
+}
+
+describe('usePods server-reported queue', () => {
+    // Observer harness whose generations prop can be swapped between renders.
+    const mountWithGenerations = (
+        seen: { current: PodEntry[] },
+        generationsRef: { current: GenerationSummary[] }
+    ) => {
+        const Harness: React.FC = () => {
+            const { pods } = usePods({
+                baseUrl: 'http://host:5000/v1/comfy',
+                nodes,
+                editingWorkflowId: 'workflow-1',
+                workflowName: null,
+                generations: generationsRef.current,
+                getCurrentRaw: () => rawSnapshot,
+                generateWorkflow: vi.fn()
+            });
+            seen.current = pods;
+            return null;
+        };
+        return Harness;
+    };
+
+    it('mirrors the server queue verbatim — a listed busy pod adopts its queued jobs', async () => {
+        vi.useFakeTimers();
+        try {
+            api.cloudListPods.mockResolvedValue({
+                pods: [serverPodWithQueue([queueEntry('gen-1'), queueEntry('gen-2')])]
+            });
+            const seen = { current: [] as PodEntry[] };
+            const generationsRef = { current: [] as GenerationSummary[] };
+            const Harness = mountWithGenerations(seen, generationsRef);
+
+            await act(async () => {
+                root.render(<Harness />);
+                await Promise.resolve();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+
+            // Two queued jobs straight from the server — no local counting.
+            expect(seen.current).toHaveLength(1);
+            expect(seen.current[0].queue).toEqual([queueEntry('gen-1'), queueEntry('gen-2')]);
+            expect(seen.current[0].run).toEqual({ status: 'running', events: [] });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('settles done when the server queue drains and every watched generation completed', async () => {
+        vi.useFakeTimers();
+        try {
+            api.cloudListPods
+                .mockResolvedValueOnce({ pods: [serverPodWithQueue([queueEntry('gen-1')])] })
+                .mockResolvedValue({ pods: [serverPodWithQueue([])] });
+            const seen = { current: [] as PodEntry[] };
+            const generationsRef = { current: [generationSummary('gen-1', 'completed')] };
+            const Harness = mountWithGenerations(seen, generationsRef);
+
+            await act(async () => {
+                root.render(<Harness />);
+                await Promise.resolve();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+            expect(seen.current[0].queue).toHaveLength(1);
+            expect(seen.current[0].run.status).toBe('running');
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(GPU_LIST_POLL_INTERVAL_MS);
+            });
+
+            // The drained queue is the server's; the done verdict came from
+            // the generations poll (gen-1 completed).
+            expect(seen.current[0].queue).toEqual([]);
+            expect(seen.current[0].run).toEqual({ status: 'done', events: [] });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('settles error when a drained queue generation failed', async () => {
+        vi.useFakeTimers();
+        try {
+            api.cloudListPods
+                .mockResolvedValueOnce({ pods: [serverPodWithQueue([queueEntry('gen-1')])] })
+                .mockResolvedValue({ pods: [serverPodWithQueue([])] });
+            const seen = { current: [] as PodEntry[] };
+            const generationsRef = { current: [generationSummary('gen-1', 'failed', 'boom')] };
+            const Harness = mountWithGenerations(seen, generationsRef);
+
+            await act(async () => {
+                root.render(<Harness />);
+                await Promise.resolve();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(GPU_LIST_POLL_INTERVAL_MS);
+            });
+
+            expect(seen.current[0].queue).toEqual([]);
+            expect(seen.current[0].run).toEqual({ status: 'error', events: [], message: 'boom' });
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('keeps running while the drained generation still shows processing, then settles from the generations poll', async () => {
+        vi.useFakeTimers();
+        try {
+            api.cloudListPods
+                .mockResolvedValueOnce({ pods: [serverPodWithQueue([queueEntry('gen-1')])] })
+                .mockResolvedValue({ pods: [serverPodWithQueue([])] });
+            const seen = { current: [] as PodEntry[] };
+            const generationsRef = { current: [generationSummary('gen-1', 'processing')] };
+            const Harness = mountWithGenerations(seen, generationsRef);
+
+            await act(async () => {
+                root.render(<Harness />);
+                await Promise.resolve();
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+
+            // Queue drains while the generations poll still shows
+            // processing — the ring waits for a real verdict.
+            await act(async () => {
+                await vi.advanceTimersByTimeAsync(GPU_LIST_POLL_INTERVAL_MS);
+            });
+            expect(seen.current[0].queue).toEqual([]);
+            expect(seen.current[0].run.status).toBe('running');
+
+            // The generations poll catches up → the deferred verdict lands.
+            generationsRef.current = [generationSummary('gen-1', 'completed')];
+            await act(async () => {
+                root.render(<Harness />);
+                await Promise.resolve();
+            });
+            expect(seen.current[0].run).toEqual({ status: 'done', events: [] });
         } finally {
             vi.useRealTimers();
         }

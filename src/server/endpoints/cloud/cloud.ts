@@ -14,8 +14,10 @@
 //     reflects the single server-managed socket.
 //
 // GET returns the list of active pods straight from the registry, each with
-// its liveness flag and in-flight prompt count, so dashboards can keep
-// their pod buttons in sync without probing every pod individually.
+// its liveness flag, in-flight prompt count, and the server-tracked queue
+// list (prompt_id, queued/running status, workflow/generation ids), so
+// dashboards keep their pod buttons purely in sync with the API — they
+// track no pod state themselves.
 //
 // Every pod is a native ComfyUI server. The persistent websocket is the
 // authoritative connection; /system_stats remains best-effort enrichment.

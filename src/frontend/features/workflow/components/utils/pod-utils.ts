@@ -55,7 +55,8 @@ export function podButtonQueueBadge(pod: PodEntry, inFlight: number): string | n
 
 /**
  * "Auto" load-balancer pick — the eligible pod with the SMALLEST in-flight
- * queue. Eligibility mirrors the pod buttons themselves: status 'ready'
+ * queue (the server-reported `queue` length — nothing is counted locally).
+ * Eligibility mirrors the pod buttons themselves: status 'ready'
  * with a resolved pod_url (listed pods are alive — the server's registry
  * drops dead ones, so there is nothing local to strike against). Ties go to
  * the oldest pod (array order == spawn order). Null when nothing can take
@@ -65,7 +66,7 @@ export function pickLeastLoadedPod(pods: PodEntry[]): PodEntry | null {
     let best: PodEntry | null = null;
     for (const p of pods) {
         if (p.status !== 'ready' || !p.pod_url) continue;
-        if (!best || p.activeGenerationIds.length < best.activeGenerationIds.length) {
+        if (!best || p.queue.length < best.queue.length) {
             best = p;
         }
     }

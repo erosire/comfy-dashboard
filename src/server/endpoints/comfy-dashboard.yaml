@@ -4,11 +4,14 @@ info:
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
     CRUD for workflows, generation snapshots, and direct-access Beam cloud
-    pods. Every spawned pod gets ONE persistent ComfyUI websocket held in
+    pods.     Every spawned pod gets ONE persistent ComfyUI websocket held in
     server memory (opened during POST /v1/comfy/cloud, which blocks until
-    the socket connects, and kept alive until the cloud server closes it);
-    GET /v1/comfy/cloud lists those active pods with their in-flight prompt
-    counts. Prompt processing happens server-side: POST
+    the socket connects, and kept alive until the cloud server terminates
+    it — on unreachability, or after its queue stays empty for the
+    configurable idle timeout, default 30 s); GET /v1/comfy/cloud lists
+    those active pods with their server-tracked queue lists (prompt ids,
+    queued/running status, workflow/generation ids) — clients mirror that
+    answer and keep no pod state of their own. Prompt processing happens server-side: POST
     /v1/comfy/cloud/prompt (with workflow_id + generation_id) submits over
     the pod's shared socket, demultiplexes events by prompt_id, records
     every routed event into the prompt's .log file (one log per prompt),
@@ -23,7 +26,7 @@ info:
     Multiple generations may be queued on the same pod
     concurrently; the shared websocket carries them all and prompt_id
     scoping keeps each job's events in its own generation json/log.
-  version: 0.8.0
+  version: 0.9.0
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
@@ -647,20 +650,25 @@ paths:
   /v1/comfy/cloud:
     get:
       operationId: listCloudPods
-      summary: List active cloud pods
+      summary: List active cloud pods with their queues
       description: >-
         Returns every cloud pod whose server-managed websocket is currently
-        held in memory. Pods enter the list when spawned via
-        POST /v1/comfy/cloud (or adopted by a status check) and drop out as
-        soon as the cloud server terminates their socket. There is exactly
-        one websocket per pod — it carries every prompt that pod processes.
+        held in memory, each with the server-tracked queue list. Pods enter
+        the list when spawned via POST /v1/comfy/cloud (or adopted by a
+        status check) and drop out as soon as the cloud server terminates
+        their socket — either because the pod became unreachable (websocket
+        close/error, failed protocol ping) or because its queue stayed empty
+        for the configured idle timeout (default 30 s,
+        COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS). There is exactly one websocket
+        per pod — it carries every prompt that pod processes.
 
-        Each entry reports whether the pod's websocket is connected
-        (`active`) and how many prompts the pod is currently processing
-        (`prompts` — all of the pod's concurrent generations, demultiplexed
-        on the shared socket by prompt_id). Dashboards poll this endpoint
-        to keep their pod buttons in sync automatically instead of probing
-        every pod individually.
+        The server is the ONLY keeper of instance state: each entry reports
+        whether the pod's websocket is connected (`active`), how many
+        prompts the pod is currently processing (`prompts`), and the
+        insertion-ordered `queue` (prompt_id, queued/running status,
+        workflow/generation ids, timestamps). Clients only mirror these
+        answers — they track no pod or queue state themselves and never
+        probe pods individually.
       tags:
         - Cloud
       responses:
@@ -678,12 +686,28 @@ paths:
                     client_id: "abc123def4567890fedcba0987654321"
                     active: true
                     prompts: 2
+                    queue:
+                      - prompt_id: "f0c1a2b3-1234-5678-9abc-def012345678"
+                        number: 1
+                        status: running
+                        workflow_id: "20260729-101530"
+                        generation_id: "20260729-101545"
+                        queuedAt: "2026-08-05T10:15:31.000Z"
+                        startedAt: "2026-08-05T10:15:33.000Z"
+                      - prompt_id: "a1b2c3d4-5678-9abc-def0-1234567890ab"
+                        number: 2
+                        status: queued
+                        workflow_id: "20260729-101530"
+                        generation_id: "20260729-101620"
+                        queuedAt: "2026-08-05T10:16:21.000Z"
+                        startedAt: null
                     connectedAt: "2026-08-05T10:15:30.000Z"
                   - pod_url: "https://b300-pod-def456.beam.cloud:8188/"
                     gpu: B300
                     client_id: "000aaaaabbbbccccddddeeeeffff0123"
                     active: true
                     prompts: 0
+                    queue: []
                     connectedAt: "2026-08-05T10:20:41.000Z"
     post:
       operationId: cloudPod
@@ -1509,6 +1533,10 @@ components:
         websocket per cloud pod, opened when the pod was created via
         POST /v1/comfy/cloud and held in memory until the cloud server
         terminates it (at which point the pod drops out of this list).
+        Termination happens when the pod becomes unreachable (websocket
+        close/error, failed protocol ping) OR when the pod has been idle —
+        no queued prompts — for the configured idle timeout (default 30 s,
+        COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS).
       properties:
         pod_url:
           type: string
@@ -1541,14 +1569,66 @@ components:
         prompts:
           type: integer
           description: >-
-            Number of prompts currently being processed by this pod (all of
-            its concurrent generations riding the shared socket).
+            Number of prompts currently being processed by this pod (its
+            queue length plus prompt submissions still being registered).
           example: 2
+        queue:
+          type: array
+          description: >-
+            The pod's queued prompts — the server's authoritative,
+            insertion-ordered queue record. Clients mirror this list; they
+            never track queue state themselves. An entry is created when
+            its prompt is registered on the pod, flips queued → running at
+            execution_start, and drops out at the run's terminal event.
+          items:
+            $ref: '#/components/schemas/CloudPodQueueEntry'
         connectedAt:
           type: string
           format: date-time
           description: ISO timestamp when the persistent websocket connected.
-      required: [pod_url, client_id, active, prompts, connectedAt]
+      required: [pod_url, client_id, active, prompts, queue, connectedAt]
+
+    CloudPodQueueEntry:
+      type: object
+      description: >-
+        One prompt queued on a cloud pod — the server's authoritative queue
+        record for that instance.
+      properties:
+        prompt_id:
+          type: string
+          description: ComfyUI prompt_id — the routing key on the pod's shared socket.
+          example: f0c1a2b3-1234-5678-9abc-def012345678
+        number:
+          type: integer
+          nullable: true
+          description: ComfyUI queue position from the POST /prompt ack, when numeric.
+          example: 3
+        status:
+          type: string
+          enum: [queued, running]
+          description: >-
+            queued = accepted onto the pod, awaiting execution; running =
+            the pod's socket delivered execution_start for this prompt.
+        workflow_id:
+          type: string
+          description: >-
+            Dashboard workflow id lifted from the submission's extra_data
+            (server-side processing mode). Absent otherwise.
+        generation_id:
+          type: string
+          description: >-
+            Dashboard generation id lifted from the submission's extra_data
+            (server-side processing mode). Absent otherwise.
+        queuedAt:
+          type: string
+          format: date-time
+          description: ISO timestamp when the server registered the prompt on this pod.
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO timestamp of the queued → running flip (execution_start).
+      required: [prompt_id, number, status, queuedAt, startedAt]
 
     CloudPodListResponse:
       type: object

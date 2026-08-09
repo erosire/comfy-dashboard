@@ -65,7 +65,7 @@ import { closeAllPodSockets } from './pod-socket';
 
 // The real registry endpoints (runtime/secret/private/modal/comfy.ts) —
 // the 4090 GPU currently has exactly one spawner server named "lancer".
-const SPAWNER_4090 = 'https://20c754e5-506f-43b3-b033-2bcad614949f-8000.app.beam.cloud';
+const SPAWNER_4090 = 'https://196a5cd3-f0d2-4cd0-a54c-2c7ec5cd0d13-8000.app.beam.cloud';
 const POD_URL = 'https://pod-a.example';
 
 function context() {
@@ -328,6 +328,7 @@ describe('GET /v1/comfy/cloud', () => {
                 client_id: expect.any(String),
                 active: true,
                 prompts: 0,
+                queue: [],
                 connectedAt: expect.any(String)
             }]
         });

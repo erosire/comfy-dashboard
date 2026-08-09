@@ -15,6 +15,7 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
+import type { CloudPodQueueEntry } from '../../api';
 import { pickLeastLoadedPod, type PodEntry } from './components/utils';
 
 let seq = 0;
@@ -27,13 +28,21 @@ function makePod(overrides: Partial<PodEntry> = {}): PodEntry {
         pod_url: `https://pod-${seq}.example.com`,
         status: 'ready',
         run: { status: 'idle' },
-        activeGenerationIds: [],
+        queue: [],
         ...overrides
     };
 }
 
-function jobs(n: number): string[] {
-    return Array.from({ length: n }, (_, i) => `gen-${i}`);
+// A server-reported queue of length n — the ONLY queue source the balancer reads.
+function jobs(n: number): CloudPodQueueEntry[] {
+    return Array.from({ length: n }, (_, i) => ({
+        prompt_id: `prompt-${i}`,
+        number: null,
+        status: 'queued' as const,
+        generation_id: `gen-${i}`,
+        queuedAt: '2026-08-05T10:15:30.000Z',
+        startedAt: null
+    }));
 }
 
 describe('pickLeastLoadedPod', () => {
@@ -51,29 +60,29 @@ describe('pickLeastLoadedPod', () => {
     });
 
     it('picks the only ready pod', () => {
-        const ready = makePod({ activeGenerationIds: jobs(2) });
+        const ready = makePod({ queue: jobs(2) });
         const pods = [makePod({ status: 'spawning', pod_url: '' }), ready];
         expect(pickLeastLoadedPod(pods)).toBe(ready);
     });
 
     it('picks the ready pod with the smallest in-flight queue', () => {
-        const busy = makePod({ activeGenerationIds: jobs(3) });
-        const idle = makePod({ activeGenerationIds: jobs(0) });
-        const medium = makePod({ activeGenerationIds: jobs(1) });
+        const busy = makePod({ queue: jobs(3) });
+        const idle = makePod({ queue: jobs(0) });
+        const medium = makePod({ queue: jobs(1) });
         expect(pickLeastLoadedPod([busy, idle, medium])).toBe(idle);
         expect(pickLeastLoadedPod([busy, medium, idle])).toBe(idle);
     });
 
     it('breaks ties toward the oldest pod', () => {
-        const first = makePod({ activeGenerationIds: jobs(1) });
-        const second = makePod({ activeGenerationIds: jobs(1) });
+        const first = makePod({ queue: jobs(1) });
+        const second = makePod({ queue: jobs(1) });
         expect(pickLeastLoadedPod([second, first])).toBe(second);
         expect(pickLeastLoadedPod([first, second])).toBe(first);
     });
 
     it('ignores ineligible pods even when their queue is emptier', () => {
-        const spawning = makePod({ status: 'spawning', activeGenerationIds: jobs(0) });
-        const ready = makePod({ activeGenerationIds: jobs(2) });
+        const spawning = makePod({ status: 'spawning', queue: jobs(0) });
+        const ready = makePod({ queue: jobs(2) });
         expect(pickLeastLoadedPod([spawning, ready])).toBe(ready);
     });
 });

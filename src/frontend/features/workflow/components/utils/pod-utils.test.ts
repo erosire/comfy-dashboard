@@ -19,7 +19,7 @@ function pod(overrides: Partial<PodEntry> = {}): PodEntry {
         pod_url: 'https://pod.example',
         status: 'ready',
         run: { status: 'idle' },
-        activeGenerationIds: [],
+        queue: [],
         ...overrides
     };
 }

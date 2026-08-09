@@ -283,7 +283,7 @@ function trackGenerationOnPod(
     // explicitly (keeps GET /v1/comfy/cloud's per-pod prompt count honest).
     const nodeErrors = ack.node_errors;
     if (nodeErrors && typeof nodeErrors === 'object' && Object.keys(nodeErrors).length > 0) {
-        releasePodSubmission(connection);
+        releasePodSubmission(connection, promptId || undefined);
         log(`Prompt validation failed: ${JSON.stringify(nodeErrors)}`);
         void finalize(`Prompt validation failed: ${JSON.stringify(nodeErrors)}`);
         return;
@@ -405,7 +405,7 @@ function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck)
             // is registered — release the pending submission count.
             const nodeErrors = ack.node_errors;
             if (nodeErrors && typeof nodeErrors === 'object' && Object.keys(nodeErrors).length > 0) {
-                releasePodSubmission(connection);
+                releasePodSubmission(connection, typeof ack.prompt_id === 'string' ? ack.prompt_id : undefined);
                 finishStream({
                     type: 'execution_error',
                     data: {
@@ -419,7 +419,7 @@ function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck)
 
             // The pod socket dying before subscription leaves nothing to read.
             if (connection.closed) {
-                releasePodSubmission(connection);
+                releasePodSubmission(connection, typeof ack.prompt_id === 'string' ? ack.prompt_id : undefined);
                 finishStream({
                     type: 'prompt_error',
                     data: { error: 'ComfyUI websocket closed before the prompt finished' }

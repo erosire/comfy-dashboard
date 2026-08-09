@@ -3,15 +3,17 @@
 // Extracted from the original CloudTab.tsx so both the WorkflowDashboard
 // component and its sub-components / hooks can import them from one place.
 
-import type { CloudStreamEvent, GenerationResultMeta } from '../../../../api';
+import type { CloudPodQueueEntry, CloudStreamEvent, GenerationResultMeta } from '../../../../api';
 import type { UINode, UIWidget } from '../../../../nodes/node-type';
 
 /**
- * A cloud pod tracked by the dashboard, with its run + queue state.
+ * A cloud pod mirrored by the dashboard, with its run state and its
+ * SERVER-REPORTED queue.
  *
- * Liveness is NOT tracked here: the pod buttons purely mirror the server's
- * registry (GET /v1/comfy/cloud — one persistent websocket per pod). A pod
- * the server stops listing has a terminated socket (its reconnect schedule
+ * Neither liveness nor queue membership is tracked here: the pod buttons
+ * purely mirror the server's registry (GET /v1/comfy/cloud — one persistent
+ * websocket per pod, each with the server-tracked queue list). A pod the
+ * server stops listing has a terminated socket (its reconnect schedule
  * already failed server-side) and its button is removed on the next poll —
 // there are no client-side probes, strikes, or error states.
  */
@@ -28,18 +30,19 @@ export type PodEntry = {
     /**
      * The GPU the pod was spawned on ("4090", "B300", …) — chosen in the
      * New-pod dialog and sent to POST /v1/comfy/cloud as `gpu`. Drives the
-     * pod button's label ("4090x3" = a 4090 pod with 3 jobs queued).
+     * pod button's label ("4090" plus a badge with the queued job count).
      * Undefined only for pods predating GPU selection.
      */
     gpu?: string;
     run: RunState;
     /**
-     * Generations currently processed server-side for this pod. A pod is
-     * never blocked — every #N click queues another job. The
-     * generations polling effect prunes this list and settles run.status
-     * (done/error) once nothing is left in flight.
+     * The pod's queue as last reported by GET /v1/comfy/cloud — the
+     * server's authoritative list (prompt ids, queued/running status,
+     * workflow/generation ids). NEVER mutated client-side: submissions
+     * appear via the immediate list refresh after the 202 accept, then via
+     * the regular poll. Badges and the Auto load balancer read its length.
      */
-    activeGenerationIds: string[];
+    queue: CloudPodQueueEntry[];
 };
 
 /** Run state of a single pod (idle → running → done/error). */

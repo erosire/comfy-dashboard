@@ -3,10 +3,34 @@
 // Pods are spawned via POST /v1/comfy/cloud (cloud.ts). That endpoint only
 // answers AFTER connectPodSocket() resolves: the pod's native ComfyUI
 // websocket is open and registered here. The connection then lives in
-// SERVER MEMORY FOREVER — until the cloud server terminates it. On
-// termination the pod drops out of the registry and every in-flight prompt
-// subscriber receives a terminal `prompt_error` event, so its generation
-// lands failed with the .log trail intact.
+// SERVER MEMORY until the cloud server terminates it. On termination the
+// pod drops out of the registry and every in-flight prompt subscriber
+// receives a terminal `prompt_error` event, so its generation lands failed
+// with the .log trail intact.
+//
+// ── Per-pod queue registry (the server's authoritative instance list) ──
+// The server owns the truth about every cloud instance it created AND what
+// each instance has queued: GET /v1/comfy/cloud reports each pod's `queue`
+// (prompt_id, ComfyUI queue number, queued/running status, workflow +
+// generation ids lifted from extra_data, timestamps) so clients never track
+// pod state themselves — they only mirror the API answer.
+//   - Entry CREATED at subscribePodPrompt (metadata stashed by
+//     submitPodPrompt from the POST /prompt ack + extra_data);
+//   - status flipped queued → running when the socket delivers
+//     execution_start for the prompt_id;
+//   - entry REMOVED when the socket delivers a terminal for the prompt_id
+//     (execution_success / execution_interrupted / execution_error /
+//     prompt_error) — queue lifetime follows the POD's execution, not the
+//     consumer's: a canceled direct stream stays queued until ComfyUI
+//     finishes it.
+//
+// ── Idle termination ───────────────────────────────────────────────────
+// A pod whose queue drains to EMPTY (nothing queued, no pending submission)
+// gets the idle countdown: no queue left + podIdleTimeoutMs (default 30 s,
+// COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS) → the server terminates the
+// connection. Every new submission cancels the countdown; the countdown
+// starts at connect (a freshly spawned pod that never receives work is
+// released too). Independent of the unreachable-pod termination below.
 //
 // ── Transport death ────────────────────────────────────────────────────
 // Cloud pods are DESIGNED to terminate when idle and can never restart
@@ -87,6 +111,40 @@ export const POD_WS_OPEN_TIMEOUT_MS = 30_000;
 export const POD_WS_HEARTBEAT_MS = 10_000;
 
 /**
+ * Default idle grace period: when a pod's queue is empty (no queued prompt,
+ * no pending submission) the server terminates the connection once the
+ * queue has stayed empty for this long. Overridable at process level via
+ * COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS, and per-process at runtime through
+ * setPodIdleTimeoutMs (tests). Cloud pods bill while they exist — an idle
+ * one is pure cost, and pods are designed to die and never come back, so
+ * termination is the intended end of an idle pod.
+ */
+export const POD_IDLE_TIMEOUT_DEFAULT_MS = 30_000;
+
+// Resolved once at module load: env wins when it parses to a positive number.
+const envIdleTimeoutMs = Number(
+    typeof process !== 'undefined' ? process.env?.COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS : undefined
+);
+let podIdleTimeoutMs =
+    Number.isFinite(envIdleTimeoutMs) && envIdleTimeoutMs > 0 ? envIdleTimeoutMs : POD_IDLE_TIMEOUT_DEFAULT_MS;
+
+/** The active idle timeout — a pod with an empty queue is terminated after this. */
+export function getPodIdleTimeoutMs(): number {
+    return podIdleTimeoutMs;
+}
+
+/**
+ * Override the idle timeout (tests / operator tuning). Returns the previous
+ * value so callers can restore it. A non-positive value DISABLES idle
+ * termination entirely.
+ */
+export function setPodIdleTimeoutMs(ms: number): number {
+    const previous = podIdleTimeoutMs;
+    podIdleTimeoutMs = ms;
+    return previous;
+}
+
+/**
  * Cap on buffered events held for a prompt_id with no subscriber yet. The
  * buffer exists only to absorb the ack → subscribe race; 200 lines is far
  * beyond what a prompt can emit inside that window. Oldest lines drop first.
@@ -107,6 +165,40 @@ export type PodPromptSubscriber = {
     id: string;
     promptId: string;
     onEvent: (event: StreamEvent) => void;
+};
+
+/**
+ * Server-side record of one prompt queued on a pod — the unit of the
+ * per-pod `queue` list reported by GET /v1/comfy/cloud. Lifecycle:
+ * created at subscribe (status 'queued'), flipped to 'running' when the
+ * socket delivers execution_start, removed when the socket delivers a
+ * terminal event (execution_success / execution_interrupted /
+ * execution_error / prompt_error) for its prompt_id.
+ */
+export type PodQueueEntry = {
+    /** ComfyUI prompt_id — the routing AND queue key. */
+    prompt_id: string;
+    /** ComfyUI queue position from the POST /prompt ack, when numeric. */
+    number: number | null;
+    /** queued = accepted, awaiting execution; running = execution_start seen. */
+    status: 'queued' | 'running';
+    /** Dashboard ids lifted from extra_data (server-side processing mode). */
+    workflow_id?: string;
+    generation_id?: string;
+    /** ISO timestamp when the server registered the prompt on this pod. */
+    queuedAt: string;
+    /** ISO timestamp of the execution_start flip (null while queued). */
+    startedAt: string | null;
+};
+
+/**
+ * Ack + extra_data metadata stashed between submitPodPrompt and its
+ * subscribePodPrompt call — becomes the queue entry at subscribe time.
+ */
+type PodSubmissionMeta = {
+    number: number | null;
+    workflowId?: string;
+    generationId?: string;
 };
 
 /** One persistent pod connection — the unit the registry memoizes. */
@@ -137,17 +229,34 @@ export type PodSocketConnection = {
      */
     pendingSubmissions: number;
     /**
+     * The pod's queued prompts keyed by prompt_id — the server's
+     * authoritative instance queue list (reported verbatim by GET
+     * /v1/comfy/cloud). Entries track the POD's execution (queued →
+     * running → terminal), NOT consumer subscription churn.
+     */
+    queue: Map<string, PodQueueEntry>;
+    /**
+     * Ack/extra_data metadata for submissions not yet subscribed — lifted
+     * into the queue entry at subscribe time. Keyed by prompt_id.
+     */
+    submissionMeta: Map<string, PodSubmissionMeta>;
+    /**
      * Events received for prompt_ids with no subscriber yet, keyed by
      * prompt_id. Flushed on subscribe; cleared on terminate.
      */
     buffered: Map<string, StreamEvent[]>;
     /** Liveness interval handle — needed by closeAllPodSockets teardown. */
     heartbeat: ReturnType<typeof setInterval> | null;
+    /**
+     * Idle-termination countdown — live ONLY while the pod has no queue
+     * and no pending submission (updateIdleTimer is the single writer).
+     */
+    idleTimer: ReturnType<typeof setTimeout> | null;
     /** Set once the socket is dead — the pod is terminal. */
     closed: boolean;
 };
 
-/** GET /v1/comfy/cloud entry — one active pod with its in-flight count. */
+/** GET /v1/comfy/cloud entry — one active pod with its queue. */
 export type PodSocketInfo = {
     pod_url: string;
     gpu?: string;
@@ -155,8 +264,10 @@ export type PodSocketInfo = {
     client_id: string;
     /** The pod's server-managed websocket is currently open. */
     active: boolean;
-    /** Prompts currently being processed by this pod (all subscribers). */
+    /** Prompts currently being processed by this pod (queue + submissions in flight). */
     prompts: number;
+    /** The pod's queue — the server's authoritative record, insertion-ordered. */
+    queue: PodQueueEntry[];
     connectedAt: string;
 };
 
@@ -204,6 +315,9 @@ export async function connectPodSocket(
 
     const connection = buildConnection(key, new URL(String(podUrl)), clientId, socket, meta);
     podSockets.set(key, connection);
+    // A fresh pod has an empty queue — its idle countdown starts now: a
+    // spawned pod that never receives work is released by the timeout.
+    updateIdleTimer(connection);
     return connection;
 }
 
@@ -226,7 +340,7 @@ export function getPodSocket(podUrl: URL | string): PodSocketConnection | null {
     return connection;
 }
 
-/** GET /v1/comfy/cloud payload — every registered pod, most recent first not guaranteed. */
+/** GET /v1/comfy/cloud payload — every registered pod with its queue. */
 export function listPodSockets(): PodSocketInfo[] {
     const pods: PodSocketInfo[] = [];
     for (const connection of podSockets.values()) {
@@ -237,7 +351,8 @@ export function listPodSockets(): PodSocketInfo[] {
             name: connection.name,
             client_id: connection.clientId,
             active: connection.socket.readyState === WebSocket.OPEN,
-            prompts: connection.subscribers.size + connection.pendingSubmissions,
+            prompts: connection.queue.size + connection.pendingSubmissions,
+            queue: [...connection.queue.values()],
             connectedAt: connection.connectedAt
         });
     }
@@ -252,12 +367,15 @@ export function closeAllPodSockets(): void {
     for (const connection of podSockets.values()) {
         connection.closed = true;
         if (connection.heartbeat !== null) clearInterval(connection.heartbeat);
+        if (connection.idleTimer !== null) clearTimeout(connection.idleTimer);
         try {
             connection.socket.close();
         } catch {
             // Best-effort teardown.
         }
         connection.subscribers.clear();
+        connection.queue.clear();
+        connection.submissionMeta.clear();
         connection.buffered.clear();
     }
     podSockets.clear();
@@ -284,6 +402,8 @@ export async function submitPodPrompt(
     options: { promptPayload: Record<string, unknown>; authorization?: string }
 ): Promise<{ response: Response; ack: PodPromptAck | null }> {
     connection.pendingSubmissions += 1;
+    // A live submission cancels the idle countdown for its whole duration.
+    updateIdleTimer(connection);
     const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         Accept: 'application/json'
@@ -301,11 +421,13 @@ export async function submitPodPrompt(
         });
     } catch (error) {
         connection.pendingSubmissions -= 1;
+        updateIdleTimer(connection);
         throw error;
     }
 
     if (!response.ok) {
         connection.pendingSubmissions -= 1;
+        updateIdleTimer(connection);
         return { response, ack: null };
     }
 
@@ -314,7 +436,22 @@ export async function submitPodPrompt(
         ack = (await response.json()) as PodPromptAck;
     } catch {
         connection.pendingSubmissions -= 1;
+        updateIdleTimer(connection);
         throw new Error(`ComfyUI POST /prompt returned HTTP ${response.status} with a non-JSON body`);
+    }
+    // Stash the ack + dashboard ids (extra_data) keyed by prompt_id —
+    // subscribePodPrompt lifts this into the pod's queue entry.
+    const promptId = typeof ack.prompt_id === 'string' && ack.prompt_id ? ack.prompt_id : null;
+    if (promptId) {
+        const extra = options.promptPayload.extra_data as Record<string, unknown> | undefined;
+        const meta: PodSubmissionMeta = {
+            number: typeof ack.number === 'number' ? ack.number : null
+        };
+        if (extra && typeof extra === 'object') {
+            if (typeof extra.workflow_id === 'string') meta.workflowId = extra.workflow_id;
+            if (typeof extra.generation_id === 'string') meta.generationId = extra.generation_id;
+        }
+        connection.submissionMeta.set(promptId, meta);
     }
     // The pending count transfers into the subscriber count at subscribe.
     return { response, ack };
@@ -334,6 +471,25 @@ export function subscribePodPrompt(
     connection.subscribers.set(id, { id, ...subscriber });
     connection.pendingSubmissions = Math.max(0, connection.pendingSubmissions - 1);
 
+    // Lift the submission metadata into the pod's queue — the server's
+    // authoritative record of what this instance has queued. The entry
+    // lives until the socket delivers a terminal event for the prompt_id
+    // (deliverEvent), independent of consumer churn below.
+    if (subscriber.promptId) {
+        const meta = connection.submissionMeta.get(subscriber.promptId);
+        connection.submissionMeta.delete(subscriber.promptId);
+        connection.queue.set(subscriber.promptId, {
+            prompt_id: subscriber.promptId,
+            number: meta?.number ?? null,
+            status: 'queued',
+            workflow_id: meta?.workflowId,
+            generation_id: meta?.generationId,
+            queuedAt: new Date().toISOString(),
+            startedAt: null
+        });
+    }
+    updateIdleTimer(connection);
+
     const early = connection.buffered.get(subscriber.promptId);
     if (early) {
         connection.buffered.delete(subscriber.promptId);
@@ -342,8 +498,14 @@ export function subscribePodPrompt(
         queueMicrotask(() => early.forEach((event) => subscriber.onEvent(event)));
     }
 
+    let unsubscribed = false;
     return () => {
+        if (unsubscribed) return;
+        unsubscribed = true;
         connection.subscribers.delete(id);
+        // The QUEUE entry is NOT removed here: it tracks the pod's
+        // execution and is dropped by the terminal event (deliverEvent) —
+        // a canceled consumer leaves the prompt queued on the pod.
     };
 }
 
@@ -351,19 +513,47 @@ export function subscribePodPrompt(
  * Balance submitPodPrompt's pending count when the caller finalizes the run
  * WITHOUT subscribing (prompt rejected at validation time via node_errors,
  * or the socket died before subscription) — keeps the GET list's `prompts`
- * count honest.
+ * count honest, and discards the stashed metadata so it never becomes a
+ * queue entry.
  */
-export function releasePodSubmission(connection: PodSocketConnection): void {
+export function releasePodSubmission(connection: PodSocketConnection, promptId?: string): void {
     connection.pendingSubmissions = Math.max(0, connection.pendingSubmissions - 1);
+    if (promptId) connection.submissionMeta.delete(promptId);
+    updateIdleTimer(connection);
 }
 
 // ── Event routing (module-scope: shared by every socket generation) ────
 
-/** Deliver one event to its prompt_id's subscriber(s), or buffer it. */
+/**
+ * Deliver one event to its prompt_id's subscriber(s), or buffer it.
+ * Also drives the pod's QUEUE registry (the server's authoritative
+ * per-instance queue): execution_start flips the entry queued → running,
+ * a terminal event removes it. Queue churn never affects routing.
+ */
 function deliverEvent(connection: PodSocketConnection, event: StreamEvent): void {
     if (connection.closed) return;
     const pid = typeof event.data?.prompt_id === 'string' ? event.data.prompt_id : null;
     if (pid) {
+        // Queue registry bookkeeping — mirrors the pod's own execution
+        // state machine, for every subscriber AND for buffered orphans.
+        const entry = connection.queue.get(pid);
+        if (entry) {
+            if (event.type === 'execution_start' && entry.status === 'queued') {
+                entry.status = 'running';
+                entry.startedAt = new Date().toISOString();
+            } else if (
+                event.type === 'execution_success' ||
+                event.type === 'execution_interrupted' ||
+                event.type === 'execution_error' ||
+                event.type === 'prompt_error'
+            ) {
+                // Terminal: the pod is done with this prompt — the queue
+                // drains (and the idle countdown may start).
+                connection.queue.delete(pid);
+                connection.submissionMeta.delete(pid);
+                updateIdleTimer(connection);
+            }
+        }
         let delivered = false;
         for (const subscriber of connection.subscribers.values()) {
             if (subscriber.promptId !== pid) continue;
@@ -423,12 +613,47 @@ function buildConnection(
         socket,
         subscribers: new Map(),
         pendingSubmissions: 0,
+        queue: new Map(),
+        submissionMeta: new Map(),
         buffered: new Map(),
         heartbeat: null,
+        idleTimer: null,
         closed: false
     };
     attachSocket(connection, socket);
     return connection;
+}
+
+/**
+ * The ONLY writer of the pod's idle-termination countdown. The rule: while
+ * the pod has NO queue entries and NO pending submissions, it gets
+ * podIdleTimeoutMs of grace before the server terminates the connection;
+ * any submission/queue entry cancels the countdown. A non-positive timeout
+ * disables idle termination. Called from every queue/pending transition
+ * (connect, submit, subscribe, release, terminal event).
+ */
+function updateIdleTimer(connection: PodSocketConnection): void {
+    if (connection.idleTimer !== null) {
+        clearTimeout(connection.idleTimer);
+        connection.idleTimer = null;
+    }
+    if (connection.closed) return;
+    if (connection.queue.size > 0 || connection.pendingSubmissions > 0) return;
+    const timeoutMs = podIdleTimeoutMs;
+    if (!(timeoutMs > 0)) return;
+    connection.idleTimer = setTimeout(() => {
+        connection.idleTimer = null;
+        // A submission that landed between scheduling and firing already
+        // cleared this timer — the guard is belt-and-braces only.
+        if (connection.closed || connection.queue.size > 0 || connection.pendingSubmissions > 0) return;
+        terminate(
+            connection,
+            `Pod idle — no queued prompts for ${Math.round(timeoutMs / 1000)}s (COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS)`
+        );
+    }, timeoutMs);
+    // The idle countdown must not keep a Node process alive by itself.
+    const unref = (connection.idleTimer as unknown as { unref?: () => void }).unref;
+    if (typeof unref === 'function') unref.call(connection.idleTimer);
 }
 
 /**
@@ -611,6 +836,10 @@ function terminate(connection: PodSocketConnection, reason: string): void {
         clearInterval(connection.heartbeat);
         connection.heartbeat = null;
     }
+    if (connection.idleTimer !== null) {
+        clearTimeout(connection.idleTimer);
+        connection.idleTimer = null;
+    }
     if (podSockets.get(connection.key) === connection) podSockets.delete(connection.key);
     try {
         connection.socket.close();
@@ -627,5 +856,9 @@ function terminate(connection: PodSocketConnection, reason: string): void {
         }
     }
     connection.subscribers.clear();
+    // The pod is gone — its queue dies with it (the terminal prompt_error
+    // above already carried the failure to every riding generation).
+    connection.queue.clear();
+    connection.submissionMeta.clear();
     connection.buffered.clear();
 }

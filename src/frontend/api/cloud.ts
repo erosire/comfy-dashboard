@@ -52,8 +52,30 @@ export type CloudCreateResult = {
 };
 
 /**
+ * One prompt queued on a cloud pod — the server's authoritative queue
+ * record (server pod-socket.ts PodQueueEntry). The UI reads this verbatim;
+ * it never tracks queue state itself.
+ */
+export type CloudPodQueueEntry = {
+    /** ComfyUI prompt_id — the routing key on the pod's shared socket. */
+    prompt_id: string;
+    /** ComfyUI queue position from the POST /prompt ack, when numeric. */
+    number: number | null;
+    /** queued = accepted, awaiting execution; running = execution_start seen. */
+    status: 'queued' | 'running';
+    /** Dashboard ids lifted from the submission's extra_data, when present. */
+    workflow_id?: string;
+    generation_id?: string;
+    /** ISO timestamp when the server registered the prompt on this pod. */
+    queuedAt: string;
+    /** ISO timestamp of the execution_start flip (null while queued). */
+    startedAt: string | null;
+};
+
+/**
  * One active cloud pod reported by GET /v1/comfy/cloud — the server's
- * single persistent websocket per pod, with its in-flight prompt count.
+ * single persistent websocket per pod, with its in-flight prompt count and
+ * its server-tracked queue.
  */
 export type CloudPodListEntry = {
     /**
@@ -72,6 +94,12 @@ export type CloudPodListEntry = {
     active: boolean;
     /** How many prompts the pod is currently processing (all generations). */
     prompts: number;
+    /**
+     * The pod's queued prompts — the server's authoritative record
+     * (insertion-ordered, oldest first). Badge counts and the Auto load
+     * balancer read this list's length; nothing is tracked client-side.
+     */
+    queue: CloudPodQueueEntry[];
     /** ISO timestamp when the persistent websocket connected. */
     connectedAt: string;
 };

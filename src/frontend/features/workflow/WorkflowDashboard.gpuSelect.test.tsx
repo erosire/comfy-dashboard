@@ -9,7 +9,8 @@
 //   1. The dialog renders exactly the hardcoded GPU options and reports the
 //      picked GPU key; the backdrop dismisses it without a separate cancel button.
 //   2. Pod buttons show the GPU name and a numeric top-right badge while jobs
-//      are queued (per-pod predicate: activeGenerationIds).
+//      are queued (per-pod predicate: the server-reported `queue` length —
+//      the UI tracks no queue state itself).
 //   3. Every pod button advertises the native ComfyUI websocket transport
 //      and uses the same solid border style.
 // =============================================================================
@@ -18,6 +19,7 @@ import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
+import type { CloudPodQueueEntry } from '../../api';
 import { FooterActions, GpuSelectDialog } from './components';
 import { GPU_OPTIONS, type PodEntry } from './components/utils';
 
@@ -48,6 +50,18 @@ function click(el: Element | null): void {
     });
 }
 
+// The server-reported queue (GET /v1/comfy/cloud) — one entry per prompt.
+function queueEntries(ids: string[]): CloudPodQueueEntry[] {
+    return ids.map((generationId) => ({
+        prompt_id: `prompt-${generationId}`,
+        number: null,
+        status: 'queued' as const,
+        generation_id: generationId,
+        queuedAt: '2026-08-05T10:15:30.000Z',
+        startedAt: null
+    }));
+}
+
 function makePod(overrides: Partial<PodEntry> = {}): PodEntry {
     return {
         id: 'pod-1',
@@ -56,7 +70,7 @@ function makePod(overrides: Partial<PodEntry> = {}): PodEntry {
         pod_url: 'https://pod.example',
         status: 'ready',
         run: { status: 'idle' },
-        activeGenerationIds: [],
+        queue: [],
         ...overrides
     };
 }
@@ -166,8 +180,8 @@ describe('FooterActions — GPU-labeled pod buttons', () => {
     it('shows queued job counts as top-right badges on GPU buttons', () => {
         renderFooter([
             makePod({ id: 'p1', podNumber: 1, gpu: '4090' }),
-            makePod({ id: 'p2', podNumber: 2, gpu: '4090', activeGenerationIds: ['g1', 'g2', 'g3'] }),
-            makePod({ id: 'p3', podNumber: 3, gpu: 'B300', activeGenerationIds: ['g4'] })
+            makePod({ id: 'p2', podNumber: 2, gpu: '4090', queue: queueEntries(['g1', 'g2', 'g3']) }),
+            makePod({ id: 'p3', podNumber: 3, gpu: 'B300', queue: queueEntries(['g4']) })
         ]);
 
         expect(container.querySelector('[data-testid="pod-generate-1"]')?.textContent).toBe('4090');
