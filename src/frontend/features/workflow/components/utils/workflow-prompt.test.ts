@@ -50,8 +50,122 @@ describe('uiNodesToApiPrompt MiniMax H3 Sol attention inputs', () => {
                     dense_percent: 0,
                     thresh_type: 'diag',
                     int8_qk: false,
+                    int8_pv: false,
                     sink_conditioning: 'exact_kv',
                     dense_blocks: '',
+                },
+            },
+        });
+    });
+
+    // Current ComfyUI serializes int8_pv before sink_conditioning. Assert the
+    // complete prompt so a future positional change cannot silently swap values.
+    it('emits the current int8_pv slot in source order', () => {
+        const node: UINode = {
+            id: '7-12',
+            classType: 'MiniMaxH3ScheduledSolAttentionPatch',
+            connections: [],
+            outputs: [],
+            widgets: [
+                { index: 0, value: true },
+                { index: 1, value: 1.3 },
+                { index: 2, value: 0.8 },
+                { index: 3, value: 'cosine' },
+                { index: 4, value: 4096 },
+                { index: 5, value: true },
+                { index: 6, value: 0.2 },
+                { index: 7, value: 'exact' },
+                { index: 8, value: true },
+                { index: 9, value: true },
+                { index: 10, value: 'exact_kv_and_rows' },
+                { index: 11, value: '0-2,-1' },
+            ],
+            mode: 0,
+            order: 0,
+            properties: {},
+            flags: {},
+            position: [0, 0],
+            size: [200, 100],
+            _sourceFormat: 'workflow-v04',
+        };
+
+        expect(uiNodesToApiPrompt([node])).toEqual({
+            '7-12': {
+                class_type: 'MiniMaxH3ScheduledSolAttentionPatch',
+                inputs: {
+                    enabled: true,
+                    tau_start: 1.3,
+                    tau_end: 0.8,
+                    curve: 'cosine',
+                    min_tokens: 4096,
+                    strict: true,
+                    dense_percent: 0.2,
+                    thresh_type: 'exact',
+                    int8_qk: true,
+                    int8_pv: true,
+                    sink_conditioning: 'exact_kv_and_rows',
+                    dense_blocks: '0-2,-1',
+                },
+            },
+        });
+    });
+});
+
+// PathchSageAttentionKJ previously had an empty static layout, so its required
+// sage_attention combo was omitted from the generated API prompt. The default
+// keeps an unusually old workflow executable while current widgets pass through.
+describe('uiNodesToApiPrompt KJNodes Sage attention compatibility', () => {
+    it('emits the Sage mode and optional compile flag', () => {
+        const node: UINode = {
+            id: '7-10',
+            classType: 'PathchSageAttentionKJ',
+            connections: [],
+            outputs: [],
+            widgets: [
+                { index: 0, value: 'auto' },
+                { index: 1, value: true },
+            ],
+            mode: 0,
+            order: 0,
+            properties: {},
+            flags: {},
+            position: [0, 0],
+            size: [200, 100],
+            _sourceFormat: 'workflow-v04',
+        };
+
+        expect(uiNodesToApiPrompt([node])).toEqual({
+            '7-10': {
+                class_type: 'PathchSageAttentionKJ',
+                inputs: {
+                    sage_attention: 'auto',
+                    allow_compile: true,
+                },
+            },
+        });
+    });
+
+    it('backfills disabled Sage mode when a legacy node has no widgets', () => {
+        const node: UINode = {
+            id: '7-10',
+            classType: 'PathchSageAttentionKJ',
+            connections: [],
+            outputs: [],
+            widgets: [],
+            mode: 0,
+            order: 0,
+            properties: {},
+            flags: {},
+            position: [0, 0],
+            size: [200, 100],
+            _sourceFormat: 'workflow-v04',
+        };
+
+        expect(uiNodesToApiPrompt([node])).toEqual({
+            '7-10': {
+                class_type: 'PathchSageAttentionKJ',
+                inputs: {
+                    sage_attention: 'disabled',
                 },
             },
         });

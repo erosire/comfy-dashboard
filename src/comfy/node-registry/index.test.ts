@@ -34,6 +34,41 @@ describe('comfyNodeRegistry missing node entries', () => {
         ]);
     });
 
+    // KJNodes exposes Sage mode as a required widget after the model connection;
+    // registering it prevents the dashboard from silently dropping the value.
+    it('maps the current KJNodes Sage attention controls', () => {
+        expect(comfyNodeRegistry.PathchSageAttentionKJ.widgets).toEqual([
+            {
+                name: 'sage_attention',
+                label: 'Sage Attention',
+                widgetType: 'COMBO',
+                options: [
+                    'disabled',
+                    'auto',
+                    'sageattn_qk_int8_pv_fp16_cuda',
+                    'sageattn_qk_int8_pv_fp16_triton',
+                    'sageattn_qk_int8_pv_fp8_cuda',
+                    'sageattn_qk_int8_pv_fp8_cuda++',
+                    'sageattn3',
+                    'sageattn3_per_block_mean',
+                ],
+                default: 'disabled',
+                tooltip: 'Attention implementation used by the patched model.',
+            },
+            {
+                name: 'allow_compile',
+                label: 'Allow Compile',
+                widgetType: 'BOOLEAN',
+                default: false,
+                optional: true,
+                tooltip: 'Allow torch.compile for Sage attention when supported.',
+            },
+        ]);
+        expect(comfyNodeRegistry.PathchSageAttentionKJ.promptDefaults).toEqual({
+            sage_attention: 'disabled',
+        });
+    });
+
     it('maps EasyCache scalar widgets after its model connection', () => {
         expect(comfyNodeRegistry.EasyCache.widgets).toEqual([
             {
@@ -90,9 +125,43 @@ describe('comfyNodeRegistry missing node entries', () => {
             { name: 'dense_percent', widgetType: 'FLOAT', default: 0 },
             { name: 'thresh_type', widgetType: 'COMBO', default: 'diag' },
             { name: 'int8_qk', widgetType: 'BOOLEAN', default: false },
+            { name: 'int8_pv', widgetType: 'BOOLEAN', default: false },
             { name: 'sink_conditioning', widgetType: 'COMBO', default: 'exact_kv' },
             { name: 'dense_blocks', widgetType: 'STRING', default: '' },
         ]);
+    });
+
+    // Legacy eleven-slot workflows must serialize their old sink and dense
+    // values in place while explicitly adding the new required false toggle.
+    it('serializes legacy MiniMax H3 widgets without shifting saved values', () => {
+        const serialize = comfyNodeRegistry.MiniMaxH3ScheduledSolAttentionPatch.serializeWidgets;
+        expect(serialize).toBeDefined();
+        expect(serialize!([
+            { index: 0, value: true },
+            { index: 1, value: 2 },
+            { index: 2, value: 0.8 },
+            { index: 3, value: 'linear' },
+            { index: 4, value: 8192 },
+            { index: 5, value: false },
+            { index: 6, value: 0 },
+            { index: 7, value: 'diag' },
+            { index: 8, value: false },
+            { index: 9, value: 'exact_kv' },
+            { index: 10, value: '' },
+        ])).toEqual({
+            enabled: true,
+            tau_start: 2,
+            tau_end: 0.8,
+            curve: 'linear',
+            min_tokens: 8192,
+            strict: false,
+            dense_percent: 0,
+            thresh_type: 'diag',
+            int8_qk: false,
+            sink_conditioning: 'exact_kv',
+            dense_blocks: '',
+            int8_pv: false,
+        });
     });
 
     it('serializes each active ResizeImageMaskNode DynamicCombo branch', () => {
