@@ -1,10 +1,12 @@
 // Frontend polling configuration tests.
 //
 // These exact values protect the shared cadence used by both the GPU/pod
-// registry poll and the selected-workflow generation-status poll.
+// registry poll and the selected-workflow generation-status poll, plus the
+// host-aware default baseUrl resolution (localhost pages must stay on the
+// localhost domain instead of crossing to the LAN IP).
 
 import { describe, expect, it } from 'vitest';
-import { GENERATION_STATUS_POLL_INTERVAL_MS, GPU_LIST_POLL_INTERVAL_MS } from './config';
+import { GENERATION_STATUS_POLL_INTERVAL_MS, GPU_LIST_POLL_INTERVAL_MS, resolveDefaultBaseUrl } from './config';
 
 describe('frontend polling configuration', () => {
     it('uses a three-second interval for both server state lists', () => {
@@ -12,5 +14,44 @@ describe('frontend polling configuration', () => {
             GPU_LIST_POLL_INTERVAL_MS: 3_000,
             GENERATION_STATUS_POLL_INTERVAL_MS: 3_000
         });
+    });
+});
+
+describe('resolveDefaultBaseUrl', () => {
+    // Exact URLs resolved per host domain — the LAN fallback is the default,
+    // localhost is the one domain that swaps the IP for the loopback name.
+    const LOCALHOST_URL = 'http://localhost:5000/v1/comfy';
+    const LAN_URL = 'http://192.168.8.128:5000/v1/comfy';
+
+    it('uses the localhost domain when the page host domain is localhost', () => {
+        expect(resolveDefaultBaseUrl('localhost')).toBe(LOCALHOST_URL);
+    });
+
+    it('falls back to the LAN IP for a LAN-hosted page', () => {
+        expect(resolveDefaultBaseUrl('192.168.8.128')).toBe(LAN_URL);
+    });
+
+    it('falls back to the LAN IP for a custom-domain-hosted page', () => {
+        expect(resolveDefaultBaseUrl('dashboard.example.com')).toBe(LAN_URL);
+    });
+
+    it('falls back to the LAN IP for the 127.0.0.1 IP (only the exact localhost domain swaps)', () => {
+        expect(resolveDefaultBaseUrl('127.0.0.1')).toBe(LAN_URL);
+    });
+
+    it('matches localhost exactly (case-sensitive, no subdomain prefix)', () => {
+        expect(resolveDefaultBaseUrl('LOCALHOST')).toBe(LAN_URL);
+        expect(resolveDefaultBaseUrl('app.localhost')).toBe(LAN_URL);
+    });
+
+    it('falls back to the LAN IP when no hostname is available (non-browser import)', () => {
+        expect(resolveDefaultBaseUrl('')).toBe(LAN_URL);
+    });
+
+    it('reads window.location.hostname when no hostname is injected (jsdom defaults to localhost)', () => {
+        // Pins the production call-site path (context/store.tsx and
+        // WorkflowDashboard default prop) — jsdom serves http://localhost:3000/.
+        expect(window.location.hostname).toBe('localhost');
+        expect(resolveDefaultBaseUrl()).toBe(LOCALHOST_URL);
     });
 });

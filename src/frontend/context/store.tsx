@@ -4,7 +4,7 @@
 // Uses plain React context + useState (same pattern as the story-generator).
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { GENERATION_STATUS_POLL_INTERVAL_MS } from '../config';
+import { GENERATION_STATUS_POLL_INTERVAL_MS, resolveDefaultBaseUrl } from '../config';
 import {
     deleteWorkflow as deleteWorkflowApi,
     fetchWorkflows,
@@ -144,7 +144,10 @@ type DashboardStoreContextValue = {
 };
 
 const DEFAULT_CONFIG: DashboardStore['config'] = {
-    baseUrl: 'http://192.168.8.128:5000/v1/comfy',
+    // Host-aware default from frontend/config.ts: localhost-hosted pages keep
+    // API calls on the localhost domain; LAN/domain-hosted pages (and
+    // non-browser imports) fall back to the LAN service IP.
+    baseUrl: resolveDefaultBaseUrl(),
     // Keep the store's exposed timing metadata aligned with the generation
     // polling hook, whose actual interval is sourced from frontend/config.ts.
     pollIntervalMs: GENERATION_STATUS_POLL_INTERVAL_MS

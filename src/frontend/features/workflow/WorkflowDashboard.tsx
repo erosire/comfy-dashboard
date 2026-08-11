@@ -16,6 +16,7 @@ import { useStateHook } from '@presource/react';
 import type { WorkflowMeta } from '../../api';
 import { fetchWorkflow as fetchWorkflowApi, generationResultUrl } from '../../api';
 import { ComfyDashboard } from '../../components';
+import { resolveDefaultBaseUrl } from '../../config';
 import { useDashboardStore } from '../../context';
 import {
     DashboardHeaderControls,
@@ -51,7 +52,9 @@ export type WorkflowDashboardProps = {
 };
 
 export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
-    ({ baseUrl = 'http://192.168.8.128:5000/v1/comfy' }) => {
+    // Default mirrors the store's host-aware resolution (frontend/config.ts):
+    // localhost pages use the localhost domain, everything else the LAN IP.
+    ({ baseUrl = resolveDefaultBaseUrl() }) => {
         const {
             store,
             createWorkflow,
