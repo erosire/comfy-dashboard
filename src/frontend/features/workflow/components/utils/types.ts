@@ -28,7 +28,7 @@ export type PodEntry = {
     pod_url: string;
     status: 'spawning' | 'ready';
     /**
-     * The GPU the pod was spawned on ("4090", "B300", …) — chosen in the
+     * The GPU the pod was spawned on (for example, "4090" or "6000") — chosen in the
      * New-pod dialog and sent to POST /v1/comfy/cloud as `gpu`. Drives the
      * pod button's label ("4090" plus a badge with the queued job count).
      * Undefined only for pods predating GPU selection.

@@ -84,7 +84,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
 
         // ── Pods (lifecycle, heartbeat, generation sync) ─────────────
 
-        const { pods, handleGenerate, handlePodGenerate, handleAutoGenerate } = usePods({
+        const { pods, availableGpus, handleGenerate, handlePodGenerate, handleAutoGenerate } = usePods({
             baseUrl,
             nodes: editor.nodes,
             editingWorkflowId,
@@ -472,6 +472,7 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                     <GpuSelectDialog
                         onSelect={handleGpuSelected}
                         onCancel={() => setGpuPickerTarget(null)}
+                        availableGpus={availableGpus}
                     />
                 )}
 

@@ -37,7 +37,7 @@ beforeEach(() => {
     api.fetchPreferenceVariables.mockResolvedValue({ name: { current: 'Ada' } });
     api.cloudPrompt.mockResolvedValue(new Response('{}', { status: 202 }));
     // The pod-list poll reports no server-side pods unless a test says so.
-    api.cloudListPods.mockResolvedValue({ pods: [] });
+    api.cloudListPods.mockResolvedValue({ available_gpus: ['4090', '6000'], pods: [] });
 });
 
 afterEach(() => {
@@ -182,6 +182,40 @@ const spawnHarness = (seen: { current: PodEntry[] }): React.FC => () => {
 };
 
 describe('usePods server pod-list polling', () => {
+    it('returns the API-provided GPU keys for the picker', async () => {
+        // The hook must relay the GET /v1/comfy/cloud configuration payload;
+        // this prevents a future local constant from silently becoming the
+        // picker source again.
+        api.cloudListPods.mockResolvedValue({
+            available_gpus: ['4090', '6000'],
+            pods: []
+        });
+
+        let availableGpus: string[] = [];
+        const Harness: React.FC = () => {
+            const result = usePods({
+                baseUrl: 'http://host:5000/v1/comfy',
+                nodes,
+                editingWorkflowId: 'workflow-1',
+                workflowName: null,
+                generations: [],
+                getCurrentRaw: () => rawSnapshot,
+                generateWorkflow: vi.fn()
+            });
+            availableGpus = result.availableGpus;
+            return null;
+        };
+
+        await act(async () => {
+            root.render(<Harness />);
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(availableGpus).toEqual(['4090', '6000']);
+    });
+
     it('adds server-reported pods as ready pod buttons automatically', async () => {
         // The server holds a pod the UI never spawned (another client, or a
         // page refresh) — the poll must surface it as a ready button. A

@@ -4,7 +4,7 @@
 //
 // Extracted from the original CloudTab.tsx. Behaviour notes:
 //   - New is NEVER blocked: the GPU picker dialog (GpuSelectDialog) asks
-//     for the GPU ("4090" / "B300", see GPU_OPTIONS), and every pick
+//     for a GPU from the API's available_gpus response, and every pick
 //     spawns a fresh pod for that GPU. Per-pod status lives on the pod
 //     button (labeled e.g. "4090" + a badge with the queued job count).
 //   - Pods accept concurrent jobs: each click queues another job; the
@@ -188,6 +188,9 @@ function reconcilePodQueue(
 
 export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, generations, getCurrentRaw, generateWorkflow }: UsePodsParams) {
     const [pods, setPods] = React.useState<PodEntry[]>([]);
+    // GPU choices are server configuration, so the picker reads this state
+    // from GET /v1/comfy/cloud instead of importing or duplicating secrets.
+    const [availableGpus, setAvailableGpus] = React.useState<string[]>([]);
     // Monotonic counter for naming generation pods ("#1", "#2", …)
     const podCounterRef = React.useRef(0);
     const podsRef = React.useRef(pods);
@@ -237,7 +240,10 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // A failed LIST request skips the tick: an unreachable server never
     // clears or rewrites local buttons (removals need a definitive answer).
     const refreshPods = React.useCallback(async () => {
-        const { pods: serverPods } = await cloudListPods(baseUrl);
+        const { pods: serverPods, available_gpus } = await cloudListPods(baseUrl);
+        // Replace the complete list on every authoritative response so removed
+        // secret keys disappear from the UI on the next poll as well.
+        setAvailableGpus(available_gpus ?? []);
         // The authoritative liveness set, keyed the same way the server
         // keys its registry (URL.toString() normalization).
         const serverUrls = new Set(serverPods.map((sp) => normalizePodUrl(sp.pod_url)));
@@ -439,7 +445,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
     // as the user can click. Per-pod status (spawning, running, done/error)
     // lives on the individual pod button, not on New.
     //
-    // gpu: the GPU key chosen in the dialog ("4090", "B300", …) — sent to
+    // gpu: the GPU key chosen from the API-backed dialog — sent to
     // POST /v1/comfy/cloud, whose server walks that GPU's spawner server
     // list (comfyCloudServiceEndpoint) in order.
     // generationOverride: rerun with a stored generation snapshot (result
@@ -556,5 +562,7 @@ export function usePods({ baseUrl, nodes, editingWorkflowId, workflowName, gener
         [handlePodGenerate]
     );
 
-    return { pods, handleGenerate, handlePodGenerate, handleAutoGenerate };
+    // Return the API-derived GPU keys with the pod handlers so the dashboard
+    // dialog and generation flow share one server-authoritative snapshot.
+    return { pods, availableGpus, handleGenerate, handlePodGenerate, handleAutoGenerate };
 }

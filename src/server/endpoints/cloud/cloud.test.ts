@@ -187,7 +187,7 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
     it('rejects a create request without a gpu, listing the available GPUs', async () => {
         const result = await createCloudPod(context(), parameters({}), {});
         expect(result.status).toBe(400);
-        expect(result.response).toMatchObject({ available_gpus: ['4090', 'RTX6000', 'B300'] });
+        expect(result.response).toMatchObject({ available_gpus: ['4090', '6000'] });
         expect(String((result.response as any).error)).toContain('Missing gpu');
         expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
@@ -197,7 +197,7 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
         expect(result.status).toBe(400);
         expect(result.response).toMatchObject({
             error: 'Unknown gpu: A100',
-            available_gpus: ['4090', 'RTX6000', 'B300']
+            available_gpus: ['4090', '6000']
         });
         expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
@@ -253,12 +253,12 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
     it('answers 503 with the attempts trail when every spawner for the GPU fails', async () => {
         vi.mocked(fetch).mockRejectedValue(new Error('connect ECONNREFUSED'));
 
-        // RTX6000 has one active registry candidate; B300 is intentionally
-        // empty in the deployment registry and would be rejected as unknown.
-        const result = await createCloudPod(context(), parameters({ gpu: 'RTX6000' }), {});
+        // 6000 has one active registry candidate; any missing/empty registry
+        // entry would be rejected as unknown.
+        const result = await createCloudPod(context(), parameters({ gpu: '6000' }), {});
         expect(result.status).toBe(503);
         expect(result.response).toEqual({
-            error: 'No server available to spawn gpu=RTX6000 — every spawner failed',
+            error: 'No server available to spawn gpu=6000 — every spawner failed',
             attempts: [{ server: 'devin', error: 'connect ECONNREFUSED' }]
         });
     });
@@ -298,14 +298,20 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
         expect(result.status).toBe(502);
         expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
         // The refused pod is NOT handed out — the registry stays empty.
-        expect((await listCloudPods(context(), parameters({}), {})).response).toEqual({ pods: [] });
+        expect((await listCloudPods(context(), parameters({}), {})).response).toEqual({
+            available_gpus: ['4090', '6000'],
+            pods: []
+        });
     });
 });
 
 describe('GET /v1/comfy/cloud', () => {
     it('returns an empty list before any pod was spawned', async () => {
         const result = await listCloudPods(context(), parameters({}), {});
-        expect(result).toEqual({ status: 200, response: { pods: [] } });
+        expect(result).toEqual({
+            status: 200,
+            response: { available_gpus: ['4090', '6000'], pods: [] }
+        });
     });
 
     it('lists the spawned pods as active with zero in-flight prompts', async () => {
@@ -321,6 +327,7 @@ describe('GET /v1/comfy/cloud', () => {
         const result = await listCloudPods(context(), parameters({}), {});
         expect(result.status).toBe(200);
         expect(result.response).toEqual({
+            available_gpus: ['4090', '6000'],
             pods: [{
                 pod_url: `${POD_URL}/`,
                 gpu: '4090',

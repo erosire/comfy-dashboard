@@ -10,7 +10,7 @@
 //           existing pod, skipping pod creation), then the "Auto" load
 //           balancer at the very end (queues onto the least-loaded ready
 //           pod; visible only while such a pod exists). Example row:
-//           [+][4090][4090 + badge 3][B300 + badge 1][Auto].
+//           [+][4090][4090 + badge 3][6000 + badge 1][Auto].
 //
 // Pod buttons appear the moment a GPU is picked (loading border ring
 // while the pod_url resolves), labeled with the GPU name plus the queued
@@ -100,7 +100,7 @@ export const FooterActions: React.FC<FooterActionsProps> = ({
                 +
             </BtnPrimary>
 
-            {/* 4090 / B300 with a numeric queue badge: queue another generation
+            {/* API-provided GPU labels with a numeric queue badge: queue another generation
                 on an existing native ComfyUI websocket. */}
             {pods.map((p) => {
                 const isSpawning = p.status === 'spawning';

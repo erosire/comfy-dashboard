@@ -650,12 +650,15 @@ paths:
   /v1/comfy/cloud:
     get:
       operationId: listCloudPods
-      summary: List active cloud pods with their queues
+      summary: List available GPUs and active cloud pods with their queues
       description: >-
-        Returns every cloud pod whose server-managed websocket is currently
-        held in memory, each with the server-tracked queue list. Pods enter
-        the list when spawned via POST /v1/comfy/cloud (or adopted by a
-        status check) and drop out as soon as the cloud server terminates
+        Returns the available GPU keys from the server's
+        comfyCloudServiceEndpoint registry and every cloud pod whose
+        server-managed websocket is currently held in memory, each with the
+        server-tracked queue list. The GPU array is the UI's source for the
+        New-pod picker, so clients do not duplicate secret configuration.
+        Pods enter the list when spawned via POST /v1/comfy/cloud (or adopted
+        by a status check) and drop out as soon as the cloud server terminates
         their socket — either because the pod became unreachable (websocket
         close/error, failed protocol ping) or because its queue stayed empty
         for the configured idle timeout (default 30 s,
@@ -677,8 +680,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CloudPodListResponse'
+                 $ref: '#/components/schemas/CloudPodListResponse'
               example:
+                available_gpus: ["4090", "6000"]
                 pods:
                   - pod_url: "https://test-pod-abc123.beam.cloud:8188/"
                     gpu: "4090"
@@ -703,7 +707,7 @@ paths:
                         startedAt: null
                     connectedAt: "2026-08-05T10:15:30.000Z"
                   - pod_url: "https://b300-pod-def456.beam.cloud:8188/"
-                    gpu: B300
+                     gpu: "6000"
                     client_id: "000aaaaabbbbccccddddeeeeffff0123"
                     active: true
                     prompts: 0
@@ -754,9 +758,9 @@ paths:
                 value:
                   gpu: "4090"
               create_named_pod:
-                summary: Spawn a B300 pod with a custom name
+                 summary: Spawn a 6000 pod with a custom name
                 value:
-                  gpu: B300
+                   gpu: "6000"
                   name: my-comfy-pod
               check_status:
                 summary: Check the status of an existing pod
@@ -1442,9 +1446,9 @@ components:
         gpu:
           type: string
           description: >-
-            GPU to spawn the pod on (create mode, required). Must be a key
-            of the server's comfyCloudServiceEndpoint registry — currently
-            "4090" and "B300". Unknown keys are rejected with 400 and the
+             GPU to spawn the pod on (create mode, required). Must be a key
+             of the server's comfyCloudServiceEndpoint registry — currently
+             "4090" and "6000". Unknown keys are rejected with 400 and the
             list of available GPUs.
           example: "4090"
         name:
@@ -1633,14 +1637,24 @@ components:
     CloudPodListResponse:
       type: object
       description: >-
-        The server's active cloud pods — what GET /v1/comfy/cloud returns.
-        Dashboards poll this to add/refresh their pod buttons automatically.
+        The server's available GPU keys and active cloud pods — what GET
+        /v1/comfy/cloud returns. Dashboards use available_gpus for the
+        New-pod picker and poll pods to add/refresh their pod buttons
+        automatically.
       properties:
+        available_gpus:
+          type: array
+          description: >-
+            Exact keys of runtime/secret/private/modal/comfy.ts exposed by
+            the server. The values are accepted by POST /v1/comfy/cloud as
+            the gpu field.
+          items:
+            type: string
         pods:
           type: array
           items:
             $ref: '#/components/schemas/CloudPodListEntry'
-      required: [pods]
+      required: [available_gpus, pods]
 
     ComfyHealthResponse:
       type: object

@@ -31,6 +31,11 @@ import { connectPodSocket, listPodSockets } from './pod-socket';
 // keyed loosely because JSON request keys are strings even for numeric GPUs.
 const SPAWNER_BY_GPU = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;
 
+// The GET response exposes this exact registry-key list so clients never
+// duplicate GPU configuration in frontend code. Numeric-looking object keys
+// are strings at the HTTP boundary, which is also the type accepted by POST.
+const AVAILABLE_GPUS = Object.keys(SPAWNER_BY_GPU);
+
 // Keep the service adapter's request shape local so status and create mode
 // cannot accidentally accept transport-selection fields from old clients.
 type CloudRequestBody = {
@@ -39,10 +44,19 @@ type CloudRequestBody = {
     gpu?: string;
 };
 
-// GET /v1/comfy/cloud — active pods + per-pod in-flight prompt counts.
-// Pure registry read: no pod is contacted, so the answer is instant.
+// GET /v1/comfy/cloud — available GPU keys plus active pods and their
+// per-pod in-flight prompt counts. Pure registry read: no pod is contacted,
+// so the answer is instant and the GPU list always reflects the secret map.
 export const listCloudPods = asHandlerMethod(async () => {
-    return { status: 200, response: { pods: listPodSockets() } };
+    return {
+        status: 200,
+        response: {
+            // Copy the static key snapshot so a response consumer cannot
+            // mutate the process-level list used by validation errors.
+            available_gpus: [...AVAILABLE_GPUS],
+            pods: listPodSockets()
+        }
+    };
 });
 
 export const createCloudPod = asHandlerMethod(async (_request, parameters, _variables) => {
@@ -95,7 +109,7 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
                 status: 400,
                 response: {
                     error: 'Missing gpu — specify which GPU to spawn the pod on',
-                    available_gpus: Object.keys(SPAWNER_BY_GPU)
+                    available_gpus: [...AVAILABLE_GPUS]
                 }
             };
         }
@@ -106,7 +120,7 @@ export const createCloudPod = asHandlerMethod(async (_request, parameters, _vari
                 status: 400,
                 response: {
                     error: `Unknown gpu: ${body.gpu}`,
-                    available_gpus: Object.keys(SPAWNER_BY_GPU)
+                    available_gpus: [...AVAILABLE_GPUS]
                 }
             };
         }

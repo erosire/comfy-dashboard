@@ -7,7 +7,8 @@
 // See src/server/endpoints/comfy-dashboard.yaml.
 //
 // Routes:
-//   GET  /v1/comfy/cloud          → { pods: CloudPodListEntry[] } — the
+//   GET  /v1/comfy/cloud          → { available_gpus, pods } — the GPU keys
+//                                from the server secret registry and the
 //                                server's active pods (one persistent
 //                                websocket per pod) with in-flight prompt
 //                                counts. THE ONLY pod-liveness source the UI
@@ -37,7 +38,7 @@ export type CloudCreateResult = {
     pod_url: string;
     /**
      * The GPU the pod was spawned on (echoed back from the request) — the
-     * pod button's label ("4090", "B300", …).
+     * pod button's label (for example, "4090" or "6000").
      */
     gpu?: string;
     /**
@@ -108,6 +109,8 @@ export type CloudPodListEntry = {
 };
 
 export type CloudPodListResult = {
+    /** GPU keys copied from runtime/secret/private/modal/comfy.ts by the API. */
+    available_gpus: string[];
     pods: CloudPodListEntry[];
 };
 
@@ -204,7 +207,8 @@ export async function cloudCreate(
 // ── Pod listing ───────────────────────────────────────────────────────
 
 /**
- * List the server's active cloud pods (GET <baseUrl>/cloud).
+ * List the server's available GPU keys and active cloud pods (GET
+ * <baseUrl>/cloud).
  *
  * Pure registry read on the server — every pod whose persistent websocket
  * is currently held, each with its `active` flag and the number of prompts
@@ -224,7 +228,15 @@ export async function cloudListPods(baseUrl: string): Promise<CloudPodListResult
         throw new Error(message);
     }
 
-    return (await response.json()) as CloudPodListResult;
+    const data = (await response.json()) as Partial<CloudPodListResult>;
+    // Normalize both arrays at the API boundary so a malformed/older server
+    // response cannot make the picker or pod reconciliation crash. A missing
+    // GPU list intentionally becomes empty rather than reintroducing a local
+    // fallback list that could drift from the secret registry.
+    return {
+        available_gpus: Array.isArray(data.available_gpus) ? data.available_gpus : [],
+        pods: Array.isArray(data.pods) ? data.pods : []
+    };
 }
 
 // ── Prompt streaming ──────────────────────────────────────────────────

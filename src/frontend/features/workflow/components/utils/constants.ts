@@ -11,10 +11,3 @@ export const MAX_SIDEBAR_ITEMS = 100;
  * static border color while the sg-ring-loading arc sweeps over it.
  */
 export const POD_RING_TRACK = 'rgba(129, 140, 248, 0.30)';
-
-/**
- * GPU options offered by the New-pod dialog, hardcoded for now. These are
- * the keys of comfyCloudServiceEndpoint (runtime/secret/private/modal/
- * comfy.ts) — more GPUs land there first, then join this list.
- */
-export const GPU_OPTIONS = ['4090', 'B300', 'RTX6000'] as const;

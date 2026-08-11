@@ -50,7 +50,8 @@ describe('cloudPrompt', () => {
 });
 
 describe('cloudListPods', () => {
-    it('GETs /cloud and returns the active pod list with each pod queue', async () => {
+    it('GETs /cloud and returns the API GPU keys with the active pod list and each pod queue', async () => {
+        const available_gpus = ['4090', '6000'];
         const pods = [
             {
                 pod_url: 'https://pod-a.example/',
@@ -92,7 +93,7 @@ describe('cloudListPods', () => {
             }
         ];
         vi.mocked(fetch).mockResolvedValue(
-            new Response(JSON.stringify({ pods }), {
+            new Response(JSON.stringify({ available_gpus, pods }), {
                 status: 200,
                 headers: { 'content-type': 'application/json' }
             })
@@ -103,7 +104,7 @@ describe('cloudListPods', () => {
         expect(vi.mocked(fetch).mock.calls).toEqual([
             ['http://dashboard.example/v1/comfy/cloud', { method: 'GET' }]
         ]);
-        expect(result).toEqual({ pods });
+        expect(result).toEqual({ available_gpus, pods });
     });
 
     it('throws the server error message when the list fails', async () => {

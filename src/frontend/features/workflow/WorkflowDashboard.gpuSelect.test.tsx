@@ -2,11 +2,12 @@
 // GPU selection tests
 //
 // Pressing "New" no longer spawns directly — it opens the GpuSelectDialog,
-// which offers the hardcoded GPUs (GPU_OPTIONS: "4090", "B300", "RTX6000") and hands the
+// which offers the API-provided GPU keys (the keys currently configured by the
+// server secret are "4090" and "6000") and hands the
 // pick to usePods.handleGenerate (POST /v1/comfy/cloud with {gpu}).
 //
 // Verifies:
-//   1. The dialog renders exactly the hardcoded GPU options and reports the
+//   1. The dialog renders exactly the API-provided GPU options and reports the
 //      picked GPU key; the backdrop dismisses it without a separate cancel button.
 //   2. Pod buttons show the GPU name and a numeric top-right badge while jobs
 //      are queued (per-pod predicate: the server-reported `queue` length —
@@ -21,7 +22,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import type { CloudPodQueueEntry } from '../../api';
 import { FooterActions, GpuSelectDialog } from './components';
-import { GPU_OPTIONS, type PodEntry } from './components/utils';
+import { type PodEntry } from './components/utils';
+
+// This fixture represents the exact available_gpus array returned by GET
+// /v1/comfy/cloud; the component itself no longer owns GPU configuration.
+const AVAILABLE_GPUS = ['4090', '6000'];
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -76,17 +81,17 @@ function makePod(overrides: Partial<PodEntry> = {}): PodEntry {
 }
 
 describe('GpuSelectDialog', () => {
-    it('renders exactly the hardcoded GPU options', () => {
-        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={vi.fn()} />);
+    it('renders exactly the GPU options supplied by the API', () => {
+        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={vi.fn()} availableGpus={AVAILABLE_GPUS} />);
         const options = [...container.querySelectorAll('[data-testid^="gpu-select-"]')].map((el) =>
             el.getAttribute('data-testid')
         );
-        expect(options).toEqual(GPU_OPTIONS.map((gpu) => `gpu-select-${gpu}`));
-        expect(options).toEqual(['gpu-select-4090', 'gpu-select-B300', 'gpu-select-RTX6000']);
+        expect(options).toEqual(AVAILABLE_GPUS.map((gpu) => `gpu-select-${gpu}`));
+        expect(options).toEqual(['gpu-select-4090', 'gpu-select-6000']);
     });
 
     it('renders above the generation preview stacking layer', () => {
-        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={vi.fn()} />);
+        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={vi.fn()} availableGpus={AVAILABLE_GPUS} />);
 
         // ResultViewer uses z-index 2000, so the picker must use a higher
         // layer to keep its GPU controls selectable over the preview media.
@@ -95,24 +100,24 @@ describe('GpuSelectDialog', () => {
 
     it('reports the picked GPU key', () => {
         const onSelect = vi.fn();
-        render(<GpuSelectDialog onSelect={onSelect} onCancel={vi.fn()} />);
+        render(<GpuSelectDialog onSelect={onSelect} onCancel={vi.fn()} availableGpus={AVAILABLE_GPUS} />);
 
         click(container.querySelector('[data-testid="gpu-select-4090"]'));
         expect(onSelect).toHaveBeenCalledWith('4090');
 
-        click(container.querySelector('[data-testid="gpu-select-B300"]'));
-        expect(onSelect).toHaveBeenCalledWith('B300');
+        click(container.querySelector('[data-testid="gpu-select-6000"]'));
+        expect(onSelect).toHaveBeenCalledWith('6000');
 
-        click(container.querySelector('[data-testid="gpu-select-RTX6000"]'));
-        expect(onSelect).toHaveBeenCalledWith('RTX6000');
+        click(container.querySelector('[data-testid="gpu-select-4090"]'));
+        expect(onSelect).toHaveBeenCalledWith('4090');
     });
 
     it('does not render a cancel button and dismisses from the backdrop', () => {
         const onCancel = vi.fn();
-        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={onCancel} />);
+        render(<GpuSelectDialog onSelect={vi.fn()} onCancel={onCancel} availableGpus={AVAILABLE_GPUS} />);
 
         const labels = [...container.querySelectorAll('button')].map((button) => button.textContent);
-        expect(labels).toEqual([...GPU_OPTIONS]);
+        expect(labels).toEqual([...AVAILABLE_GPUS]);
         expect(labels).not.toContain('Cancel');
 
         // Backdrop is the outermost fixed overlay.

@@ -687,6 +687,7 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
         const result = await listCloudPods(context(), parameters({}), {});
         expect(result.status).toBe(200);
         expect(result.response).toEqual({
+            available_gpus: ['4090', '6000'],
             pods: [
                 {
                     pod_url: `${POD_URL}/`,
@@ -700,6 +701,8 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
                             prompt_id: 'prompt-1',
                             number: null,
                             status: 'queued',
+                            workflow_id: undefined,
+                            generation_id: undefined,
                             queuedAt: expect.any(String),
                             startedAt: null
                         }
