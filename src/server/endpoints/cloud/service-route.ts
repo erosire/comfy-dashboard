@@ -2,6 +2,7 @@ import { asServiceHandler } from '@underload/service';
 import { createCloudPod, listCloudPods } from './cloud';
 
 export default {
+    port: 5300,
     route: '/v1/comfy/cloud',
     handler: asServiceHandler({
         // GET lists the server's active pods (live persistent websockets)
