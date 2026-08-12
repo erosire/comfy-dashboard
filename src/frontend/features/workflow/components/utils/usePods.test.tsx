@@ -10,7 +10,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerationEntry } from '../../../../api';
 import { GPU_LIST_POLL_INTERVAL_MS } from '../../../../config';
-import type { UINode } from '../../../../nodes/node-type';
+import type { UINode } from '@underload/comfy';
 import { usePods } from './usePods';
 import type { PodEntry } from './types';
 

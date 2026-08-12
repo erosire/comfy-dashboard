@@ -22,7 +22,7 @@ import {
     isPowerLoraHeader,
     type PowerLoraEntry
 } from '@underload/comfy';
-import type { UINode, UIWidget } from '../../../nodes/node-type';
+import type { UINode, UIWidget } from '@underload/comfy';
 import { AutoGrowTextarea } from './AutoGrowTextarea';
 import { Badge } from './ui';
 import {

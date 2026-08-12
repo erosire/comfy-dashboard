@@ -4,7 +4,7 @@
 // component and its sub-components / hooks can import them from one place.
 
 import type { CloudPodQueueEntry, CloudStreamEvent, GenerationResultMeta } from '../../../../api';
-import type { UINode, UIWidget } from '../../../../nodes/node-type';
+import type { UINode, UIWidget } from '@underload/comfy';
 
 /**
  * A cloud pod mirrored by the dashboard, with its run state and its
@@ -61,16 +61,8 @@ export type RunState =
  */
 export type ViewerEntry = GenerationResultMeta & { generationId: string; resultIndex: number };
 
-/**
- * Normalized link for boundary rewriting — works for both v0.4 tuple and v1
- * object formats.  Used to resolve external inputs flowing into a subgraph.
- */
-export type BoundaryLink = {
-    targetNodeId: string;
-    targetSlot: number;
-    sourceNodeId: string;
-    sourceSlot: number;
-};
+// NOTE: BoundaryLink moved to @underload/comfy (workflow-parser.ts) — it is
+// only used by the workflow parser's subgraph boundary rewriting.
 
 /** A selected PROMPT-tab field: which widget on which node (tree reference + its key). */
 export type PromptWidgetRef = { key: string; node: UINode; widget: UIWidget };

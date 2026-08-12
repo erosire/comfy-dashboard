@@ -4,11 +4,22 @@
 // (clampWidgetNumber), tooltip construction (widgetControlTitle) and the
 // data-type / node-name display helpers shared by the node cards.
 
-import type { DataType, WidgetDef } from '@underload/comfy';
-import { comfyNodeRegistry, getWidgetLabel } from '@underload/comfy';
-import type { UINode, UIWidget } from '../../../../nodes/node-type';
-import { MODE_LABELS } from '../../../../nodes/node-type';
+import type { DataType, UINode, UIWidget, WidgetDef } from '@underload/comfy';
+import { comfyNodeRegistry, getWidgetLabel, MODE_LABELS } from '@underload/comfy';
 import { base64ByteSize } from './pod-utils';
+
+/**
+ * Execution mode CSS class hints for visual styling. Relocated from the
+ * removed nodes/node-type.ts (whose display-agnostic types moved to
+ * `@underload/comfy` as ui-node.ts); these colors are dashboard theme values.
+ */
+export const MODE_STYLES: Record<number, { color: string; muted: boolean }> = {
+    0: { color: 'inherit', muted: false },
+    1: { color: 'inherit', muted: false },
+    2: { color: '#77819a', muted: true },  // theme.textFaint
+    3: { color: 'inherit', muted: false },
+    4: { color: '#fbbf24', muted: false }, // theme.warning — bypassed
+};
 
 /** Format a widget value for display in an editable field. */
 export function displayValue(val: unknown): string {

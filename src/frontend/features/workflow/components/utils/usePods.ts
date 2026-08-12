@@ -34,7 +34,7 @@ import React from 'react';
 import type { CloudPodListEntry, GenerationEntry, GenerationSummary } from '../../../../api';
 import { GPU_LIST_POLL_INTERVAL_MS } from '../../../../config';
 import { cloudCreate, cloudListPods, cloudPrompt, fetchPreferenceVariables } from '../../../../api';
-import type { UINode } from '../../../../nodes/node-type';
+import type { UINode } from '@underload/comfy';
 import type { PodEntry, RunState } from './types';
 import { podLetter, pickLeastLoadedPod } from './pod-utils';
 import { replacePreferenceVariables } from './workflow-prompt';

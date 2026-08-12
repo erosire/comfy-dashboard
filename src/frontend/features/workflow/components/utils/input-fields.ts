@@ -20,11 +20,14 @@
 // before the run is submitted. Non-string marked widgets (numbers,
 // booleans) are skipped — a base64 stream is not a valid value for them.
 
-import type { UINode } from '../../../../nodes/node-type';
+import {
+    applyWidgetEditsToRaw,
+    parseWorkflowJson,
+    renumberNodes,
+    sortNodesDeep,
+    type UINode
+} from '@underload/comfy';
 import { collectPromptWidgets, promptWidgetKey } from './prompt-fields';
-import { parseWorkflowJson } from './workflow-parser';
-import { renumberNodes, sortNodesDeep } from './workflow-sort';
-import { applyWidgetEditsToRaw } from './workflow-serialize';
 
 /** Where the Input markings live inside the workflow json's `extra` object. */
 export const INPUT_FIELDS_EXTRA_KEY = 'inputFields' as const;

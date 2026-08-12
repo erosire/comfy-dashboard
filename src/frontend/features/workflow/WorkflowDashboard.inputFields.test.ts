@@ -13,14 +13,12 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
+import { parseWorkflowJson, renumberNodes, sortNodesDeep } from '@underload/comfy';
 import {
     buildWorkflowWithInputs,
     collectPromptWidgets,
-    parseWorkflowJson,
     promptWidgetKey,
     readSavedInputFields,
-    renumberNodes,
-    sortNodesDeep,
     writeInputFieldsToRaw
 } from './components/utils';
 

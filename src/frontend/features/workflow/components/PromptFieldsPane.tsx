@@ -12,7 +12,7 @@ import React from 'react';
 import { styledComponent } from '@presource/react';
 import { theme } from '../../../styles';
 import { comfyNodeRegistry } from '@underload/comfy';
-import type { UINode } from '../../../nodes/node-type';
+import type { UINode } from '@underload/comfy';
 import { nodeDisplayName, widgetLabel, type PromptFieldLabelMap, type PromptWidgetRef } from './utils';
 import { WidgetValueEditor } from './WidgetValueEditor';
 import { EmptyHint, NodeCard, NodeHeader, NodeId, NodeInputs, NodeList } from './ui';

@@ -19,7 +19,8 @@
 // =============================================================================
 
 import { describe, it, expect } from 'vitest';
-import { parseWorkflowJson, replacePreferenceVariables, workflowToApiPrompt } from './components/utils';
+import { parseWorkflowJson, workflowToApiPrompt } from '@underload/comfy';
+import { replacePreferenceVariables } from './components/utils';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

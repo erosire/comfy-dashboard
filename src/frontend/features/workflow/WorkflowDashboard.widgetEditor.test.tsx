@@ -20,7 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import { WidgetValueEditor } from './components';
-import type { UINode, UIWidget } from '../../nodes/node-type';
+import type { UINode, UIWidget } from '@underload/comfy';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 

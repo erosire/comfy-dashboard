@@ -3,7 +3,7 @@
 // Extracted verbatim from the original CloudTab.tsx JSON tab body.
 
 import React from 'react';
-import type { UINode } from '../../../nodes/node-type';
+import type { UINode } from '@underload/comfy';
 import { WorkflowNodeCard } from './WorkflowNodeCard';
 
 export type JsonNodePaneProps = {

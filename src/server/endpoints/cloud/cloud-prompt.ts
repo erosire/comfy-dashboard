@@ -37,7 +37,7 @@
 //
 
 import { asHandlerMethod } from '@underload/service';
-import { workflowToApiPrompt } from '../../../frontend/features/workflow/components/utils/workflow-prompt';
+import { workflowToApiPrompt } from '@underload/comfy';
 import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
     appendGenerationLog,

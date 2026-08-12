@@ -8,8 +8,7 @@
 // Extracted from the original CloudTab.tsx updateNodeWidget / toggleNodeBypass.
 
 import React from 'react';
-import { comfyNodeRegistry } from '@underload/comfy';
-import type { UINode } from '../../../../nodes/node-type';
+import { comfyNodeRegistry, type UINode } from '@underload/comfy';
 import { parseInputValue } from './widget-utils';
 
 export function useNodeTree() {

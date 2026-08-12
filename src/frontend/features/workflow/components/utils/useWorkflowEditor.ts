@@ -14,11 +14,14 @@
 
 import React from 'react';
 import type { Workflow, WorkflowMeta } from '../../../../api';
-import type { UINode } from '../../../../nodes/node-type';
+import {
+    applyWidgetEditsToRaw,
+    parseWorkflowJson,
+    renumberNodes,
+    sortNodesDeep,
+    type UINode
+} from '@underload/comfy';
 import type { EditorContentTab, PromptWidgetRef } from './types';
-import { parseWorkflowJson } from './workflow-parser';
-import { renumberNodes, sortNodesDeep } from './workflow-sort';
-import { applyWidgetEditsToRaw } from './workflow-serialize';
 import {
     collectPromptWidgets,
     promptWidgetKey,

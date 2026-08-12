@@ -11,7 +11,7 @@ import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
-import type { UINode } from '../../../nodes/node-type';
+import type { UINode } from '@underload/comfy';
 import type { EditorContentTab, OutputViewMode, PromptFieldLabelMap, PromptWidgetRef } from './utils';
 import { NodeList } from './ui';
 import { DropReplaceInset, EditorDropZone } from './EditorDropZone';

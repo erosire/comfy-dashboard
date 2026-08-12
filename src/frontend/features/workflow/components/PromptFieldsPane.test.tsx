@@ -9,7 +9,7 @@ import React from 'react';
 import { act } from 'react-dom/test-utils';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { UINode } from '../../../nodes/node-type';
+import type { UINode } from '@underload/comfy';
 import { PromptFieldsPane } from './PromptFieldsPane';
 import {
     promptWidgetKey,

@@ -9,8 +9,7 @@
 //
 // Extracted verbatim from the original CloudTab.tsx.
 
-import { comfyNodeRegistry } from '@underload/comfy';
-import type { UINode, UIWidget } from '../../../../nodes/node-type';
+import { comfyNodeRegistry, type UINode, type UIWidget } from '@underload/comfy';
 import type { PromptWidgetRef } from './types';
 
 /** Where the selection lives inside the workflow json's `extra` object. */
