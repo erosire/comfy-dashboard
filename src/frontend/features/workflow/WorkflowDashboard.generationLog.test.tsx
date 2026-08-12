@@ -116,7 +116,7 @@ describe('GenerationsPane — failed-generation click opens the log', () => {
 });
 
 describe('GenerationLogDialog', () => {
-    it('shows the log in a read-only text box and wires Copy / backdrop-close', () => {
+    it('shows the log in a read-only text box, moves Copy left, removes Close, and wires backdrop-close', () => {
         const onCopy = vi.fn();
         const onClose = vi.fn();
         render(
@@ -137,6 +137,10 @@ describe('GenerationLogDialog', () => {
 
         click(container.querySelector('[data-testid="generation-log-copy"]'));
         expect(onCopy).toHaveBeenCalledTimes(1);
+        expect(container.querySelector('[data-testid="generation-log-close"]')).toBeNull();
+        expect(container.querySelector('[data-testid="generation-log-actions"]')?.firstElementChild?.getAttribute('data-testid')).toBe(
+            'generation-log-copy'
+        );
 
         // Backdrop click dismisses.
         click(container.querySelector('[data-testid="generation-log-dialog"]'));
@@ -168,5 +172,40 @@ describe('GenerationLogDialog', () => {
             />
         );
         expect(container.querySelector('[data-testid="generation-log-copy"]')!.textContent).toContain('Copied');
+    });
+
+    it('offers plus and existing pod retry buttons without a Close action', () => {
+        const onGenerate = vi.fn();
+        const onPodGenerate = vi.fn();
+        render(
+            <GenerationLogDialog
+                generationId="gen-fail"
+                displayText="terminal error"
+                loading={false}
+                copied={false}
+                onCopy={vi.fn()}
+                onGenerate={onGenerate}
+                onPodGenerate={onPodGenerate}
+                pods={[
+                    {
+                        id: 'pod-1',
+                        podNumber: 1,
+                        name: 'A',
+                        gpu: '4090',
+                        pod_url: 'https://pod.example',
+                        status: 'ready',
+                        queue: [],
+                        run: { status: 'idle' }
+                    }
+                ]}
+                onClose={vi.fn()}
+            />
+        );
+
+        expect(container.querySelector('[data-testid="generation-log-close"]')).toBeNull();
+        click(container.querySelector('[data-testid="generation-log-generate"]'));
+        click(container.querySelector('[data-testid="generation-log-pod-1"]'));
+        expect(onGenerate).toHaveBeenCalledTimes(1);
+        expect(onPodGenerate).toHaveBeenCalledTimes(1);
     });
 });

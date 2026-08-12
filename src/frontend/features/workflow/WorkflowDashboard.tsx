@@ -97,6 +97,15 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             generateWorkflow
         });
 
+        // The failed-generation dialog and its retry controls share the same
+        // log target, workflow id, and close behavior as the OUTPUT pane. Keep
+        // this hook near the pod handlers so retry callbacks can use its
+        // server-selected generation id without duplicating dialog state.
+        const generationLog = useGenerationLog({
+            baseUrl: store.config.baseUrl,
+            workflowId: editingWorkflowId
+        });
+
         // ── Result viewer (image/video modal) ─────────────────────────
 
         const viewer = useResultViewer({
@@ -114,6 +123,11 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
 
         const viewerSnapshotCacheRef = React.useRef<Map<string, GenerationSnapshot>>(new Map());
         const [viewerActionBusy, setViewerActionBusy] = React.useState(false);
+        // The picker target distinguishes editor generation, viewer rerun, and
+        // failed-generation retry while reusing one GPU selection dialog.
+        const [gpuPickerTarget, setGpuPickerTarget] = React.useState<
+            null | 'footer' | 'viewer' | 'generation-log'
+        >(null);
 
         // Cached snapshots belong to the currently loaded workflow.
         React.useEffect(() => {
@@ -200,6 +214,25 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
         // feed the image into an injected copy of that workflow instead.
         // Either way the generation is recorded under the CURRENTLY
         // VIEWED workflow (same as every other rerun).
+        const runGenerationSnapshot = React.useCallback(
+            async (generationId: string, run: (snapshot: GenerationSnapshot) => void) => {
+                if (viewerActionBusy) return;
+                setViewerActionBusy(true);
+                try {
+                    // Failed generations and successful viewer entries both
+                    // reuse the stored lossless workflow document; this creates
+                    // a new generation without mutating the failed record.
+                    const snapshot = await getViewerGenerationSnapshot(generationId);
+                    if (snapshot) run(snapshot);
+                } catch (err: any) {
+                    alert(`Failed to regenerate: ${err.message ?? String(err)}`);
+                } finally {
+                    setViewerActionBusy(false);
+                }
+            },
+            [viewerActionBusy, getViewerGenerationSnapshot]
+        );
+
         const runViewerGeneration = React.useCallback(
             async (run: (snapshot: GenerationSnapshot) => void) => {
                 const generationId = viewer.viewerCurrent?.generationId;
@@ -228,11 +261,27 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
             ]
         );
 
+        // A failed generation's plus button opens the existing GPU picker, but
+        // selection is tagged so the chosen GPU receives the failed snapshot
+        // rather than the current editor contents or a viewer snapshot.
+        const handleGenerationLogGenerate = React.useCallback(() => {
+            setGpuPickerTarget('generation-log');
+        }, []);
+
+        // Existing pod buttons retry the failed generation directly, preserving
+        // the same pod reuse semantics as the result viewer and footer.
+        const handleGenerationLogPodGenerate = React.useCallback(
+            (pod: PodEntry) => {
+                const generationId = generationLog.logTarget;
+                if (!generationId) return;
+                void runGenerationSnapshot(generationId, (snapshot) => void handlePodGenerate(pod, snapshot));
+            },
+            [generationLog.logTarget, runGenerationSnapshot, handlePodGenerate]
+        );
+
         // ── GPU selection dialog state ──────────────────────────────
         // Footer "New" and viewer "New" both open this picker; the chosen
         // GPU is forwarded to usePods.handleGenerate.
-        const [gpuPickerTarget, setGpuPickerTarget] = React.useState<null | 'footer' | 'viewer'>(null);
-
         const handleGpuSelected = React.useCallback(
             (gpu: string) => {
                 if (gpuPickerTarget === 'footer') {
@@ -241,10 +290,17 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                 } else if (gpuPickerTarget === 'viewer') {
                     // Fire and forget — the spawned pod button reports state.
                     void runViewerGeneration((snapshot) => void handleGenerate(gpu, snapshot));
+                } else if (gpuPickerTarget === 'generation-log') {
+                    // Retry uses the failed generation's stored workflow json,
+                    // then spawns a fresh pod through the normal New path.
+                    const generationId = generationLog.logTarget;
+                    if (generationId) {
+                        void runGenerationSnapshot(generationId, (snapshot) => void handleGenerate(gpu, snapshot));
+                    }
                 }
                 setGpuPickerTarget(null);
             },
-            [gpuPickerTarget, handleGenerate, runViewerGeneration]
+            [gpuPickerTarget, generationLog.logTarget, handleGenerate, runViewerGeneration, runGenerationSnapshot]
         );
 
         const handleViewerGenerate = React.useCallback(() => {
@@ -367,15 +423,6 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
 
         // Poll generations for the selected workflow
         useGenerationsPolling(editingWorkflowId, refreshGenerations);
-
-        // ── Generation log dialog (failed/error generations, OUTPUT tab) ──
-        // Clicking a red (failed / no-output) generation fetches its .log
-        // event trail from the server and shows it in a read-only dialog
-        // with a Copy button, for debugging.
-        const generationLog = useGenerationLog({
-            baseUrl: store.config.baseUrl,
-            workflowId: editingWorkflowId
-        });
 
         // ── Load a saved workflow from sidebar ───────────────────────────
         // selectWorkflow loads the full workflow into store.selectedWorkflow;
@@ -513,6 +560,10 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                         loading={generationLog.loading}
                         copied={generationLog.copied}
                         onCopy={generationLog.copyGenerationLog}
+                        onGenerate={handleGenerationLogGenerate}
+                        onPodGenerate={handleGenerationLogPodGenerate}
+                        pods={pods}
+                        actionBusy={viewerActionBusy}
                         onClose={generationLog.closeGenerationLog}
                     />
                 )}
