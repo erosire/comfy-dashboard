@@ -26,7 +26,7 @@
 //
 // ── Idle termination ───────────────────────────────────────────────────
 // A pod whose queue drains to EMPTY (nothing queued, no pending submission)
-// gets the idle countdown: no queue left + podIdleTimeoutMs (default 30 s,
+// gets the idle countdown: no queue left + podIdleTimeoutMs (default 60 s,
 // COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS) → the server terminates the
 // connection. Every new submission cancels the countdown; the countdown
 // starts at connect (a freshly spawned pod that never receives work is
@@ -119,7 +119,7 @@ export const POD_WS_HEARTBEAT_MS = 10_000;
  * one is pure cost, and pods are designed to die and never come back, so
  * termination is the intended end of an idle pod.
  */
-export const POD_IDLE_TIMEOUT_DEFAULT_MS = 30_000;
+export const POD_IDLE_TIMEOUT_DEFAULT_MS = 60_000;
 
 // Resolved once at module load: env wins when it parses to a positive number.
 const envIdleTimeoutMs = Number(

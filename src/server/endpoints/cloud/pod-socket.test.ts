@@ -515,7 +515,7 @@ describe('per-pod queue registry', () => {
 });
 
 describe('idle pod termination (configurable timeout)', () => {
-    it('terminates a pod whose queue stayed empty for the idle timeout (default 30s)', async () => {
+    it('terminates a pod whose queue stayed empty for the idle timeout (default 60s)', async () => {
         vi.useFakeTimers();
         await connectPodSocket(new URL(POD_URL));
 
@@ -545,7 +545,7 @@ describe('idle pod termination (configurable timeout)', () => {
         await submitPodPrompt(connection, { promptPayload: { prompt: {} } });
         const unsubscribe = subscribePodPrompt(connection, { promptId: 'prompt-run', onEvent: () => undefined });
 
-        // Well past the original 30s mark — the busy pod stays.
+        // Well past the original 60s mark — the busy pod stays.
         await vi.advanceTimersByTimeAsync(POD_IDLE_TIMEOUT_DEFAULT_MS);
         expect(getPodSocket(POD_URL)).not.toBeNull();
 
