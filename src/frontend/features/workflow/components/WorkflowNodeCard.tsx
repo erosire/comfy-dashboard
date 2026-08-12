@@ -9,7 +9,7 @@
 
 import React from 'react';
 import { theme } from '../../../styles';
-import { comfyNodeRegistry } from '../../../../comfy';
+import { comfyNodeRegistry } from '@underload/comfy';
 import type { UINode } from '../../../nodes/node-type';
 import {
     dataTypeColor,

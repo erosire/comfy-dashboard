@@ -13,7 +13,7 @@
 import React from 'react';
 import styled from '@emotion/styled';
 import { theme } from '../../../styles';
-import type { WidgetDef } from '../../../../comfy';
+import type { WidgetDef } from '@underload/comfy';
 import {
     comfyNodeRegistry,
     POWER_LORA_LOADER_NODE_TYPE,
@@ -21,7 +21,7 @@ import {
     isPowerLoraEntry,
     isPowerLoraHeader,
     type PowerLoraEntry
-} from '../../../../comfy';
+} from '@underload/comfy';
 import type { UINode, UIWidget } from '../../../nodes/node-type';
 import { AutoGrowTextarea } from './AutoGrowTextarea';
 import { Badge } from './ui';

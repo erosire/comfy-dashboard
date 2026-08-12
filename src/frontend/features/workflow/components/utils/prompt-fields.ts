@@ -9,7 +9,7 @@
 //
 // Extracted verbatim from the original CloudTab.tsx.
 
-import { comfyNodeRegistry } from '../../../../../comfy';
+import { comfyNodeRegistry } from '@underload/comfy';
 import type { UINode, UIWidget } from '../../../../nodes/node-type';
 import type { PromptWidgetRef } from './types';
 

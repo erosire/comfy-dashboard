@@ -11,7 +11,7 @@
 import React from 'react';
 import { styledComponent } from '@presource/react';
 import { theme } from '../../../styles';
-import { comfyNodeRegistry } from '../../../../comfy';
+import { comfyNodeRegistry } from '@underload/comfy';
 import type { UINode } from '../../../nodes/node-type';
 import { nodeDisplayName, widgetLabel, type PromptFieldLabelMap, type PromptWidgetRef } from './utils';
 import { WidgetValueEditor } from './WidgetValueEditor';

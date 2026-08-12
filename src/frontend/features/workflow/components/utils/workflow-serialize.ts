@@ -3,7 +3,7 @@
 //
 // Extracted verbatim from the original CloudTab.tsx.
 
-import type { WorkflowNode } from '../../../../../comfy';
+import type { WorkflowNode } from '@underload/comfy';
 import type { UINode } from '../../../../nodes/node-type';
 import { editorTreeToApiPrompt } from './workflow-prompt';
 

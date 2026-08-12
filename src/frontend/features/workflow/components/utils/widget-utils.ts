@@ -4,8 +4,8 @@
 // (clampWidgetNumber), tooltip construction (widgetControlTitle) and the
 // data-type / node-name display helpers shared by the node cards.
 
-import type { DataType, WidgetDef } from '../../../../../comfy';
-import { comfyNodeRegistry, getWidgetLabel } from '../../../../../comfy';
+import type { DataType, WidgetDef } from '@underload/comfy';
+import { comfyNodeRegistry, getWidgetLabel } from '@underload/comfy';
 import type { UINode, UIWidget } from '../../../../nodes/node-type';
 import { MODE_LABELS } from '../../../../nodes/node-type';
 import { base64ByteSize } from './pod-utils';

@@ -14,7 +14,7 @@ import {
     objectHasKey,
     toString
 } from '@presource/core';
-import { comfyNodeRegistry, type DataType } from '../../../../../comfy';
+import { comfyNodeRegistry, type DataType } from '@underload/comfy';
 import type { UIInputConnection, UINode } from '../../../../nodes/node-type';
 import { parseWorkflowJson } from './workflow-parser';
 import { renumberNodes, sortNodesDeep } from './workflow-sort';

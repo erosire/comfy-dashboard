@@ -13,8 +13,8 @@ import type {
     NodeOutput,
     SubgraphDefinition,
     WorkflowNode
-} from '../../../../../comfy';
-import { comfyNodeRegistry, isApiLinkRef } from '../../../../../comfy';
+} from '@underload/comfy';
+import { comfyNodeRegistry, isApiLinkRef } from '@underload/comfy';
 import type { UIInputConnection, UINode, UIOutputSlot, UIWidget } from '../../../../nodes/node-type';
 import type { BoundaryLink } from './types';
 
