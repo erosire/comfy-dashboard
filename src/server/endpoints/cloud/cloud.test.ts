@@ -63,9 +63,11 @@ vi.mock('undici', () => {
 import { createCloudPod, listCloudPods, requestSpawn, spawnFromCandidates } from './cloud';
 import { closeAllPodSockets } from './pod-socket';
 
-// The real registry endpoints (runtime/secret/private/modal/comfy.ts) —
-// the 4090 GPU currently has exactly one spawner server named "lancer".
-const SPAWNER_4090 = 'https://196a5cd3-f0d2-4cd0-a54c-2c7ec5cd0d13-8000.app.beam.cloud';
+// Derive the 4090 spawner URL from the live registry so the test never
+// breaks when secrets rotate — the same source cloud.ts resolves at runtime.
+import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
+const registry = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;
+const SPAWNER_4090 = Object.values(registry['4090'])[0];
 const POD_URL = 'https://pod-a.example';
 
 function context() {
