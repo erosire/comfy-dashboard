@@ -125,13 +125,14 @@ export type GenerationEntry = {
  * Lightweight summary of a generation entry — what the list endpoint
  * (GET /v1/comfy/workflows/{id}/generate) returns.
  *
- * Excludes the heavy `prompt` (full workflow JSON), result payloads
- * (image/video data: URLs, often megabytes), and `stream` (raw NDJSON
- * events) so the list loads fast. `resultItems` carries the per-result
- * display metadata (no payloads), and `resultCount` lets the UI render
- * "N items" — previews stream straight from `generationResultUrl()`
- * without fetching the full entry. The full entry (prompt, stream) is
- * still available with `fetchGeneration` when actually needed.
+* Excludes the heavy `prompt` (full workflow JSON) and `result` payloads
+* (image/video data: URLs, often megabytes) so the list loads fast.
+* `resultItems` carries the per-result display metadata (no payloads), and
+* `resultCount` lets the UI render "N items" — previews stream straight from
+* `generationResultUrl()` without fetching the full entry. The full entry
+* (prompt, result) is still available with `fetchGeneration` when actually
+* needed. (The raw NDJSON event trail is intentionally NOT part of the entry
+* — the server stores it in a sidecar .log file.)
  */
 export type GenerationSummary = {
     id: string;
@@ -352,8 +353,8 @@ export async function generateWorkflow(
     return (await response.json()) as { generation: GenerationEntry };
 }
 
-// Fetch all generations for a workflow (lightweight summaries — no prompt,
-// result, or stream). Use fetchGeneration to load a single generation's full
+// Fetch all generations for a workflow (lightweight summaries — no prompt or
+// result payloads). Use fetchGeneration to load a single generation's full
 // data when previewing its outputs.
 export async function fetchGenerations(
     baseUrl: string,
@@ -373,7 +374,7 @@ export async function fetchGenerations(
     return { generations: Array.isArray(data.generations) ? data.generations : [] };
 }
 
-// Fetch a single generation's full data (prompt, result, stream) by id.
+// Fetch a single generation's full data (prompt, result) by id.
 // Called when previewing a generation's outputs — the list endpoint only
 // returns lightweight summaries, so the full entry is fetched on demand.
 export async function fetchGeneration(

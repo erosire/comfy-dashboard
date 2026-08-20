@@ -7,8 +7,8 @@ info:
     pods.     Every spawned pod gets ONE persistent ComfyUI websocket held in
     server memory (opened during POST /v1/comfy/cloud, which blocks until
     the socket connects, and kept alive until the cloud server terminates
-    it — on unreachability, or after its queue stays empty for the
-    configurable idle timeout, default 30 s); GET /v1/comfy/cloud lists
+it — on unreachability, or after its queue stays empty for the
+     configurable idle timeout, default 60 s); GET /v1/comfy/cloud lists
     those active pods with their server-tracked queue lists (prompt ids,
     queued/running status, workflow/generation ids) — clients mirror that
     answer and keep no pod state of their own. Prompt processing happens server-side: POST
@@ -661,7 +661,7 @@ paths:
         by a status check) and drop out as soon as the cloud server terminates
         their socket — either because the pod became unreachable (websocket
         close/error, failed protocol ping) or because its queue stayed empty
-        for the configured idle timeout (default 30 s,
+        for the configured idle timeout (default 60 s,
         COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS). There is exactly one websocket
         per pod — it carries every prompt that pod processes.
 
@@ -1539,7 +1539,7 @@ components:
         terminates it (at which point the pod drops out of this list).
         Termination happens when the pod becomes unreachable (websocket
         close/error, failed protocol ping) OR when the pod has been idle —
-        no queued prompts — for the configured idle timeout (default 30 s,
+        no queued prompts — for the configured idle timeout (default 60 s,
         COMFY_DASHBOARD_POD_IDLE_TIMEOUT_MS).
       properties:
         pod_url:
