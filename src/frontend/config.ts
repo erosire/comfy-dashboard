@@ -5,14 +5,16 @@
 // keeps the default baseUrl decision in one place (consumed by both
 // context/store.tsx DEFAULT_CONFIG and WorkflowDashboard's default prop).
 
+import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '@config/environment';
+
 // Fallback dashboard-service URL used when the page is NOT served from the
 // loopback domain — the LAN deployment address of the dashboard service.
-const LAN_BASE_URL = 'http://192.168.8.128:5000/v1/comfy';
+const LAN_BASE_URL = `http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
 // Loopback dashboard-service URL used when the page IS served from localhost:
 // a developer opening the dashboard via http://localhost:<port> expects API
 // calls to stay on the same loopback domain instead of crossing to the LAN IP.
-const LOCALHOST_BASE_URL = 'http://localhost:5000/v1/comfy';
+const LOCALHOST_BASE_URL = `http://localhost:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
 // Resolve the default dashboard-service base URL from the page's host domain.
 // When the host domain is "localhost" the localhost domain is used instead of

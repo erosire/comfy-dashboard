@@ -4,6 +4,7 @@
 // body used by the runtime endpoint. No real server is contacted.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '@config/environment';
 import {
     addPreferenceVariables,
     fetchPreferenceVariables,
@@ -21,8 +22,8 @@ afterEach(() => {
 
 describe('preferenceVariablesUrl', () => {
     it('keeps the configured host and port while switching to the preferences route', () => {
-        expect(preferenceVariablesUrl('http://192.168.8.128:5000/v1/comfy')).toBe(
-            'http://192.168.8.128:5000/v1/preferences/variables'
+        expect(preferenceVariablesUrl(`http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`)).toBe(
+            `http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/preferences/variables`
         );
     });
 

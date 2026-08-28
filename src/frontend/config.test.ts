@@ -6,6 +6,7 @@
 // localhost domain instead of crossing to the LAN IP).
 
 import { describe, expect, it } from 'vitest';
+import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '@config/environment';
 import { GENERATION_STATUS_POLL_INTERVAL_MS, GPU_LIST_POLL_INTERVAL_MS, resolveDefaultBaseUrl } from './config';
 
 describe('frontend polling configuration', () => {
@@ -20,15 +21,15 @@ describe('frontend polling configuration', () => {
 describe('resolveDefaultBaseUrl', () => {
     // Exact URLs resolved per host domain — the LAN fallback is the default,
     // localhost is the one domain that swaps the IP for the loopback name.
-    const LOCALHOST_URL = 'http://localhost:5000/v1/comfy';
-    const LAN_URL = 'http://192.168.8.128:5000/v1/comfy';
+    const LOCALHOST_URL = `http://localhost:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
+    const LAN_URL = `http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
     it('uses the localhost domain when the page host domain is localhost', () => {
         expect(resolveDefaultBaseUrl('localhost')).toBe(LOCALHOST_URL);
     });
 
     it('falls back to the LAN IP for a LAN-hosted page', () => {
-        expect(resolveDefaultBaseUrl('192.168.8.128')).toBe(LAN_URL);
+        expect(resolveDefaultBaseUrl(LOCAL_AREA_NETWORK_HOST_NAME)).toBe(LAN_URL);
     });
 
     it('falls back to the LAN IP for a custom-domain-hosted page', () => {
