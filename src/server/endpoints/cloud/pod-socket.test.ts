@@ -849,11 +849,23 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
             socket.emitMessage(JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-405' } }));
 
             // The background finalizer is async IO — poll until it settles.
+            // Poll on BOTH the entry status AND the trailing log line: the
+            // finalizer's last two log appends are fire-and-forget calls
+            // chained through enqueueFileOp (generation-store.ts
+            // appendGenerationLog), so the .json status can flip to
+            // 'completed' BEFORE those log writes land — observing only the
+            // status races the log file under parallel-suite IO load.
+            const logPath = path.join(root, 'comfy-workflows', workflowId, 'generation', `${generationId}.log`);
             const deadline = Date.now() + 5000;
             let entry = await readGenerationFile(root, workflowId, generationId);
-            while (entry?.status !== 'completed' && Date.now() < deadline) {
+            let logText = '';
+            while (
+                (entry?.status !== 'completed' || !logText.includes('Generation COMPLETED')) &&
+                Date.now() < deadline
+            ) {
                 await new Promise((resolve) => setTimeout(resolve, 25));
                 entry = await readGenerationFile(root, workflowId, generationId);
+                logText = await fs.readFile(logPath, 'utf-8').catch(() => '');
             }
 
             expect({
@@ -874,10 +886,6 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
             });
 
             // One log per prompt: every routed event was traced in order.
-            const logText = await fs.readFile(
-                path.join(root, 'comfy-workflows', workflowId, 'generation', `${generationId}.log`),
-                'utf-8'
-            );
             const logLines = logText
                 .trimEnd()
                 .split('\n')
