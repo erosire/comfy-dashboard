@@ -9,11 +9,13 @@ import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '
 
 // Fallback dashboard-service URL used when the page is NOT served from the
 // loopback domain — the LAN deployment address of the dashboard service.
-const LAN_BASE_URL = `http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
+// https is required: the underload service enforces TLS for LAN peers.
+const LAN_BASE_URL = `https://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
 // Loopback dashboard-service URL used when the page IS served from localhost:
 // a developer opening the dashboard via http://localhost:<port> expects API
 // calls to stay on the same loopback domain instead of crossing to the LAN IP.
+// Plain http is fine here — the service exempts loopback peers from TLS.
 const LOCALHOST_BASE_URL = `http://localhost:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
 // Resolve the default dashboard-service base URL from the page's host domain.
