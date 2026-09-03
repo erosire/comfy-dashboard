@@ -22,7 +22,7 @@ describe('resolveDefaultBaseUrl', () => {
     // Exact URLs resolved per host domain — the LAN fallback is the default,
     // localhost is the one domain that swaps the IP for the loopback name.
     const LOCALHOST_URL = `http://localhost:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
-    const LAN_URL = `https://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
+    const LAN_URL = `http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
     it('uses the localhost domain when the page host domain is localhost', () => {
         expect(resolveDefaultBaseUrl('localhost')).toBe(LOCALHOST_URL);
@@ -56,4 +56,5 @@ describe('resolveDefaultBaseUrl', () => {
         expect(resolveDefaultBaseUrl()).toBe(LOCALHOST_URL);
     });
 });
+
 

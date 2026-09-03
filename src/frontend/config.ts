@@ -10,7 +10,7 @@ import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '
 // Fallback dashboard-service URL used when the page is NOT served from the
 // loopback domain — the LAN deployment address of the dashboard service.
 // https is required: the underload service enforces TLS for LAN peers.
-const LAN_BASE_URL = `https://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
+const LAN_BASE_URL = `http://${LOCAL_AREA_NETWORK_HOST_NAME}:${LOCAL_AREA_NETWORK_DATABASE_PORT}/v1/comfy`;
 
 // Loopback dashboard-service URL used when the page IS served from localhost:
 // a developer opening the dashboard via http://localhost:<port> expects API
@@ -38,3 +38,4 @@ export const GPU_LIST_POLL_INTERVAL_MS = 3_000;
 // OUTPUT tab and used to settle pod buttons, so they refresh on the same
 // three-second cadence as the pod registry.
 export const GENERATION_STATUS_POLL_INTERVAL_MS = 3_000;
+
