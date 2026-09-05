@@ -63,11 +63,16 @@ vi.mock('undici', () => {
 import { createCloudPod, listCloudPods, requestSpawn, spawnFromCandidates } from './cloud';
 import { closeAllPodSockets } from './pod-socket';
 
-// Derive the 4090 spawner URL from the live registry so the test never
+// Derive the spawner URL + GPU key from the live registry so the test never
 // breaks when secrets rotate — the same source cloud.ts resolves at runtime.
+// The registry shape is gpu → { serverName: spawnerUrl }; the FIRST registered
+// GPU/server pair is used as the spawn fixture (currently the 'Modal' GPU with
+// its single 'yimin' server, after the 4090/6000 Beam entries were retired —
+// see runtime/secret/private/modal/comfy.ts).
 import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
 const registry = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;
-const SPAWNER_4090 = Object.values(registry['4090'])[0];
+const GPU_KEY = Object.keys(registry)[0];
+const SPAWNER_URL = Object.values(registry[GPU_KEY])[0];
 const POD_URL = 'https://pod-a.example';
 
 function context() {
@@ -96,9 +101,9 @@ describe('requestSpawn', () => {
             new Response(null, { status: 302, headers: { location: POD_URL } })
         );
 
-        await expect(requestSpawn(SPAWNER_4090)).resolves.toBe(POD_URL);
+        await expect(requestSpawn(SPAWNER_URL)).resolves.toBe(POD_URL);
         // URL normalization adds the trailing slash to the bare host.
-        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_4090}/`);
+        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_URL}/`);
         expect((vi.mocked(fetch).mock.calls[0][1] as RequestInit).redirect).toBe('manual');
     });
 
@@ -107,14 +112,14 @@ describe('requestSpawn', () => {
             new Response(null, { status: 302, headers: { location: POD_URL } })
         );
 
-        await requestSpawn(SPAWNER_4090, 'my-pod');
-        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_4090}/?name=my-pod`);
+        await requestSpawn(SPAWNER_URL, 'my-pod');
+        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_URL}/?name=my-pod`);
     });
 
     it('throws on a non-redirect status, including the body hint', async () => {
         vi.mocked(fetch).mockResolvedValue(new Response('out of capacity', { status: 500 }));
 
-        await expect(requestSpawn(SPAWNER_4090)).rejects.toThrow(
+        await expect(requestSpawn(SPAWNER_URL)).rejects.toThrow(
             'Spawner returned HTTP 500 (expected 302 redirect): out of capacity'
         );
     });
@@ -122,7 +127,7 @@ describe('requestSpawn', () => {
     it('throws on a redirect without a Location header', async () => {
         vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 302 }));
 
-        await expect(requestSpawn(SPAWNER_4090)).rejects.toThrow('302 but no Location header');
+        await expect(requestSpawn(SPAWNER_URL)).rejects.toThrow('302 but no Location header');
     });
 
     it('throws on an invalid spawner URL', async () => {
@@ -189,25 +194,29 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
     it('rejects a create request without a gpu, listing the available GPUs', async () => {
         const result = await createCloudPod(context(), parameters({}), {});
         expect(result.status).toBe(400);
-        expect(result.response).toMatchObject({ available_gpus: ['4090', '6000'] });
+        expect(result.response).toMatchObject({ available_gpus: [GPU_KEY] });
         expect(String((result.response as any).error)).toContain('Missing gpu');
         expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
 
     it('rejects an unknown gpu, listing the available GPUs', async () => {
-        const result = await createCloudPod(context(), parameters({ gpu: 'A100' }), {});
+        const result = await createCloudPod(context(), parameters({ gpu: 'NO-SUCH-GPU' }), {});
         expect(result.status).toBe(400);
         expect(result.response).toMatchObject({
-            error: 'Unknown gpu: A100',
-            available_gpus: ['4090', '6000']
+            error: 'Unknown gpu: NO-SUCH-GPU',
+            available_gpus: [GPU_KEY]
         });
         expect(vi.mocked(fetch)).not.toHaveBeenCalled();
     });
 
-    it("spawns a 4090 pod through the 'lancer' spawner and echoes gpu + spawner", async () => {
+    it("spawns a pod through the GPU's first registered spawner and echoes gpu + spawner", async () => {
+        // The first (and currently only) registered server name of the live
+        // registry's first GPU entry — the same resolution order cloud.ts
+        // walks when the requested GPU has multiple spawners.
+        const FIRST_SERVER = Object.keys(registry[GPU_KEY])[0];
         vi.mocked(fetch).mockImplementation(async (input: any) => {
             const url = String(input);
-            if (url === `${SPAWNER_4090}/`) {
+            if (url === `${SPAWNER_URL}/`) {
                 return new Response(null, { status: 302, headers: { location: POD_URL } });
             }
             if (url === `${POD_URL}/`) {
@@ -222,23 +231,23 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
             throw new Error(`Unexpected fetch: ${url}`);
         });
 
-        const result = await createCloudPod(context(), parameters({ gpu: '4090' }), {});
+        const result = await createCloudPod(context(), parameters({ gpu: GPU_KEY }), {});
         expect(result.status).toBe(200);
         expect(result.response).toMatchObject({
             pod_url: POD_URL,
-            gpu: '4090',
-            spawner: 'lancer',
+            gpu: GPU_KEY,
+            spawner: FIRST_SERVER,
             health: { healthy: true },
             models_dir: ''
         });
         // First fetch is the spawner; the pod probe follows.
-        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_4090}/`);
+        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_URL}/`);
     });
 
     it('passes the pod name through to the spawner', async () => {
         vi.mocked(fetch).mockImplementation(async (input: any) => {
             const url = String(input);
-            if (url.startsWith(SPAWNER_4090)) {
+            if (url.startsWith(SPAWNER_URL)) {
                 return new Response(null, { status: 302, headers: { location: POD_URL } });
             }
             return new Response(JSON.stringify(STATUS_DOCUMENT), {
@@ -247,21 +256,25 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
             });
         });
 
-        const result = await createCloudPod(context(), parameters({ gpu: '4090', name: 'dev machine' }), {});
+        const result = await createCloudPod(context(), parameters({ gpu: GPU_KEY, name: 'dev machine' }), {});
         expect(result.status).toBe(200);
-        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_4090}/?name=dev+machine`);
+        expect(vi.mocked(fetch).mock.calls[0][0]).toBe(`${SPAWNER_URL}/?name=dev+machine`);
     });
 
     it('answers 503 with the attempts trail when every spawner for the GPU fails', async () => {
         vi.mocked(fetch).mockRejectedValue(new Error('connect ECONNREFUSED'));
 
-        // 6000 has one active registry candidate; any missing/empty registry
-        // entry would be rejected as unknown.
-        const result = await createCloudPod(context(), parameters({ gpu: '6000' }), {});
+        // A gpu key absent from the registry is rejected as unknown (400), so
+        // the 503 "every spawner failed" path needs a REGISTERED gpu whose
+        // spawners all fail — here the live registry's only GPU.
+        const result = await createCloudPod(context(), parameters({ gpu: GPU_KEY }), {});
         expect(result.status).toBe(503);
         expect(result.response).toEqual({
-            error: 'No server available to spawn gpu=6000 — every spawner failed',
-            attempts: [{ server: 'devin', error: 'connect ECONNREFUSED' }]
+            error: `No server available to spawn gpu=${GPU_KEY} — every spawner failed`,
+            attempts: Object.keys(registry[GPU_KEY]).map((server) => ({
+                server,
+                error: 'connect ECONNREFUSED'
+            }))
         });
     });
 
@@ -296,12 +309,12 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
             new Response(null, { status: 302, headers: { location: POD_URL } })
         );
 
-        const result = await createCloudPod(context(), parameters({ gpu: '4090' }), {});
+        const result = await createCloudPod(context(), parameters({ gpu: GPU_KEY }), {});
         expect(result.status).toBe(502);
         expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
         // The refused pod is NOT handed out — the registry stays empty.
         expect((await listCloudPods(context(), parameters({}), {})).response).toEqual({
-            available_gpus: ['4090', '6000'],
+            available_gpus: [GPU_KEY],
             pods: []
         });
     });
@@ -312,27 +325,27 @@ describe('GET /v1/comfy/cloud', () => {
         const result = await listCloudPods(context(), parameters({}), {});
         expect(result).toEqual({
             status: 200,
-            response: { available_gpus: ['4090', '6000'], pods: [] }
+            response: { available_gpus: [GPU_KEY], pods: [] }
         });
     });
 
     it('lists the spawned pods as active with zero in-flight prompts', async () => {
         vi.mocked(fetch).mockImplementation(async (input: any) => {
             const url = String(input);
-            if (url.startsWith(SPAWNER_4090)) {
+            if (url.startsWith(SPAWNER_URL)) {
                 return new Response(null, { status: 302, headers: { location: POD_URL } });
             }
             return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
         });
-        await createCloudPod(context(), parameters({ gpu: '4090' }), {});
+        await createCloudPod(context(), parameters({ gpu: GPU_KEY }), {});
 
         const result = await listCloudPods(context(), parameters({}), {});
         expect(result.status).toBe(200);
         expect(result.response).toEqual({
-            available_gpus: ['4090', '6000'],
+            available_gpus: [GPU_KEY],
             pods: [{
                 pod_url: `${POD_URL}/`,
-                gpu: '4090',
+                gpu: GPU_KEY,
                 name: undefined,
                 client_id: expect.any(String),
                 active: true,

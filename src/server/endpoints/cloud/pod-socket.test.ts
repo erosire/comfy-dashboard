@@ -80,6 +80,9 @@ vi.mock('undici', () => {
 });
 
 import { createCloudPod, listCloudPods } from './cloud';
+// The live spawner registry — read dynamically in the available_gpus
+// assertion so the test tracks the secret map instead of stale GPU keys.
+import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
 import { cloudPrompt } from './cloud-prompt';
 import {
     closeAllPodSockets,
@@ -681,17 +684,23 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
     });
 
     it('GET /v1/comfy/cloud lists the active pods with their prompt counts and queue', async () => {
-        await connectPodSocket(new URL(POD_URL), { gpu: '4090' });
+        // gpu is free-form spawn metadata — the value here does not need to be
+        // a live registry key (the override spawner path accepts any gpu tag);
+        // available_gpus, by contrast, mirrors the live secret registry, whose
+        // only registered GPU key is read dynamically so secret rotations
+        // (e.g. the retired 4090/6000 Beam entries) do not break this test.
+        const SPAWN_GPU = 'test-gpu';
+        await connectPodSocket(new URL(POD_URL), { gpu: SPAWN_GPU });
         subscribePodPrompt(getPodSocket(POD_URL)!, { promptId: 'prompt-1', onEvent: () => undefined });
 
         const result = await listCloudPods(context(), parameters({}), {});
         expect(result.status).toBe(200);
         expect(result.response).toEqual({
-            available_gpus: ['4090', '6000'],
+            available_gpus: [Object.keys(comfyCloudServiceEndpoint as Record<string, unknown>)[0]],
             pods: [
                 {
                     pod_url: `${POD_URL}/`,
-                    gpu: '4090',
+                    gpu: SPAWN_GPU,
                     name: undefined,
                     client_id: CLIENT_ID,
                     active: true,
