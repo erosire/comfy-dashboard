@@ -99,7 +99,7 @@ import type { StreamEvent } from '../workflows/generation-store';
  * the spawner's 302 lands, so this is intentionally more patient than the
  * old 5 s throwaway probe (which returned immediately with an error field).
  */
-export const POD_WS_OPEN_TIMEOUT_MS = 30_000;
+export const POD_WS_OPEN_TIMEOUT_MS = 60_000;
 
 /**
  * Protocol-level ping cadence for the persistent socket. A failed write or
