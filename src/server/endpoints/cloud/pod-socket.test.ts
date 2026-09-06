@@ -90,7 +90,10 @@ import {
     getPodSocket,
     listPodSockets,
     POD_IDLE_TIMEOUT_DEFAULT_MS,
+    POD_WS_CONNECT_RETRY_MS,
     POD_WS_HEARTBEAT_MS,
+    setPodConnectRetryMs,
+    setPodConnectTimeoutMs,
     setPodIdleTimeoutMs,
     subscribePodPrompt,
     submitPodPrompt
@@ -181,9 +184,44 @@ describe('connectPodSocket', () => {
 
     it('rejects and registers nothing when the pod refuses the websocket', async () => {
         testState.openBehavior = 'refused';
-        await expect(connectPodSocket(new URL(POD_URL))).rejects.toThrow();
-        expect(listPodSockets()).toEqual([]);
-        expect(getPodSocket(POD_URL)).toBeNull();
+        // Shrink the connect budget — the default 60 s retry window is a
+        // production value; a permanently-refusing pod must exhaust it fast.
+        const restoreTimeout = setPodConnectTimeoutMs(50);
+        const restoreRetry = setPodConnectRetryMs(1);
+        try {
+            await expect(connectPodSocket(new URL(POD_URL))).rejects.toThrow();
+            expect(listPodSockets()).toEqual([]);
+            expect(getPodSocket(POD_URL)).toBeNull();
+        } finally {
+            setPodConnectTimeoutMs(restoreTimeout);
+            setPodConnectRetryMs(restoreRetry);
+        }
+    });
+
+    it('retries the handshake until the freshly spawned pod becomes reachable', async () => {
+        // Simulates the Modal cold-start race: the pod answers the spawner's
+        // 302 while ComfyUI is still booting. The first handshakes are
+        // refused; after 5 ms the pod is "up". connectPodSocket must retry
+        // and succeed instead of failing on the first refusal.
+        testState.openBehavior = 'refused';
+        const restoreTimeout = setPodConnectTimeoutMs(60_000);
+        const restoreRetry = setPodConnectRetryMs(1);
+        const bootTimer = setTimeout(() => {
+            testState.openBehavior = 'open';
+        }, 5);
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            expect(connection.closed).toBe(false);
+            expect(getPodSocket(POD_URL)).toBe(connection);
+            // More than one socket was constructed (the refused attempts),
+            // but exactly ONE live connection is registered.
+            expect(testState.sockets.length).toBeGreaterThan(1);
+            expect(listPodSockets()).toHaveLength(1);
+        } finally {
+            clearTimeout(bootTimer);
+            setPodConnectTimeoutMs(restoreTimeout);
+            setPodConnectRetryMs(restoreRetry);
+        }
     });
 
     it('refreshes spawn metadata when reconnecting an already-held pod', async () => {
@@ -639,10 +677,19 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
 
     it('status mode answers 502 when the pod refuses the websocket', async () => {
         testState.openBehavior = 'refused';
-        const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
-        expect(result.status).toBe(502);
-        expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
-        expect(listPodSockets()).toEqual([]);
+        // Shrink the connect budget — a permanently-refusing pod exhausts it
+        // quickly instead of burning the production 60 s window.
+        const restoreTimeout = setPodConnectTimeoutMs(50);
+        const restoreRetry = setPodConnectRetryMs(1);
+        try {
+            const result = await createCloudPod(context(), parameters({ pod_url: POD_URL }), {});
+            expect(result.status).toBe(502);
+            expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
+            expect(listPodSockets()).toEqual([]);
+        } finally {
+            setPodConnectTimeoutMs(restoreTimeout);
+            setPodConnectRetryMs(restoreRetry);
+        }
     });
 
     it('status mode rejects an invalid pod_url', async () => {
@@ -677,10 +724,19 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
         const SPAWNER = 'https://spawner.example/spawn';
         vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 302, headers: { location: POD_URL } }));
 
-        const result = await createCloudPod(context(), parameters({ gpu: '4090' }), { spawnerUrl: SPAWNER });
-        expect(result.status).toBe(502);
-        expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
-        expect(listPodSockets()).toEqual([]);
+        // Shrink the connect budget — a permanently-refusing pod exhausts it
+        // quickly instead of burning the production 60 s window.
+        const restoreTimeout = setPodConnectTimeoutMs(50);
+        const restoreRetry = setPodConnectRetryMs(1);
+        try {
+            const result = await createCloudPod(context(), parameters({ gpu: '4090' }), { spawnerUrl: SPAWNER });
+            expect(result.status).toBe(502);
+            expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
+            expect(listPodSockets()).toEqual([]);
+        } finally {
+            setPodConnectTimeoutMs(restoreTimeout);
+            setPodConnectRetryMs(restoreRetry);
+        }
     });
 
     it('GET /v1/comfy/cloud lists the active pods with their prompt counts and queue', async () => {

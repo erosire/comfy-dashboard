@@ -83,6 +83,7 @@
 //   - cloud-prompt.ts — prompt submission over the shared socket
 //                       (submitPodPrompt + subscribePodPrompt)
 
+import { scriptPause } from '@presource/core';
 import { ping as websocketPing, WebSocket } from 'undici';
 import {
     newDirectClientId,
@@ -100,6 +101,38 @@ import type { StreamEvent } from '../workflows/generation-store';
  * old 5 s throwaway probe (which returned immediately with an error field).
  */
 export const POD_WS_OPEN_TIMEOUT_MS = 60_000;
+
+/**
+ * Retry cadence while waiting for a freshly spawned pod's websocket to come
+ * up. A Modal/Beam pod that has just answered the spawner's 302 is often
+ * still booting ComfyUI: the tunnel URL exists but nothing is listening on
+ * the other side yet, so the first `new WebSocket(...)` fails immediately
+ * with a transport error ("Unable to connect"). Instead of declaring the pod
+ * dead on that first refusal, `connectPodSocket` retries the handshake on
+ * this cadence until POD_WS_OPEN_TIMEOUT_MS elapses in total — the "wait 60
+ * seconds for the pod to become reachable" behaviour.
+ */
+export const POD_WS_CONNECT_RETRY_MS = 2_000;
+
+// Runtime-overridable copies of the two constants above (tests / operator
+// tuning) — same pattern as podIdleTimeoutMs below. Defaults keep the
+// documented 60 s budget with 2 s between attempts.
+let podConnectTimeoutMs = POD_WS_OPEN_TIMEOUT_MS;
+let podConnectRetryMs = POD_WS_CONNECT_RETRY_MS;
+
+/** Override the total connect budget (tests / operator tuning). Returns the previous value. */
+export function setPodConnectTimeoutMs(ms: number): number {
+    const previous = podConnectTimeoutMs;
+    podConnectTimeoutMs = ms;
+    return previous;
+}
+
+/** Override the retry cadence (tests / operator tuning). Returns the previous value. */
+export function setPodConnectRetryMs(ms: number): number {
+    const previous = podConnectRetryMs;
+    podConnectRetryMs = ms;
+    return previous;
+}
 
 /**
  * Protocol-level ping cadence for the persistent socket. A failed write or
@@ -284,8 +317,12 @@ function podKey(podUrl: URL | string): string {
 /**
  * Connect (or reuse) the pod's ONE persistent websocket. A healthy existing
  * connection is returned as-is (spawn metadata refreshed); a stale one is
- * replaced. Throws when the handshake fails — the caller (create endpoint)
- * then refuses to return the pod.
+ * replaced. The handshake is RETRIED until podConnectTimeoutMs (default
+ * POD_WS_OPEN_TIMEOUT_MS = 60 s) is spent — a freshly spawned pod usually
+ * needs a few seconds for ComfyUI to boot before its tunnel accepts
+ * connections, and a first-attempt refusal is not a dead pod. Throws only
+ * when the whole budget is exhausted — the caller (create endpoint) then
+ * refuses to return the pod.
  */
 export async function connectPodSocket(
     podUrl: URL,
@@ -301,16 +338,40 @@ export async function connectPodSocket(
     if (existing) podSockets.delete(key);
 
     const clientId = newDirectClientId();
-    const socket = new WebSocket(websocketUrl(podUrl, clientId));
-    try {
-        await waitForSocketOpen(socket, POD_WS_OPEN_TIMEOUT_MS);
-    } catch (error) {
+    // A freshly spawned pod answers the spawner's 302 while ComfyUI inside it
+    // is still booting, so the first handshake attempt is often refused
+    // ("Unable to connect"). Keep retrying on the podConnectRetryMs cadence
+    // until the overall podConnectTimeoutMs budget is spent — the pod gets a
+    // full 60 s (default) to become reachable before create fails.
+    const deadline = Date.now() + podConnectTimeoutMs;
+    let socket: WebSocket | null = null;
+    let lastError: unknown = null;
+    while (Date.now() < deadline) {
+        socket = new WebSocket(websocketUrl(podUrl, clientId));
         try {
-            socket.close();
-        } catch {
-            // The handshake error is the useful one.
+            await waitForSocketOpen(socket, Math.min(podConnectRetryMs, deadline - Date.now()));
+            break;
+        } catch (error) {
+            // This attempt failed — close the socket, remember the error, and
+            // retry while budget remains. waitForSocketOpen already detached
+            // its listeners; close() here is best-effort cleanup.
+            lastError = error;
+            try {
+                socket.close();
+            } catch {
+                // The next attempt is what matters.
+            }
+            socket = null;
+            if (Date.now() < deadline) {
+                await scriptPause(podConnectRetryMs);
+            }
         }
-        throw error;
+    }
+    if (!socket) {
+        // Budget exhausted — the pod never became reachable. Surface the most
+        // recent handshake error (usually "Unable to connect to ComfyUI
+        // websocket") to the create endpoint's 502 path.
+        throw lastError ?? new Error('Timed out connecting to ComfyUI websocket');
     }
 
     const connection = buildConnection(key, new URL(String(podUrl)), clientId, socket, meta);

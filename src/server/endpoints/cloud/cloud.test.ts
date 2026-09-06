@@ -61,7 +61,7 @@ vi.mock('undici', () => {
 });
 
 import { createCloudPod, listCloudPods, requestSpawn, spawnFromCandidates } from './cloud';
-import { closeAllPodSockets } from './pod-socket';
+import { closeAllPodSockets, setPodConnectRetryMs, setPodConnectTimeoutMs } from './pod-socket';
 
 // Derive the spawner URL + GPU key from the live registry so the test never
 // breaks when secrets rotate — the same source cloud.ts resolves at runtime.
@@ -309,14 +309,23 @@ describe('POST /v1/comfy/cloud — gpu selection', () => {
             new Response(null, { status: 302, headers: { location: POD_URL } })
         );
 
-        const result = await createCloudPod(context(), parameters({ gpu: GPU_KEY }), {});
-        expect(result.status).toBe(502);
-        expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
-        // The refused pod is NOT handed out — the registry stays empty.
-        expect((await listCloudPods(context(), parameters({}), {})).response).toEqual({
-            available_gpus: [GPU_KEY],
-            pods: []
-        });
+        // Shrink the connect budget — a permanently-refusing pod exhausts it
+        // quickly instead of burning the production 60 s retry window.
+        const restoreTimeout = setPodConnectTimeoutMs(50);
+        const restoreRetry = setPodConnectRetryMs(1);
+        try {
+            const result = await createCloudPod(context(), parameters({ gpu: GPU_KEY }), {});
+            expect(result.status).toBe(502);
+            expect(String((result.response as any).error)).toContain('refused the direct ComfyUI websocket');
+            // The refused pod is NOT handed out — the registry stays empty.
+            expect((await listCloudPods(context(), parameters({}), {})).response).toEqual({
+                available_gpus: [GPU_KEY],
+                pods: []
+            });
+        } finally {
+            setPodConnectTimeoutMs(restoreTimeout);
+            setPodConnectRetryMs(restoreRetry);
+        }
     });
 });
 
