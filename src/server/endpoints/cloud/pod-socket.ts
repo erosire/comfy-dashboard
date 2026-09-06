@@ -135,6 +135,57 @@ export function setPodConnectRetryMs(ms: number): number {
 }
 
 /**
+ * How long recoverPodPromptId keeps probing a pod for a prompt whose HTTP
+ * ack was lost. When POST /prompt fails AFTER dispatch (transport reset,
+ * tunnel hiccup, undici "fetch failed"), the pod may already be executing
+ * the prompt — abandoning it there would orphan the run (a ghost job the
+ * server never monitors). The probe window gives a slow pod time to surface
+ * the queued/finished prompt before the caller gives up and fails the
+ * generation explicitly.
+ */
+export const POD_PROMPT_RECOVERY_WINDOW_MS = 10_000;
+
+/**
+ * Cadence between recovery probes. The FIRST probe runs immediately (a
+ * reset-after-dispatch prompt is usually already queued); later probes only
+ * matter when the request was still in flight when the ack was lost.
+ */
+export const POD_PROMPT_RECOVERY_PROBE_MS = 1_000;
+
+/**
+ * Per-probe HTTP budget. A hung tunnel must not stretch a single probe past
+ * a few seconds — the whole window bounds the caller's wait.
+ */
+export const POD_PROMPT_RECOVERY_PROBE_TIMEOUT_MS = 3_000;
+
+// Runtime-overridable copies of the three recovery knobs (tests / operator
+// tuning) — same pattern as the connect/idle overrides above.
+let podRecoveryWindowMs = POD_PROMPT_RECOVERY_WINDOW_MS;
+let podRecoveryProbeMs = POD_PROMPT_RECOVERY_PROBE_MS;
+let podRecoveryProbeTimeoutMs = POD_PROMPT_RECOVERY_PROBE_TIMEOUT_MS;
+
+/** Override the ack-loss recovery window. Returns the previous value. */
+export function setPodRecoveryWindowMs(ms: number): number {
+    const previous = podRecoveryWindowMs;
+    podRecoveryWindowMs = ms;
+    return previous;
+}
+
+/** Override the recovery probe cadence. Returns the previous value. */
+export function setPodRecoveryProbeMs(ms: number): number {
+    const previous = podRecoveryProbeMs;
+    podRecoveryProbeMs = ms;
+    return previous;
+}
+
+/** Override the per-probe HTTP budget. Returns the previous value. */
+export function setPodRecoveryProbeTimeoutMs(ms: number): number {
+    const previous = podRecoveryProbeTimeoutMs;
+    podRecoveryProbeTimeoutMs = ms;
+    return previous;
+}
+
+/**
  * Protocol-level ping cadence for the persistent socket. A failed write or
  * a non-OPEN readyState terminates the connection (and every prompt riding
  * it). There is deliberately NO response-silence watchdog here — an idle
@@ -528,6 +579,33 @@ export function subscribePodPrompt(
     connection: PodSocketConnection,
     subscriber: { promptId: string; onEvent: (event: StreamEvent) => void }
 ): () => void {
+    // A terminated pod can never deliver another event (pods are designed to
+    // die and never reconnect — see terminate/handleSocketDeath). Registering
+    // a subscriber here would silently swallow its prompt: the run rides a
+    // dead socket with no terminal ever firing — the GHOST-JOB failure mode
+    // (a generation stuck 'pending' forever). Deliver the registry's terminal
+    // prompt_error instead so consumers (cloud-prompt.ts trackGenerationOnPod)
+    // finalize the generation as failed immediately. The queue entry is NOT
+    // created: terminate() already cleared the registry state of this pod.
+    if (connection.closed) {
+        connection.pendingSubmissions = Math.max(0, connection.pendingSubmissions - 1);
+        queueMicrotask(() => {
+            try {
+                subscriber.onEvent({
+                    type: 'prompt_error',
+                    data: {
+                        error:
+                            `ComfyUI websocket for ${connection.key} is closed — ` +
+                            'the pod can no longer deliver this prompt\'s events'
+                    }
+                });
+            } catch {
+                // A crashing consumer must not break the caller.
+            }
+        });
+        return () => undefined;
+    }
+
     const id = newDirectClientId();
     connection.subscribers.set(id, { id, ...subscriber });
     connection.pendingSubmissions = Math.max(0, connection.pendingSubmissions - 1);
@@ -556,7 +634,19 @@ export function subscribePodPrompt(
         connection.buffered.delete(subscriber.promptId);
         // Deferred so a terminal event inside the flush cannot fire before
         // the caller received its unsubscribe handle.
-        queueMicrotask(() => early.forEach((event) => subscriber.onEvent(event)));
+        queueMicrotask(() => {
+            early.forEach((event) => subscriber.onEvent(event));
+            // The queue entry above was created AFTER deliverEvent's terminal
+            // bookkeeping ran (the terminal arrived while the prompt was still
+            // an unbuffered orphan — the ack→subscribe race on a fast run). If
+            // the flush carried that terminal, drain the entry HERE — without
+            // this the finished run would sit in the pod's queue forever and
+            // pin the idle countdown open.
+            if (early.some((event) => isTerminalEvent(event.type))) {
+                connection.queue.delete(subscriber.promptId);
+                updateIdleTimer(connection);
+            }
+        });
     }
 
     let unsubscribed = false;
@@ -583,7 +673,206 @@ export function releasePodSubmission(connection: PodSocketConnection, promptId?:
     updateIdleTimer(connection);
 }
 
+/** The extra_data ids a recovered prompt must match (see recoverPodPromptId). */
+export type PodPromptRecoveryMatch = {
+    workflowId?: string;
+    generationId?: string;
+};
+
+/**
+ * Find a prompt on the pod after its POST /prompt ack was lost.
+ *
+ * When the submission's HTTP transport fails after dispatch (proxy reset,
+ * tunnel hiccup, undici "fetch failed") or the ack body is unreadable, the
+ * pod may already be executing the prompt — but the server never learned its
+ * prompt_id, so it cannot subscribe by id. The pod's own state saves the day:
+ *   - GET /queue  lists queued + running prompts as tuples
+ *     [number, prompt_id, prompt, extra_data, outputs_to_execute];
+ *   - GET /history lists finished prompts with the same tuple shape.
+ * extra_data echoes what the submission sent (the dashboard always includes
+ * workflow_id + generation_id), so matching extra_data recovers the
+ * prompt_id. The shared socket's event buffer (bufferEvent) has been
+ * accumulating that prompt's events all along, so subscribing to the
+ * recovered id replays everything — including a terminal for a run that
+ * already finished.
+ *
+ * Probes /queue first (running/queued), then /history (finished), retrying
+ * until the window expires — an ack lost while the request was still in
+ * flight needs a few attempts before the prompt surfaces. All transport
+ * failures are swallowed (the next probe retries); returns null when the
+ * window expires without a match, i.e. the prompt never started.
+ *
+ * Pending-count accounting mirrors submitPodPrompt: ONE count is held for
+ * the WHOLE window (with the queue empty and the failed submission's count
+ * already released, the idle countdown would otherwise terminate the pod
+ * mid-probe and kill the very run being recovered). On success the count
+ * stays held — subscribePodPrompt consumes it when the caller resumes
+ * tracking, exactly like a normal ack → subscribe transfer. On failure
+ * (no match, or the pod died mid-window) the count is released again.
+ *
+ * On success the matched prompt's metadata (queue number + the dashboard
+ * ids from the match) is stashed in submissionMeta, so the queue entry
+ * subscribePodPrompt creates carries the same workflow_id/generation_id a
+ * normal ack would — GET /v1/comfy/cloud reports them and the dashboard's
+ * settle-watch (which reads generation_id off queue entries) works for
+ * recovered jobs too.
+ */
+export async function recoverPodPromptId(
+    connection: PodSocketConnection,
+    match: PodPromptRecoveryMatch,
+    options?: { authorization?: string }
+): Promise<string | null> {
+    const headers: Record<string, string> = { Accept: 'application/json' };
+    if (options?.authorization) headers['Authorization'] = options.authorization;
+
+    // Hold the pod open for the whole probe window (see doc above).
+    connection.pendingSubmissions += 1;
+    updateIdleTimer(connection);
+
+    const deadline = Date.now() + podRecoveryWindowMs;
+    let found: { promptId: string; number: number | null } | null = null;
+    try {
+        while (!connection.closed && Date.now() < deadline) {
+            found = await probePodForPrompt(connection, match, headers);
+            if (found) break;
+            if (connection.closed || Date.now() >= deadline) break;
+            await scriptPause(Math.min(podRecoveryProbeMs, deadline - Date.now()));
+        }
+    } finally {
+        if (found) {
+            // Stash the ids + queue number so the queue entry created at
+            // subscribe time matches what a normal ack would have produced.
+            const meta: PodSubmissionMeta = { number: found.number };
+            if (match.workflowId !== undefined) meta.workflowId = match.workflowId;
+            if (match.generationId !== undefined) meta.generationId = match.generationId;
+            connection.submissionMeta.set(found.promptId, meta);
+        } else {
+            // No match — the prompt never started (or the pod died mid-
+            // window): release the hold so the idle countdown can resume.
+            connection.pendingSubmissions = Math.max(0, connection.pendingSubmissions - 1);
+            updateIdleTimer(connection);
+        }
+    }
+    return found?.promptId ?? null;
+}
+
+/**
+ * One recovery sweep: /queue (queued + running) then /history (finished).
+ * Never throws — a failed probe is simply a missed sample; the retry loop
+ * in recoverPodPromptId keeps the window open. Returns the matched prompt's
+ * id plus its ComfyUI queue number (when the tuple carries one).
+ */
+async function probePodForPrompt(
+    connection: PodSocketConnection,
+    match: PodPromptRecoveryMatch,
+    headers: Record<string, string>
+): Promise<{ promptId: string; number: number | null } | null> {
+    // Queued / currently executing prompts.
+    try {
+        const response = await fetch(serverRoute(connection.podUrl, '/queue').toString(), {
+            headers,
+            signal: AbortSignal.timeout(podRecoveryProbeTimeoutMs)
+        });
+        if (response.ok) {
+            const data = (await response.json()) as Record<string, unknown>;
+            for (const key of ['queue_running', 'queue_pending']) {
+                const list = data?.[key];
+                if (!Array.isArray(list)) continue;
+                for (const entry of list) {
+                    if (!extraDataMatches(tupleExtraData(entry), match)) continue;
+                    const promptId = tuplePromptId(entry);
+                    if (promptId) return { promptId, number: tupleQueueNumber(entry) };
+                }
+            }
+        }
+    } catch {
+        // Probe failure — the retry loop keeps the window open.
+    }
+
+    // Already-finished prompts — a fast run can beat the probe entirely.
+    // max_items keeps the response bounded on pods with long histories.
+    try {
+        const historyUrl = serverRoute(connection.podUrl, '/history');
+        historyUrl.searchParams.set('max_items', '64');
+        const response = await fetch(historyUrl.toString(), {
+            headers,
+            signal: AbortSignal.timeout(podRecoveryProbeTimeoutMs)
+        });
+        if (response.ok) {
+            const data = (await response.json()) as unknown;
+            // Shape: { [prompt_id]: { prompt: [number, prompt_id, prompt, extra_data, outputs], … } }
+            if (data && typeof data === 'object' && !Array.isArray(data)) {
+                for (const value of Object.values(data as Record<string, unknown>)) {
+                    const tuple = value && typeof value === 'object' ? (value as Record<string, unknown>).prompt : null;
+                    if (!extraDataMatches(tupleExtraData(tuple), match)) continue;
+                    const promptId = tuplePromptId(tuple);
+                    if (promptId) return { promptId, number: tupleQueueNumber(tuple) };
+                }
+            }
+        }
+    } catch {
+        // Probe failure — the retry loop keeps the window open.
+    }
+
+    return null;
+}
+
+/**
+ * Extract a queue/history entry's queue number (index 0 of the prompt
+ * tuple). Null for non-numeric values.
+ */
+function tupleQueueNumber(entry: unknown): number | null {
+    return Array.isArray(entry) && typeof entry[0] === 'number' ? entry[0] : null;
+}
+
+/**
+ * Extract a queue/history entry's extra_data (index 3 of the prompt tuple).
+ * Returns null for anything that is not a plain object — ComfyUI sends {}
+ * when no extra_data was supplied.
+ */
+function tupleExtraData(entry: unknown): Record<string, unknown> | null {
+    if (!Array.isArray(entry) || entry.length < 4) return null;
+    const extra = entry[3];
+    return extra && typeof extra === 'object' && !Array.isArray(extra)
+        ? (extra as Record<string, unknown>)
+        : null;
+}
+
+/** Extract a queue/history entry's prompt_id (index 1 of the prompt tuple). */
+function tuplePromptId(entry: unknown): string | null {
+    return Array.isArray(entry) && typeof entry[1] === 'string' && entry[1] ? entry[1] : null;
+}
+
+/**
+ * Match a recovered entry's extra_data against the dashboard ids. Every
+ * provided key must match exactly; at least one key must be provided so an
+ * empty match spec can never return an arbitrary prompt.
+ */
+function extraDataMatches(
+    extra: Record<string, unknown> | null,
+    match: PodPromptRecoveryMatch
+): boolean {
+    if (!extra) return false;
+    if (match.generationId !== undefined && extra.generation_id !== match.generationId) return false;
+    if (match.workflowId !== undefined && extra.workflow_id !== match.workflowId) return false;
+    return match.generationId !== undefined || match.workflowId !== undefined;
+}
+
 // ── Event routing (module-scope: shared by every socket generation) ────
+
+// The event types that end a prompt's life on the pod — the SAME set
+// deliverEvent uses to drain the queue registry. Centralized so the
+// buffered-flush cleanup below cannot drift from the live routing.
+const TERMINAL_EVENT_TYPES = new Set([
+    'execution_success',
+    'execution_interrupted',
+    'execution_error',
+    'prompt_error'
+]);
+
+function isTerminalEvent(type: string): boolean {
+    return TERMINAL_EVENT_TYPES.has(type);
+}
 
 /**
  * Deliver one event to its prompt_id's subscriber(s), or buffer it.
@@ -602,12 +891,7 @@ function deliverEvent(connection: PodSocketConnection, event: StreamEvent): void
             if (event.type === 'execution_start' && entry.status === 'queued') {
                 entry.status = 'running';
                 entry.startedAt = new Date().toISOString();
-            } else if (
-                event.type === 'execution_success' ||
-                event.type === 'execution_interrupted' ||
-                event.type === 'execution_error' ||
-                event.type === 'prompt_error'
-            ) {
+            } else if (isTerminalEvent(event.type)) {
                 // Terminal: the pod is done with this prompt — the queue
                 // drains (and the idle countdown may start).
                 connection.queue.delete(pid);

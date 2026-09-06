@@ -48,6 +48,7 @@ import {
 } from '../workflows/generation-store';
 import {
     getPodSocket,
+    recoverPodPromptId,
     releasePodSubmission,
     subscribePodPrompt,
     submitPodPrompt,
@@ -118,6 +119,16 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         promptPayload.number = body.number;
     }
 
+    // ── Server-side processing prerequisites ────────────────────────
+    // The storage root for the generation file must exist BEFORE the prompt
+    // goes out: validating only after a successful submission would leave
+    // the pod executing a prompt the server never tracks (a ghost job).
+    const serverSideProcessing = Boolean(body.workflow_id && body.generation_id);
+    const root = _variables?.root as string | undefined;
+    if (serverSideProcessing && !root) {
+        return { status: 500, response: { error: 'Server misconfigured: missing project root' } };
+    }
+
     // Forward Authorization if present (for authenticated pods)
     const incomingHeaders = request.req.header() as Record<string, string>;
     const authorization = incomingHeaders.authorization;
@@ -129,6 +140,23 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
         submission = await submitPodPrompt(connection, { promptPayload, authorization });
     } catch (err: any) {
         console.error(`[cloud/prompt] Error submitting to ${body.pod_url}:`, err.message);
+        // The HTTP submission failed (transport reset, tunnel hiccup,
+        // undici "fetch failed", unreadable ack) — but the pod may ALREADY
+        // be executing the prompt. Abandoning here orphans the run as a
+        // ghost the server never monitors, so server-side processing first
+        // probes the pod's queue/history for the prompt (matched by the
+        // extra_data ids) and resumes tracking when it is found.
+        if (serverSideProcessing) {
+            const recovered = await recoverSubmissionAfterAckLoss(
+                connection,
+                body.workflow_id as string,
+                body.generation_id as string,
+                root as string,
+                authorization,
+                err
+            );
+            if (recovered) return recovered;
+        }
         return {
             status: 502,
             response: { error: `Failed to reach pod: ${err.message}` },
@@ -138,8 +166,22 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     const { response: upstream, ack } = submission;
     if (!upstream.ok || !ack) {
         // Relay the pod's own native error response so the caller can expose
-        // ComfyUI's validation details without rewriting them.
+        // ComfyUI's validation details without rewriting them. The pod
+        // REJECTED the prompt — it will never execute — so in server-side
+        // processing mode the generation file is marked failed too: left
+        // untouched it would sit 'pending' forever (a ghost entry in the
+        // OUTPUT list).
         const errorBody = await upstream.json().catch(() => ({ error: `Pod returned HTTP ${upstream.status}` }));
+        if (serverSideProcessing) {
+            const message =
+                (errorBody as any)?.error ?? `Pod returned HTTP ${upstream.status}`;
+            await failGenerationSubmission(
+                root as string,
+                body.workflow_id as string,
+                body.generation_id as string,
+                message
+            );
+        }
         return {
             status: upstream.ok ? 502 : upstream.status,
             response: errorBody,
@@ -149,16 +191,17 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     // ── Mode 1: server-side processing ──────────────────────────────
     // The client submits and is done — the server owns the pod stream
     // events and the generation json from here on.
-    if (body.workflow_id && body.generation_id) {
-        const root = _variables?.root as string | undefined;
-        if (!root) {
-            return { status: 500, response: { error: 'Server misconfigured: missing project root' } };
-        }
-
+    if (serverSideProcessing) {
         // Fire-and-forget tracking: the subscriber folds every routed event
         // into the generation .log/json until the run reaches a terminal
         // state (or the pod socket dies — the registry emits prompt_error).
-        trackGenerationOnPod(root, body.workflow_id, body.generation_id, connection, ack);
+        trackGenerationOnPod(
+            root as string,
+            body.workflow_id as string,
+            body.generation_id as string,
+            connection,
+            ack
+        );
 
         return {
             status: 202,
@@ -191,6 +234,114 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
 });
 
 // ── Server-side background processing ───────────────────────────────
+
+/**
+ * Recover a submission whose POST /prompt ack was lost. The pod may already
+ * be executing the prompt (the failure happened after dispatch — proxy
+ * reset, tunnel hiccup, undici "fetch failed"), so the run must NOT be
+ * abandoned: it would execute unmonitored while the generation json sits
+ * 'pending' forever (the ghost-job failure mode).
+ *
+ * Probes the pod's /queue and /history for a prompt whose extra_data
+ * matches this workflow/generation pair (recoverPodPromptId):
+ *   - FOUND → resume tracking exactly as if the ack had arrived. The shared
+ *     socket's event buffer has been accumulating this prompt_id's events
+ *     during the ack loss, so the subscriber replays them at registration —
+ *     a run that already finished still finalizes (completion OR failure).
+ *   - NOT FOUND within the recovery window → the prompt never started (or
+ *     the pod is unreachable). The generation is marked failed so it shows
+ *     as a definitive failure instead of a pending ghost, and the pod's own
+ *     error is relayed (502).
+ *
+ * Returns the handler response for the recovered/given-up submission, or
+ * null when the caller should fall through to the plain 502 relay (no
+ * generation to recover — direct stream mode).
+ */
+async function recoverSubmissionAfterAckLoss(
+    connection: PodSocketConnection,
+    workflowId: string,
+    generationId: string,
+    root: string,
+    authorization: string | undefined,
+    submissionError: unknown
+): Promise<{ status: number; response: Record<string, unknown> } | null> {
+    const reason = submissionError instanceof Error ? submissionError.message : String(submissionError);
+
+    const promptId = await recoverPodPromptId(
+        connection,
+        { workflowId, generationId },
+        { authorization }
+    );
+
+    if (promptId) {
+        // The prompt lives on the pod — resume tracking. recoverPodPromptId
+        // held ONE pending count for the whole probe window and keeps it on
+        // success: trackGenerationOnPod's subscribe consumes it, the same
+        // ack → subscribe transfer a normal submission performs.
+        void appendGenerationLog(
+            root,
+            workflowId,
+            generationId,
+            `POST /prompt ack lost (${reason}) — prompt ${promptId} recovered from the ` +
+            'pod\'s queue/history; event tracking resumed'
+        );
+        trackGenerationOnPod(root, workflowId, generationId, connection, { prompt_id: promptId });
+        return {
+            status: 202,
+            response: {
+                accepted: true,
+                workflow_id: workflowId,
+                generation_id: generationId,
+                client_id: connection.clientId,
+                prompt_id: promptId
+            }
+        };
+    }
+
+    // Not on the pod — the submission never started. Fail the generation
+    // file explicitly (never a pending ghost) and relay the reason.
+    const message =
+        `Failed to reach pod: ${reason} — the prompt was not found on the ` +
+        'pod\'s queue/history, so it never started';
+    await failGenerationSubmission(root, workflowId, generationId, message);
+    return {
+        status: 502,
+        response: { error: message }
+    };
+}
+
+/**
+ * Mark a generation failed when its prompt never reached tracked execution —
+ * the pod rejected it (4xx/5xx relay), or the ack was lost and the pod holds
+ * no such prompt. Without this the entry would sit 'pending' forever: a
+ * ghost job the UI can neither complete nor retry from the log trail.
+ * Best-effort: a failed patch is logged, never thrown (the caller is mid-
+ * error-path already, and an escaping rejection here would crash the server
+ * as an unhandledRejection).
+ */
+async function failGenerationSubmission(
+    root: string,
+    workflowId: string,
+    generationId: string,
+    message: string
+): Promise<void> {
+    try {
+        await appendGenerationLog(root, workflowId, generationId, `Generation FAILED at submission: ${message}`);
+        await patchGenerationFile(root, workflowId, generationId, {
+            status: 'failed',
+            error: message,
+            result: [],
+            generatedTime: null,
+            completedDate: new Date().toISOString()
+        });
+        console.error(`[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed at submission: ${message}`);
+    } catch (err: any) {
+        console.error(
+            `[cloud/prompt] Failed to mark generation ${generationId} (workflow ${workflowId}) failed: ` +
+            `${err?.message ?? String(err)}`
+        );
+    }
+}
 
 /**
  * Consume one prompt's events off the pod's shared websocket, persist the
@@ -235,43 +386,61 @@ function trackGenerationOnPod(
      * Persist the final state — result payloads (base64 data: urls captured
      * from the stream) are first moved onto disk as plain asset files; the
      * json keeps only `file:` references to them (persistResultAssets).
+     *
+     * NEVER rejects: finalize runs fire-and-forget (void finalize(...)) —
+     * an escaping rejection would surface as an unhandledRejection and
+     * CRASH the whole dashboard server, deregistering every held pod and
+     * orphaning every in-flight generation into ghosts.
      */
     const finalize = async (failureMessage: string | null) => {
         if (finished) return;
         finished = true;
         unsubscribe();
 
-        const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
-        const completedDate = new Date().toISOString();
-        const persistedResults = await persistResultAssets(root, workflowId, generationId, results);
-        if (results.some((r, i) => r.url !== persistedResults[i].url)) {
-            log(`Persisted result payload(s) to asset files under generation/${generationId}/`);
-        }
-        if (failureMessage) {
-            await patchGenerationFile(root, workflowId, generationId, {
-                status: 'failed',
-                error: failureMessage,
-                result: persistedResults,
-                generatedTime: elapsed,
-                completedDate
-            });
-            log(`Generation FAILED in ${elapsed}: ${failureMessage} (${eventCount} event(s), ${results.length} result(s))`);
+        // Everything past this point is persistence — wrapped so no IO
+        // failure can ever reject this async function.
+        try {
+            const elapsed = `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+            const completedDate = new Date().toISOString();
+            const persistedResults = await persistResultAssets(root, workflowId, generationId, results);
+            if (results.some((r, i) => r.url !== persistedResults[i].url)) {
+                log(`Persisted result payload(s) to asset files under generation/${generationId}/`);
+            }
+            if (failureMessage) {
+                await patchGenerationFile(root, workflowId, generationId, {
+                    status: 'failed',
+                    error: failureMessage,
+                    result: persistedResults,
+                    generatedTime: elapsed,
+                    completedDate
+                });
+                log(`Generation FAILED in ${elapsed}: ${failureMessage} (${eventCount} event(s), ${results.length} result(s))`);
+                console.error(
+                    `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed ` +
+                    `in ${elapsed}: ${failureMessage}`
+                );
+            } else {
+                await patchGenerationFile(root, workflowId, generationId, {
+                    status: 'completed',
+                    error: null,
+                    result: persistedResults,
+                    generatedTime: elapsed,
+                    completedDate
+                });
+                log(`Generation COMPLETED in ${elapsed} — ${eventCount} event(s), ${results.length} result(s)`);
+                console.log(
+                    `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${connection.clientId}) completed ` +
+                    `in ${elapsed} — ${eventCount} stream event(s), ${results.length} result(s)`
+                );
+            }
+        } catch (err: any) {
+            // The run's outcome could not be persisted — trace it in the log
+            // trail and move on. The server stays alive; the entry keeps its
+            // last known state instead of the process dying over it.
+            const message = err?.message ?? String(err);
+            log(`Failed to persist final generation state: ${message}`);
             console.error(
-                `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) failed ` +
-                `in ${elapsed}: ${failureMessage}`
-            );
-        } else {
-            await patchGenerationFile(root, workflowId, generationId, {
-                status: 'completed',
-                error: null,
-                result: persistedResults,
-                generatedTime: elapsed,
-                completedDate
-            });
-            log(`Generation COMPLETED in ${elapsed} — ${eventCount} event(s), ${results.length} result(s)`);
-            console.log(
-                `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}, client ${connection.clientId}) completed ` +
-                `in ${elapsed} — ${eventCount} stream event(s), ${results.length} result(s)`
+                `[cloud/prompt] Generation ${generationId} (workflow ${workflowId}) finalization error: ${message}`
             );
         }
     };
@@ -291,6 +460,9 @@ function trackGenerationOnPod(
 
     // Mark the generation as picked up so pollers see live progress. If the
     // file is already gone, drop the subscriber — there is nothing to update.
+    // The .catch guard keeps a failed status flip from becoming an unhandled
+    // rejection (which would crash the server): the run's terminal event
+    // still finalizes the entry one way or the other.
     void patchGenerationFile(root, workflowId, generationId, { status: 'processing' }).then((patched) => {
         if (!patched && !finished) {
             log(`Generation '${generationId}' not found — aborting background processing`);
@@ -298,6 +470,8 @@ function trackGenerationOnPod(
             finished = true;
             unsubscribe();
         }
+    }).catch((err: any) => {
+        log(`Failed to mark generation as processing: ${err?.message ?? String(err)}`);
     });
 
     unsubscribe = subscribePodPrompt(connection, {

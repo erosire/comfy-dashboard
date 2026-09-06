@@ -92,9 +92,12 @@ import {
     POD_IDLE_TIMEOUT_DEFAULT_MS,
     POD_WS_CONNECT_RETRY_MS,
     POD_WS_HEARTBEAT_MS,
+    recoverPodPromptId,
     setPodConnectRetryMs,
     setPodConnectTimeoutMs,
     setPodIdleTimeoutMs,
+    setPodRecoveryProbeMs,
+    setPodRecoveryWindowMs,
     subscribePodPrompt,
     submitPodPrompt
 } from './pod-socket';
@@ -113,6 +116,48 @@ function context() {
 
 function parameters(body: Record<string, unknown>) {
     return { path: {}, query: {}, body } as any;
+}
+
+/**
+ * Poll a generation json until it reaches the expected status — the
+ * background finalizer (trackGenerationOnPod → finalize) persists through
+ * async IO chained via enqueueFileOp, so the flip lands a few turns later.
+ */
+async function pollGenerationStatus(
+    root: string,
+    workflowId: string,
+    generationId: string,
+    status: string
+): Promise<any> {
+    const deadline = Date.now() + 5000;
+    let entry = await readGenerationFile(root, workflowId, generationId);
+    while (entry?.status !== status && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        entry = await readGenerationFile(root, workflowId, generationId);
+    }
+    return entry;
+}
+
+/** Create a pending generation json on disk (the POST .../generate shape). */
+async function seedPendingGeneration(
+    root: string,
+    workflowId: string,
+    generationId: string,
+    prompt: Record<string, unknown> = { '3': { class_type: 'KSampler', inputs: {} } }
+): Promise<void> {
+    // writeGenerationFile does not create the folder (the real caller,
+    // POST .../generate, does) — build it first.
+    await fs.mkdir(path.join(root, 'comfy-workflows', workflowId, 'generation'), { recursive: true });
+    await writeGenerationFile(root, workflowId, generationId, {
+        id: generationId,
+        status: 'pending',
+        createdDate: '2026-08-05T10:00:00.000Z',
+        completedDate: null,
+        generatedTime: null,
+        error: null,
+        prompt,
+        result: []
+    });
 }
 
 /** Build a ComfyUI binary preview frame: 8-byte BE header + payload. */
@@ -552,6 +597,145 @@ describe('per-pod queue registry', () => {
         socket.emitMessage(JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-c' } }));
         await flushSocketDelivery();
         expect(listPodSockets()[0].queue).toEqual([]);
+    });
+});
+
+describe('ghost-job prevention (registry-level)', () => {
+    it('delivers a terminal prompt_error when subscribing to an already-terminated pod', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        testState.sockets[0].close();
+        await flushSocketDelivery();
+
+        // A prompt submitted just before the socket died reaches its
+        // subscribePodPrompt AFTER terminate() — the subscriber must not
+        // hang silently on a socket that can never deliver again.
+        const seen: any[] = [];
+        subscribePodPrompt(connection, { promptId: 'prompt-dead', onEvent: (e) => seen.push(e) });
+        await flushSocketDelivery();
+
+        expect(seen).toEqual([
+            { type: 'prompt_error', data: { error: expect.stringContaining('closed') } }
+        ]);
+    });
+
+    it('drains the queue entry when the run terminal was buffered before its subscriber registered', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        const socket = testState.sockets[0];
+        vi.mocked(fetch).mockResolvedValue(
+            new Response(JSON.stringify({ prompt_id: 'prompt-fast', number: 1, node_errors: {} }), {
+                status: 200,
+                headers: { 'content-type': 'application/json' }
+            })
+        );
+
+        // The ack stashes the submission meta; the run then finishes BEFORE
+        // the subscribe lands — deliverEvent's terminal bookkeeping no-ops
+        // (no queue entry yet) and the terminal event is buffered.
+        await submitPodPrompt(connection, { promptPayload: { prompt: {} } });
+        socket.emitMessage(JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-fast' } }));
+        await flushSocketDelivery();
+
+        subscribePodPrompt(connection, { promptId: 'prompt-fast', onEvent: () => undefined });
+        await flushSocketDelivery();
+
+        // The flushed terminal must drain the entry that subscribe created —
+        // a finished run must not pin the pod's queue (and idle countdown).
+        expect(listPodSockets()[0].queue).toEqual([]);
+        expect(listPodSockets()[0].prompts).toBe(0);
+    });
+});
+
+describe('recoverPodPromptId (ack-loss recovery probe)', () => {
+    it('finds a queued prompt by matching its extra_data ids', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        vi.mocked(fetch).mockImplementation(async (input: any) => {
+            const url = String(input);
+            if (url === `${POD_URL}/queue`) {
+                return new Response(
+                    JSON.stringify({
+                        queue_running: [
+                            // [number, prompt_id, prompt, extra_data, outputs_to_execute]
+                            [2, 'prompt-live', {}, { workflow_id: 'wf-9', generation_id: 'gen-9' }, null],
+                            [3, 'prompt-other', {}, { workflow_id: 'wf-9', generation_id: 'gen-x' }, null]
+                        ],
+                        queue_pending: []
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } }
+                );
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        await expect(
+            recoverPodPromptId(connection, { workflowId: 'wf-9', generationId: 'gen-9' })
+        ).resolves.toBe('prompt-live');
+    });
+
+    it('finds an already-finished prompt in /history when the run beat the probe', async () => {
+        const connection = await connectPodSocket(new URL(POD_URL));
+        vi.mocked(fetch).mockImplementation(async (input: any) => {
+            const url = String(input);
+            if (url === `${POD_URL}/queue`) {
+                return new Response(
+                    JSON.stringify({ queue_running: [], queue_pending: [] }),
+                    { status: 200, headers: { 'content-type': 'application/json' } }
+                );
+            }
+            if (url === `${POD_URL}/history?max_items=64`) {
+                return new Response(
+                    JSON.stringify({
+                        'prompt-done': {
+                            prompt: [1, 'prompt-done', {}, { workflow_id: 'wf-9', generation_id: 'gen-9' }, null],
+                            outputs: {},
+                            status: { completed: true }
+                        }
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } }
+                );
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        await expect(
+            recoverPodPromptId(connection, { generationId: 'gen-9' })
+        ).resolves.toBe('prompt-done');
+    });
+
+    it('returns null when no prompt matches inside the window', async () => {
+        const restoreWindow = setPodRecoveryWindowMs(40);
+        const restoreProbe = setPodRecoveryProbeMs(5);
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            vi.mocked(fetch).mockResolvedValue(
+                new Response(JSON.stringify({ queue_running: [], queue_pending: [] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' }
+                })
+            );
+
+            await expect(
+                recoverPodPromptId(connection, { generationId: 'gen-none' })
+            ).resolves.toBeNull();
+        } finally {
+            setPodRecoveryWindowMs(restoreWindow);
+            setPodRecoveryProbeMs(restoreProbe);
+        }
+    });
+
+    it('survives a pod that refuses every probe and still returns null', async () => {
+        const restoreWindow = setPodRecoveryWindowMs(30);
+        const restoreProbe = setPodRecoveryProbeMs(5);
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            vi.mocked(fetch).mockRejectedValue(new TypeError('fetch failed'));
+
+            await expect(
+                recoverPodPromptId(connection, { generationId: 'gen-none' })
+            ).resolves.toBeNull();
+        } finally {
+            setPodRecoveryWindowMs(restoreWindow);
+            setPodRecoveryProbeMs(restoreProbe);
+        }
     });
 });
 
@@ -1021,6 +1205,276 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
             });
             // No subscriber ever existed — the prompt count released.
             expect(listPodSockets()[0].prompts).toBe(0);
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('fails the generation instead of ghosting when the pod socket dies between submit and subscribe', async () => {
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pod-socket-'));
+        try {
+            const workflowId = 'wf-1';
+            const generationId = 'gen-dead';
+            await seedPendingGeneration(root, workflowId, generationId);
+
+            await connectPodSocket(new URL(POD_URL));
+            vi.mocked(fetch).mockImplementation(async () => {
+                // The tunnel drops the websocket WHILE the POST /prompt is in
+                // flight — the HTTP ack still arrives, so the handler proceeds
+                // to subscribe on the now-dead socket.
+                testState.sockets[0].close();
+                return new Response(JSON.stringify({ prompt_id: 'prompt-406', number: 1, node_errors: {} }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' }
+                });
+            });
+
+            const result = await cloudPrompt(context(), parameters({
+                pod_url: POD_URL,
+                prompt: { '3': { class_type: 'KSampler', inputs: {} } },
+                workflow_id: workflowId,
+                generation_id: generationId
+            }), { root });
+            expect(result.status).toBe(202);
+
+            // The registry's terminal must reach the late subscriber — the
+            // entry lands FAILED, never pending-forever (the ghost mode).
+            const entry = await pollGenerationStatus(root, workflowId, generationId, 'failed');
+            expect(entry).toMatchObject({
+                id: generationId,
+                status: 'failed',
+                error: expect.stringContaining('closed')
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('recovers an ack-lost prompt from the pod queue and tracks the run to completion', async () => {
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pod-socket-'));
+        try {
+            const workflowId = 'wf-1';
+            const generationId = 'gen-rec';
+            await seedPendingGeneration(root, workflowId, generationId);
+
+            await connectPodSocket(new URL(POD_URL));
+            vi.mocked(fetch).mockImplementation(async (input: any) => {
+                const url = String(input);
+                if (url === `${POD_URL}/prompt`) {
+                    // Transport dies after dispatch — the pod still queued and
+                    // runs the prompt, but the ack never reaches the server.
+                    throw new TypeError('fetch failed');
+                }
+                if (url === `${POD_URL}/queue`) {
+                    return new Response(
+                        JSON.stringify({
+                            queue_running: [
+                                [1, 'prompt-rec', {}, { workflow_id: 'wf-1', generation_id: 'gen-rec' }, null]
+                            ],
+                            queue_pending: []
+                        }),
+                        { status: 200, headers: { 'content-type': 'application/json' } }
+                    );
+                }
+                if (url === `${POD_URL}/history?max_items=64`) {
+                    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+                }
+                throw new Error(`Unexpected fetch: ${url}`);
+            });
+
+            const result = await cloudPrompt(context(), parameters({
+                pod_url: POD_URL,
+                prompt: { '3': { class_type: 'KSampler', inputs: {} } },
+                workflow_id: workflowId,
+                generation_id: generationId,
+                extra_data: { workflow_id: workflowId, generation_id: generationId }
+            }), { root });
+
+            // Recovered — accepted with the prompt_id found on the pod.
+            expect(result.status).toBe(202);
+            expect((result as any).response).toMatchObject({
+                accepted: true,
+                workflow_id: workflowId,
+                generation_id: generationId,
+                client_id: CLIENT_ID,
+                prompt_id: 'prompt-rec'
+            });
+
+            // While the run is live, the recovered prompt's queue entry
+            // carries the dashboard ids + the pod's queue number — the data
+            // GET /v1/comfy/cloud reports and the UI's settle-watch reads.
+            expect(listPodSockets()[0].queue).toEqual([
+                {
+                    prompt_id: 'prompt-rec',
+                    number: 1,
+                    status: 'queued',
+                    workflow_id: 'wf-1',
+                    generation_id: 'gen-rec',
+                    queuedAt: expect.any(String),
+                    startedAt: null
+                }
+            ]);
+
+            // The run finishes on the shared socket — the recovered
+            // subscriber folds it into the generation json.
+            testState.sockets[0].emitMessage(
+                JSON.stringify({ type: 'execution_success', data: { prompt_id: 'prompt-rec' } })
+            );
+            const entry = await pollGenerationStatus(root, workflowId, generationId, 'completed');
+            expect(entry).toMatchObject({ id: generationId, status: 'completed', error: null });
+
+            // The recovered run held exactly one queue slot; the terminal
+            // drained it (the probe held one pending count across the whole
+            // window and subscribe consumed it — the same transfer a normal
+            // ack performs).
+            expect(listPodSockets()[0].prompts).toBe(0);
+            expect(listPodSockets()[0].queue).toEqual([]);
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('a recovered prompt queues with the workflow/generation ids + queue number lifted from the pod tuple', async () => {
+        await connectPodSocket(new URL(POD_URL));
+        vi.mocked(fetch).mockImplementation(async (input: any) => {
+            const url = String(input);
+            if (url === `${POD_URL}/queue`) {
+                return new Response(
+                    JSON.stringify({
+                        queue_pending: [
+                            [9, 'prompt-meta', {}, { workflow_id: 'wf-1', generation_id: 'gen-meta' }, null]
+                        ],
+                        queue_running: []
+                    }),
+                    { status: 200, headers: { 'content-type': 'application/json' } }
+                );
+            }
+            throw new Error(`Unexpected fetch: ${url}`);
+        });
+
+        const promptId = await recoverPodPromptId(
+            getPodSocket(POD_URL)!,
+            { workflowId: 'wf-1', generationId: 'gen-meta' }
+        );
+        expect(promptId).toBe('prompt-meta');
+
+        // The probe holds one pending count on success — the pod is NOT
+        // idle-terminated while the recovered run awaits its subscriber.
+        expect(listPodSockets()[0].prompts).toBe(1);
+
+        // Subscribing consumes the hold and creates the queue entry with
+        // the SAME metadata a normal ack would have produced.
+        const unsubscribe = subscribePodPrompt(getPodSocket(POD_URL)!, {
+            promptId: 'prompt-meta',
+            onEvent: () => undefined
+        });
+        expect(listPodSockets()[0].prompts).toBe(1);
+        expect(listPodSockets()[0].queue).toEqual([
+            {
+                prompt_id: 'prompt-meta',
+                number: 9,
+                status: 'queued',
+                workflow_id: 'wf-1',
+                generation_id: 'gen-meta',
+                queuedAt: expect.any(String),
+                startedAt: null
+            }
+        ]);
+        unsubscribe();
+    });
+
+    it('a failed recovery releases the pending hold (the idle countdown resumes)', async () => {
+        const restoreWindow = setPodRecoveryWindowMs(40);
+        const restoreProbe = setPodRecoveryProbeMs(5);
+        try {
+            await connectPodSocket(new URL(POD_URL));
+            vi.mocked(fetch).mockResolvedValue(
+                new Response(JSON.stringify({ queue_running: [], queue_pending: [] }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' }
+                })
+            );
+
+            await expect(
+                recoverPodPromptId(getPodSocket(POD_URL)!, { generationId: 'gen-none' })
+            ).resolves.toBeNull();
+
+            // The hold is gone — GET /v1/comfy/cloud's count stays honest.
+            expect(listPodSockets()[0].prompts).toBe(0);
+        } finally {
+            setPodRecoveryWindowMs(restoreWindow);
+            setPodRecoveryProbeMs(restoreProbe);
+        }
+    });
+
+    it('fails the generation when the ack is lost AND the pod holds no such prompt (never a pending ghost)', async () => {
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pod-socket-'));
+        try {
+            const workflowId = 'wf-1';
+            const generationId = 'gen-lost';
+            await seedPendingGeneration(root, workflowId, generationId);
+
+            await connectPodSocket(new URL(POD_URL));
+            const restoreWindow = setPodRecoveryWindowMs(50);
+            const restoreProbe = setPodRecoveryProbeMs(5);
+            try {
+                // Everything fails — the submission never reached the pod.
+                vi.mocked(fetch).mockRejectedValue(new TypeError('fetch failed'));
+
+                const result = await cloudPrompt(context(), parameters({
+                    pod_url: POD_URL,
+                    prompt: { '3': { class_type: 'KSampler', inputs: {} } },
+                    workflow_id: workflowId,
+                    generation_id: generationId
+                }), { root });
+
+                expect(result.status).toBe(502);
+                expect(String((result as any).response.error)).toContain('never started');
+
+                // The entry is definitively FAILED — not a pending ghost.
+                const entry = await readGenerationFile(root, workflowId, generationId);
+                expect(entry).toMatchObject({
+                    status: 'failed',
+                    error: expect.stringContaining('fetch failed')
+                });
+            } finally {
+                setPodRecoveryWindowMs(restoreWindow);
+                setPodRecoveryProbeMs(restoreProbe);
+            }
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('marks the generation failed and relays the error when the pod rejects the prompt', async () => {
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pod-socket-'));
+        try {
+            const workflowId = 'wf-1';
+            const generationId = 'gen-rej';
+            await seedPendingGeneration(root, workflowId, generationId);
+
+            await connectPodSocket(new URL(POD_URL));
+            vi.mocked(fetch).mockResolvedValue(
+                new Response(JSON.stringify({ error: 'Prompt has no outputs' }), {
+                    status: 400,
+                    headers: { 'content-type': 'application/json' }
+                })
+            );
+
+            const result = await cloudPrompt(context(), parameters({
+                pod_url: POD_URL,
+                prompt: {},
+                workflow_id: workflowId,
+                generation_id: generationId
+            }), { root });
+
+            // The native pod error is relayed verbatim…
+            expect(result.status).toBe(400);
+            expect((result as any).response).toEqual({ error: 'Prompt has no outputs' });
+
+            // …and the generation file is failed, not left pending forever.
+            const entry = await readGenerationFile(root, workflowId, generationId);
+            expect(entry).toMatchObject({ status: 'failed', error: 'Prompt has no outputs' });
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }

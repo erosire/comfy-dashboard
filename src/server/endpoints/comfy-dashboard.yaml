@@ -1027,7 +1027,13 @@ paths:
           description: >-
             Pod not connected (unknown pod_url or its persistent websocket
             was terminated — spawn/adopt it via POST /v1/comfy/cloud first),
-            or the HTTP prompt submission to the pod failed.
+            or the HTTP prompt submission to the pod failed. In server-side
+            processing mode a failed submission never abandons the run:
+            the pod's queue/history are probed for the submitted prompt
+            (matched by extra_data workflow_id/generation_id) and tracking
+            resumes with a 202 when it is found; when the prompt is not
+            found the generation json is marked failed (with the transport
+            error) instead of staying pending forever.
           content:
             application/json:
               schema:

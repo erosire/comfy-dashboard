@@ -3,11 +3,16 @@
 // The pod registry (pod-socket.ts) is mocked so this test observes the exact
 // payload produced by the endpoint boundary WITHOUT opening a websocket or
 // contacting a pod: registry gating, UI-prepared prompt forwarding, the 202
-// accepted response, and the direct stream's envelope.
+// accepted response, the direct stream's envelope, and the ack-loss
+// recovery / ghost-proofing paths (the generation json is real on disk in a
+// temp root so the failed-at-submission writes are observable).
 
 // @vitest-environment node
 
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Keep the registry calls observable while leaving prompt compilation in
 // the real cloud-prompt handler under test.
@@ -15,13 +20,24 @@ const registry = vi.hoisted(() => ({
     getPodSocket: vi.fn(),
     submitPodPrompt: vi.fn(),
     subscribePodPrompt: vi.fn(),
-    releasePodSubmission: vi.fn()
+    releasePodSubmission: vi.fn(),
+    // Ack-loss recovery surface — exercised only when submitPodPrompt
+    // throws; the happy paths below never touch it.
+    recoverPodPromptId: vi.fn()
 }));
 
 // The registry is mocked so loading the handler never opens a real websocket.
 vi.mock('./pod-socket', () => registry);
 
 import { cloudPrompt } from './cloud-prompt';
+import { readGenerationFile, writeGenerationFile } from '../workflows/generation-store';
+
+// The registry mocks are module-level — clear their call history before
+// every test so "never called" assertions stay meaningful. (Implementations
+// are re-set inside each test.)
+beforeEach(() => {
+    vi.clearAllMocks();
+});
 
 // Use the parameter shape supplied by the service adapter, matching the other
 // endpoint tests in this directory.
@@ -157,5 +173,139 @@ describe('cloudPrompt UI-prepared prompt forwarding', () => {
             { type: 'execution_success', data: { prompt_id: 'prompt-9' } },
             { type: 'prompt_done', data: {} }
         ]);
+    });
+});
+
+// Seed a real pending generation json so the failed-at-submission ghost
+// proofing (failGenerationSubmission) is observable on disk.
+async function seedPendingGeneration(workflowId: string, generationId: string): Promise<string> {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cloud-prompt-'));
+    await fs.mkdir(path.join(root, 'comfy-workflows', workflowId, 'generation'), { recursive: true });
+    await writeGenerationFile(root, workflowId, generationId, {
+        id: generationId,
+        status: 'pending',
+        createdDate: '2026-08-05T10:00:00.000Z',
+        completedDate: null,
+        generatedTime: null,
+        error: null,
+        prompt: apiPrompt,
+        result: []
+    });
+    return root;
+}
+
+describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
+    it('resumes tracking a recovered prompt and answers 202 with its id', async () => {
+        registry.getPodSocket.mockReturnValue(connection);
+        // undici's "fetch failed" — the ack never made it back.
+        registry.submitPodPrompt.mockRejectedValue(new TypeError('fetch failed'));
+        // The pod DID accept the prompt — the probe finds it on /queue.
+        registry.recoverPodPromptId.mockResolvedValue('prompt-rec');
+        registry.subscribePodPrompt.mockReturnValue(() => undefined);
+
+        const result = await cloudPrompt(context(), parameters({
+            pod_url: 'https://pod.example',
+            prompt: apiPrompt,
+            workflow_id: 'workflow-1',
+            generation_id: 'generation-1'
+        }), { root: '/tmp/anywhere' });
+
+        // Accepted — the run is monitored again, NOT a 502 ghost.
+        expect(result.status).toBe(202);
+        expect(result.response).toEqual({
+            accepted: true,
+            workflow_id: 'workflow-1',
+            generation_id: 'generation-1',
+            client_id: 'podsharedclientid00000000000000',
+            prompt_id: 'prompt-rec'
+        });
+        // The probe matched by the dashboard ids carried in extra_data.
+        expect(registry.recoverPodPromptId.mock.calls).toEqual([[
+            connection,
+            { workflowId: 'workflow-1', generationId: 'generation-1' },
+            { authorization: undefined }
+        ]]);
+        // Tracking rides the shared socket by the RECOVERED prompt_id.
+        expect(registry.subscribePodPrompt.mock.calls).toEqual([[
+            connection,
+            { promptId: 'prompt-rec', onEvent: expect.any(Function) }
+        ]]);
+    });
+
+    it('fails the generation json and relays 502 when the pod holds no such prompt', async () => {
+        const root = await seedPendingGeneration('wf-1', 'gen-lost');
+        try {
+            registry.getPodSocket.mockReturnValue(connection);
+            registry.submitPodPrompt.mockRejectedValue(new TypeError('fetch failed'));
+            // The prompt never started — the window expired without a match.
+            registry.recoverPodPromptId.mockResolvedValue(null);
+
+            const result = await cloudPrompt(context(), parameters({
+                pod_url: 'https://pod.example',
+                prompt: apiPrompt,
+                workflow_id: 'wf-1',
+                generation_id: 'gen-lost'
+            }), { root });
+
+            expect(result.status).toBe(502);
+            expect(String((result.response as any).error)).toContain('never started');
+
+            // The entry is definitively FAILED — never a pending ghost.
+            const entry = await readGenerationFile(root, 'wf-1', 'gen-lost');
+            expect(entry).toMatchObject({
+                status: 'failed',
+                error: expect.stringContaining('fetch failed'),
+                result: []
+            });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it('never probes (and never patches) in direct stream mode — there is no generation to recover', async () => {
+        registry.getPodSocket.mockReturnValue(connection);
+        registry.submitPodPrompt.mockRejectedValue(new TypeError('fetch failed'));
+
+        const result = await cloudPrompt(context(), parameters({
+            pod_url: 'https://pod.example',
+            prompt: apiPrompt
+        }), {});
+
+        expect(result.status).toBe(502);
+        expect((result.response as any).error).toBe('Failed to reach pod: fetch failed');
+        expect(registry.recoverPodPromptId).not.toHaveBeenCalled();
+        expect(registry.subscribePodPrompt).not.toHaveBeenCalled();
+    });
+
+    it('marks the generation failed when the pod REJECTS the prompt (validation error relay)', async () => {
+        const root = await seedPendingGeneration('wf-1', 'gen-rej');
+        try {
+            registry.getPodSocket.mockReturnValue(connection);
+            // The pod answered — a definitive rejection, no ack. No recovery
+            // is possible (a rejected prompt never reaches queue/history).
+            registry.submitPodPrompt.mockResolvedValue({
+                response: new Response(JSON.stringify({ error: 'Prompt has no outputs' }), {
+                    status: 400,
+                    headers: { 'content-type': 'application/json' }
+                }),
+                ack: null
+            });
+
+            const result = await cloudPrompt(context(), parameters({
+                pod_url: 'https://pod.example',
+                prompt: apiPrompt,
+                workflow_id: 'wf-1',
+                generation_id: 'gen-rej'
+            }), { root });
+
+            // The native pod error is relayed verbatim…
+            expect(result.status).toBe(400);
+            expect((result.response as any).error).toBe('Prompt has no outputs');
+            // …and the generation file is failed, not left pending forever.
+            const entry = await readGenerationFile(root, 'wf-1', 'gen-rej');
+            expect(entry).toMatchObject({ status: 'failed', error: 'Prompt has no outputs' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
     });
 });
