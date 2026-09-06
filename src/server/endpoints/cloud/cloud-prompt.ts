@@ -16,6 +16,12 @@
 //    processing/completed/failed, results, timing — the same file the
 //    workflow generation API writes). Clients poll
 //    GET /v1/comfy/workflows/:id/generate for progress.
+//    The submission itself is RELIABLE: while the pod's websocket stays
+//    alive, a failed / lost-ack POST /prompt is re-attempted (each retry
+//    preceded by a queue/history probe so a dispatched prompt is recovered
+//    by its prompt_id instead of double-queued) until the pod accepts, dies,
+//    or the retry budget expires — a prompt the pod never accepted fails the
+//    generation explicitly instead of ghosting.
 //
 // 2) Direct stream mode — no workflow reference.
 //    The same shared socket's events (this prompt's prompt_id plus
@@ -48,10 +54,10 @@ import {
 } from '../workflows/generation-store';
 import {
     getPodSocket,
-    recoverPodPromptId,
     releasePodSubmission,
-    subscribePodPrompt,
     submitPodPrompt,
+    submitPodPromptReliably,
+    subscribePodPrompt,
     type PodPromptAck,
     type PodSocketConnection
 } from './pod-socket';
@@ -135,32 +141,76 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
 
     // Submit over HTTP ONLY — the pod's persistent websocket (and its
     // client_id pairing) delivers every execution event for this prompt.
-    let submission: { response: Response; ack: PodPromptAck | null };
-    try {
-        submission = await submitPodPrompt(connection, { promptPayload, authorization });
-    } catch (err: any) {
-        console.error(`[cloud/prompt] Error submitting to ${body.pod_url}:`, err.message);
-        // The HTTP submission failed (transport reset, tunnel hiccup,
-        // undici "fetch failed", unreadable ack) — but the pod may ALREADY
-        // be executing the prompt. Abandoning here orphans the run as a
-        // ghost the server never monitors, so server-side processing first
-        // probes the pod's queue/history for the prompt (matched by the
-        // extra_data ids) and resumes tracking when it is found.
-        if (serverSideProcessing) {
-            const recovered = await recoverSubmissionAfterAckLoss(
-                connection,
+    //
+    // Server-side processing wraps the submission in a bounded retry loop
+    // (submitPodPromptReliably): as long as the pod's websocket is alive, a
+    // failed / lost-ack submission is re-attempted, and every retry is
+    // preceded by a queue/history probe so a prompt that WAS dispatched is
+    // recovered by its prompt_id instead of being double-queued. The loop
+    // ends when the pod accepts, definitively rejects (4xx), dies, or the
+    // retry budget expires — the generation is failed explicitly in the
+    // last two cases, so it can never sit 'pending' as a ghost.
+    let submission: { response: Response; ack: PodPromptAck | null } | null = null;
+    if (serverSideProcessing) {
+        const outcome = await submitPodPromptReliably(
+            connection,
+            {
+                promptPayload,
+                authorization,
+                match: {
+                    workflowId: body.workflow_id as string,
+                    generationId: body.generation_id as string
+                }
+            },
+            // Every attempt failure / recovery is traced into the
+            // generation's .log trail (best-effort, fire-and-forget).
+            (message) =>
+                void appendGenerationLog(
+                    root as string,
+                    body.workflow_id as string,
+                    body.generation_id as string,
+                    message
+                )
+        );
+        if (outcome.kind === 'accepted') {
+            // Synthesize the ok response the relay path below would have
+            // seen from the pod — the caller only reads `ack` from here on.
+            submission = { response: new Response('{}', { status: 200 }), ack: outcome.ack };
+            if (outcome.recovered) {
+                console.warn(
+                    `[cloud/prompt] Generation ${body.generation_id}: lost POST /prompt ack recovered — ` +
+                    `prompt ${String(outcome.ack.prompt_id)} found on the pod's queue/history`
+                );
+            }
+        } else if (outcome.kind === 'rejected') {
+            submission = { response: outcome.response, ack: null };
+        } else {
+            await failGenerationSubmission(
+                root as string,
                 body.workflow_id as string,
                 body.generation_id as string,
-                root as string,
-                authorization,
-                err
+                outcome.message
             );
-            if (recovered) return recovered;
+            console.error(
+                `[cloud/prompt] Generation ${body.generation_id} (workflow ${body.workflow_id}) ` +
+                `submission abandoned: ${outcome.message}`
+            );
+            return {
+                status: 502,
+                response: { error: outcome.message }
+            };
         }
-        return {
-            status: 502,
-            response: { error: `Failed to reach pod: ${err.message}` },
-        };
+    } else {
+        // Direct stream mode — a single attempt, no generation to protect.
+        try {
+            submission = await submitPodPrompt(connection, { promptPayload, authorization });
+        } catch (err: any) {
+            console.error(`[cloud/prompt] Error submitting to ${body.pod_url}:`, err.message);
+            return {
+                status: 502,
+                response: { error: `Failed to reach pod: ${err.message}` },
+            };
+        }
     }
 
     const { response: upstream, ack } = submission;
@@ -236,85 +286,11 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
 // ── Server-side background processing ───────────────────────────────
 
 /**
- * Recover a submission whose POST /prompt ack was lost. The pod may already
- * be executing the prompt (the failure happened after dispatch — proxy
- * reset, tunnel hiccup, undici "fetch failed"), so the run must NOT be
- * abandoned: it would execute unmonitored while the generation json sits
- * 'pending' forever (the ghost-job failure mode).
- *
- * Probes the pod's /queue and /history for a prompt whose extra_data
- * matches this workflow/generation pair (recoverPodPromptId):
- *   - FOUND → resume tracking exactly as if the ack had arrived. The shared
- *     socket's event buffer has been accumulating this prompt_id's events
- *     during the ack loss, so the subscriber replays them at registration —
- *     a run that already finished still finalizes (completion OR failure).
- *   - NOT FOUND within the recovery window → the prompt never started (or
- *     the pod is unreachable). The generation is marked failed so it shows
- *     as a definitive failure instead of a pending ghost, and the pod's own
- *     error is relayed (502).
- *
- * Returns the handler response for the recovered/given-up submission, or
- * null when the caller should fall through to the plain 502 relay (no
- * generation to recover — direct stream mode).
- */
-async function recoverSubmissionAfterAckLoss(
-    connection: PodSocketConnection,
-    workflowId: string,
-    generationId: string,
-    root: string,
-    authorization: string | undefined,
-    submissionError: unknown
-): Promise<{ status: number; response: Record<string, unknown> } | null> {
-    const reason = submissionError instanceof Error ? submissionError.message : String(submissionError);
-
-    const promptId = await recoverPodPromptId(
-        connection,
-        { workflowId, generationId },
-        { authorization }
-    );
-
-    if (promptId) {
-        // The prompt lives on the pod — resume tracking. recoverPodPromptId
-        // held ONE pending count for the whole probe window and keeps it on
-        // success: trackGenerationOnPod's subscribe consumes it, the same
-        // ack → subscribe transfer a normal submission performs.
-        void appendGenerationLog(
-            root,
-            workflowId,
-            generationId,
-            `POST /prompt ack lost (${reason}) — prompt ${promptId} recovered from the ` +
-            'pod\'s queue/history; event tracking resumed'
-        );
-        trackGenerationOnPod(root, workflowId, generationId, connection, { prompt_id: promptId });
-        return {
-            status: 202,
-            response: {
-                accepted: true,
-                workflow_id: workflowId,
-                generation_id: generationId,
-                client_id: connection.clientId,
-                prompt_id: promptId
-            }
-        };
-    }
-
-    // Not on the pod — the submission never started. Fail the generation
-    // file explicitly (never a pending ghost) and relay the reason.
-    const message =
-        `Failed to reach pod: ${reason} — the prompt was not found on the ` +
-        'pod\'s queue/history, so it never started';
-    await failGenerationSubmission(root, workflowId, generationId, message);
-    return {
-        status: 502,
-        response: { error: message }
-    };
-}
-
-/**
  * Mark a generation failed when its prompt never reached tracked execution —
- * the pod rejected it (4xx/5xx relay), or the ack was lost and the pod holds
- * no such prompt. Without this the entry would sit 'pending' forever: a
- * ghost job the UI can neither complete nor retry from the log trail.
+ * the pod rejected it (4xx/5xx relay), or the retry budget expired (or the
+ * pod became unreachable) without the pod ever accepting the prompt. Without
+ * this the entry would sit 'pending' forever: a ghost job the UI can neither
+ * complete nor retry from the log trail.
  * Best-effort: a failed patch is logged, never thrown (the caller is mid-
  * error-path already, and an escaping rejection here would crash the server
  * as an unhandledRejection).

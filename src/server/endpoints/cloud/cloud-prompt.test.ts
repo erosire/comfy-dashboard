@@ -19,11 +19,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const registry = vi.hoisted(() => ({
     getPodSocket: vi.fn(),
     submitPodPrompt: vi.fn(),
+    // Reliable-submission surface — server-side processing ALWAYS rides
+    // this (first attempt + bounded retries + queue probes); direct stream
+    // mode keeps the single submitPodPrompt attempt.
+    submitPodPromptReliably: vi.fn(),
     subscribePodPrompt: vi.fn(),
-    releasePodSubmission: vi.fn(),
-    // Ack-loss recovery surface — exercised only when submitPodPrompt
-    // throws; the happy paths below never touch it.
-    recoverPodPromptId: vi.fn()
+    releasePodSubmission: vi.fn()
 }));
 
 // The registry is mocked so loading the handler never opens a real websocket.
@@ -87,11 +88,12 @@ describe('cloudPrompt registry gating', () => {
 });
 
 describe('cloudPrompt UI-prepared prompt forwarding', () => {
-    it('submits server-side processing on the pod connection and returns the shared client_id + prompt_id', async () => {
+    it('submits server-side processing through the reliable submission loop and returns the shared client_id + prompt_id', async () => {
         registry.getPodSocket.mockReturnValue(connection);
-        registry.submitPodPrompt.mockResolvedValue({
-            response: new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
-            ack: { prompt_id: 'prompt-1', number: 1, node_errors: {} }
+        registry.submitPodPromptReliably.mockResolvedValue({
+            kind: 'accepted',
+            ack: { prompt_id: 'prompt-1', number: 1, node_errors: {} },
+            recovered: false
         });
         registry.subscribePodPrompt.mockReturnValue(() => undefined);
 
@@ -112,12 +114,16 @@ describe('cloudPrompt UI-prepared prompt forwarding', () => {
             client_id: 'podsharedclientid00000000000000',
             prompt_id: 'prompt-1'
         });
-        expect(registry.submitPodPrompt.mock.calls).toEqual([[
+        // Server-side mode rides the retry loop, keyed by the dashboard ids
+        // (the pod's extra_data echo) and observed through the .log callback.
+        expect(registry.submitPodPromptReliably.mock.calls).toEqual([[
             connection,
             {
                 promptPayload: { prompt: apiPrompt },
-                authorization: undefined
-            }
+                authorization: undefined,
+                match: { workflowId: 'workflow-1', generationId: 'generation-1' }
+            },
+            expect.any(Function)
         ]]);
         // The generation processor rides the shared socket by prompt_id.
         expect(registry.subscribePodPrompt.mock.calls).toEqual([[
@@ -194,13 +200,16 @@ async function seedPendingGeneration(workflowId: string, generationId: string): 
     return root;
 }
 
-describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
+describe('cloudPrompt reliable submission (server-side mode)', () => {
     it('resumes tracking a recovered prompt and answers 202 with its id', async () => {
         registry.getPodSocket.mockReturnValue(connection);
-        // undici's "fetch failed" — the ack never made it back.
-        registry.submitPodPrompt.mockRejectedValue(new TypeError('fetch failed'));
-        // The pod DID accept the prompt — the probe finds it on /queue.
-        registry.recoverPodPromptId.mockResolvedValue('prompt-rec');
+        // The submission's transport failed, but the probe found the prompt
+        // on the pod — the loop reports it as a RECOVERED acceptance.
+        registry.submitPodPromptReliably.mockResolvedValue({
+            kind: 'accepted',
+            ack: { prompt_id: 'prompt-rec' },
+            recovered: true
+        });
         registry.subscribePodPrompt.mockReturnValue(() => undefined);
 
         const result = await cloudPrompt(context(), parameters({
@@ -219,12 +228,6 @@ describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
             client_id: 'podsharedclientid00000000000000',
             prompt_id: 'prompt-rec'
         });
-        // The probe matched by the dashboard ids carried in extra_data.
-        expect(registry.recoverPodPromptId.mock.calls).toEqual([[
-            connection,
-            { workflowId: 'workflow-1', generationId: 'generation-1' },
-            { authorization: undefined }
-        ]]);
         // Tracking rides the shared socket by the RECOVERED prompt_id.
         expect(registry.subscribePodPrompt.mock.calls).toEqual([[
             connection,
@@ -232,13 +235,19 @@ describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
         ]]);
     });
 
-    it('fails the generation json and relays 502 when the pod holds no such prompt', async () => {
+    it('fails the generation json and relays 502 when the retry budget expires without acceptance', async () => {
         const root = await seedPendingGeneration('wf-1', 'gen-lost');
         try {
             registry.getPodSocket.mockReturnValue(connection);
-            registry.submitPodPrompt.mockRejectedValue(new TypeError('fetch failed'));
-            // The prompt never started — the window expired without a match.
-            registry.recoverPodPromptId.mockResolvedValue(null);
+            // Every retry failed and the pod never showed the prompt — the
+            // loop gave up within its budget.
+            registry.submitPodPromptReliably.mockResolvedValue({
+                kind: 'gave-up',
+                attempts: 3,
+                message:
+                    'The prompt was never accepted by the pod after 3 submission attempt(s) ' +
+                    '(last error: fetch failed)'
+            });
 
             const result = await cloudPrompt(context(), parameters({
                 pod_url: 'https://pod.example',
@@ -248,7 +257,7 @@ describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
             }), { root });
 
             expect(result.status).toBe(502);
-            expect(String((result.response as any).error)).toContain('never started');
+            expect(String((result.response as any).error)).toContain('never accepted');
 
             // The entry is definitively FAILED — never a pending ghost.
             const entry = await readGenerationFile(root, 'wf-1', 'gen-lost');
@@ -262,7 +271,7 @@ describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
         }
     });
 
-    it('never probes (and never patches) in direct stream mode — there is no generation to recover', async () => {
+    it('keeps direct stream mode on a single attempt — no retry loop, no generation to protect', async () => {
         registry.getPodSocket.mockReturnValue(connection);
         registry.submitPodPrompt.mockRejectedValue(new TypeError('fetch failed'));
 
@@ -273,7 +282,7 @@ describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
 
         expect(result.status).toBe(502);
         expect((result.response as any).error).toBe('Failed to reach pod: fetch failed');
-        expect(registry.recoverPodPromptId).not.toHaveBeenCalled();
+        expect(registry.submitPodPromptReliably).not.toHaveBeenCalled();
         expect(registry.subscribePodPrompt).not.toHaveBeenCalled();
     });
 
@@ -281,14 +290,14 @@ describe('cloudPrompt ack-loss recovery (server-side mode)', () => {
         const root = await seedPendingGeneration('wf-1', 'gen-rej');
         try {
             registry.getPodSocket.mockReturnValue(connection);
-            // The pod answered — a definitive rejection, no ack. No recovery
-            // is possible (a rejected prompt never reaches queue/history).
-            registry.submitPodPrompt.mockResolvedValue({
+            // The pod answered — a definitive 4xx rejection, no ack. The
+            // loop surfaces it verbatim; retrying can never fix validation.
+            registry.submitPodPromptReliably.mockResolvedValue({
+                kind: 'rejected',
                 response: new Response(JSON.stringify({ error: 'Prompt has no outputs' }), {
                     status: 400,
                     headers: { 'content-type': 'application/json' }
-                }),
-                ack: null
+                })
             });
 
             const result = await cloudPrompt(context(), parameters({

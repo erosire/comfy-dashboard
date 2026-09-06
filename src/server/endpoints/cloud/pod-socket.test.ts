@@ -96,10 +96,13 @@ import {
     setPodConnectRetryMs,
     setPodConnectTimeoutMs,
     setPodIdleTimeoutMs,
+    setPodPromptSubmitRetryPauseMs,
+    setPodPromptSubmitRetryWindowMs,
     setPodRecoveryProbeMs,
     setPodRecoveryWindowMs,
-    subscribePodPrompt,
-    submitPodPrompt
+    submitPodPrompt,
+    submitPodPromptReliably,
+    subscribePodPrompt
 } from './pod-socket';
 import { readGenerationFile, writeGenerationFile } from '../workflows/generation-store';
 
@@ -735,6 +738,256 @@ describe('recoverPodPromptId (ack-loss recovery probe)', () => {
         } finally {
             setPodRecoveryWindowMs(restoreWindow);
             setPodRecoveryProbeMs(restoreProbe);
+        }
+    });
+});
+
+describe('submitPodPromptReliably (bounded submission retry while the pod is reachable)', () => {
+    // The retry cycle is submit → probe (recovery window) → pause; shrink
+    // all three so several cycles fit into a few real milliseconds.
+    function shrinkTimings(): () => void {
+        const restoreRetryWindow = setPodPromptSubmitRetryWindowMs(200);
+        const restoreRetryPause = setPodPromptSubmitRetryPauseMs(5);
+        const restoreRecWindow = setPodRecoveryWindowMs(20);
+        const restoreRecProbe = setPodRecoveryProbeMs(5);
+        return () => {
+            setPodPromptSubmitRetryWindowMs(restoreRetryWindow);
+            setPodPromptSubmitRetryPauseMs(restoreRetryPause);
+            setPodRecoveryWindowMs(restoreRecWindow);
+            setPodRecoveryProbeMs(restoreRecProbe);
+        };
+    }
+
+    it('re-submits while the pod stays reachable until the prompt is accepted', async () => {
+        const restore = shrinkTimings();
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            let postCalls = 0;
+            vi.mocked(fetch).mockImplementation(async (input: any) => {
+                const url = String(input);
+                if (url === `${POD_URL}/prompt`) {
+                    postCalls += 1;
+                    // Two tunnel failures, then the pod finally answers.
+                    if (postCalls < 3) throw new TypeError('fetch failed');
+                    return new Response(JSON.stringify({ prompt_id: 'prompt-ok', number: 2, node_errors: {} }), {
+                        status: 200,
+                        headers: { 'content-type': 'application/json' }
+                    });
+                }
+                // Probes between retries: nothing on the pod.
+                if (url === `${POD_URL}/queue`) {
+                    return new Response(JSON.stringify({ queue_running: [], queue_pending: [] }), {
+                        status: 200,
+                        headers: { 'content-type': 'application/json' }
+                    });
+                }
+                if (url === `${POD_URL}/history?max_items=64`) {
+                    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+                }
+                throw new Error(`Unexpected fetch: ${url}`);
+            });
+
+            const outcome = await submitPodPromptReliably(connection, {
+                promptPayload: { prompt: {} },
+                match: { workflowId: 'wf-1', generationId: 'gen-1' }
+            });
+
+            // The third submission attempt was accepted — no give-up.
+            expect(outcome).toEqual({
+                kind: 'accepted',
+                ack: { prompt_id: 'prompt-ok', number: 2, node_errors: {} },
+                recovered: false
+            });
+            expect(postCalls).toBe(3);
+        } finally {
+            restore();
+        }
+    });
+
+    it('recovers a dispatched prompt from the queue instead of double-queueing it', async () => {
+        const restore = shrinkTimings();
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            let postCalls = 0;
+            vi.mocked(fetch).mockImplementation(async (input: any) => {
+                const url = String(input);
+                if (url === `${POD_URL}/prompt`) {
+                    postCalls += 1;
+                    throw new TypeError('fetch failed');
+                }
+                if (url === `${POD_URL}/queue`) {
+                    // The "failed" attempt actually dispatched — the prompt
+                    // is live on the pod.
+                    return new Response(
+                        JSON.stringify({
+                            queue_running: [
+                                [4, 'prompt-live', {}, { workflow_id: 'wf-1', generation_id: 'gen-1' }, null]
+                            ],
+                            queue_pending: []
+                        }),
+                        { status: 200, headers: { 'content-type': 'application/json' } }
+                    );
+                }
+                throw new Error(`Unexpected fetch: ${url}`);
+            });
+
+            const outcome = await submitPodPromptReliably(connection, {
+                promptPayload: { prompt: {} },
+                match: { workflowId: 'wf-1', generationId: 'gen-1' }
+            });
+
+            // Recovered by prompt_id — the submission was NEVER repeated
+            // (a blind re-submit would run the same job twice on the pod).
+            expect(outcome).toEqual({ kind: 'accepted', ack: { prompt_id: 'prompt-live' }, recovered: true });
+            expect(postCalls).toBe(1);
+        } finally {
+            restore();
+        }
+    });
+
+    it('never re-submits a definitive 4xx rejection', async () => {
+        const restore = shrinkTimings();
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            const probedUrls: string[] = [];
+            vi.mocked(fetch).mockImplementation(async (input: any) => {
+                const url = String(input);
+                if (url === `${POD_URL}/prompt`) {
+                    return new Response(JSON.stringify({ error: 'Prompt has no outputs' }), {
+                        status: 400,
+                        headers: { 'content-type': 'application/json' }
+                    });
+                }
+                probedUrls.push(url);
+                throw new Error(`Unexpected fetch: ${url}`);
+            });
+
+            const outcome = await submitPodPromptReliably(connection, {
+                promptPayload: { prompt: {} },
+                match: { workflowId: 'wf-1', generationId: 'gen-1' }
+            });
+
+            // Validation errors can never be queued — relay, no probe, no retry.
+            expect(outcome.kind).toBe('rejected');
+            const response = (outcome as { response: Response }).response;
+            expect(response.status).toBe(400);
+            await expect(response.json()).resolves.toEqual({ error: 'Prompt has no outputs' });
+            expect(probedUrls).toEqual([]);
+        } finally {
+            restore();
+        }
+    });
+
+    it('gives up once the retry budget expires and releases the pending hold', async () => {
+        // A shorter budget than shrinkTimings' 200 ms — the exhaustion path
+        // must terminate the loop, not ride it out.
+        const restoreRetryWindow = setPodPromptSubmitRetryWindowMs(60);
+        const restoreRetryPause = setPodPromptSubmitRetryPauseMs(5);
+        const restoreRecWindow = setPodRecoveryWindowMs(15);
+        const restoreRecProbe = setPodRecoveryProbeMs(5);
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            let postCalls = 0;
+            vi.mocked(fetch).mockImplementation(async () => {
+                postCalls += 1;
+                throw new TypeError('fetch failed');
+            });
+
+            const outcome = await submitPodPromptReliably(connection, {
+                promptPayload: { prompt: {} },
+                match: { workflowId: 'wf-1', generationId: 'gen-1' }
+            });
+
+            expect(outcome.kind).toBe('gave-up');
+            const message = (outcome as { message: string }).message;
+            expect(message).toContain('never accepted');
+            expect(message).toContain('fetch failed');
+            // The budget bought more than one attempt (the retry mechanic
+            // is wall-clock — the exact count depends on probe timing).
+            expect(postCalls).toBeGreaterThanOrEqual(2);
+            // Every failed attempt released its hold — GET /v1/comfy/cloud's
+            // count stays honest for the idle countdown.
+            expect(listPodSockets()[0].prompts).toBe(0);
+        } finally {
+            setPodPromptSubmitRetryWindowMs(restoreRetryWindow);
+            setPodPromptSubmitRetryPauseMs(restoreRetryPause);
+            setPodRecoveryWindowMs(restoreRecWindow);
+            setPodRecoveryProbeMs(restoreRecProbe);
+        }
+    });
+
+    it('stops immediately when the pod dies mid-retry — a dead pod is unreachable forever', async () => {
+        const restore = shrinkTimings();
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            let postCalls = 0;
+            vi.mocked(fetch).mockImplementation(async (input: any) => {
+                const url = String(input);
+                if (url === `${POD_URL}/prompt`) {
+                    postCalls += 1;
+                    throw new TypeError('fetch failed');
+                }
+                // The pod dies during the first recovery probe — its
+                // websocket close is the terminal "unreachable" verdict.
+                testState.sockets[0].close();
+                throw new TypeError('fetch failed');
+            });
+
+            const outcome = await submitPodPromptReliably(connection, {
+                promptPayload: { prompt: {} },
+                match: { workflowId: 'wf-1', generationId: 'gen-1' }
+            });
+
+            // Exactly one submission was attempted — the closed socket ends
+            // the loop with the precise reason instead of burning the budget.
+            expect(postCalls).toBe(1);
+            expect(outcome.kind).toBe('gave-up');
+            expect((outcome as { message: string }).message).toContain('unreachable');
+            // The pod's death deregistered it — the registry holds nothing.
+            expect(listPodSockets()).toEqual([]);
+        } finally {
+            restore();
+        }
+    });
+
+    it('reports every failed attempt through the onAttempt callback (.log trail)', async () => {
+        const restore = shrinkTimings();
+        try {
+            const connection = await connectPodSocket(new URL(POD_URL));
+            let postCalls = 0;
+            vi.mocked(fetch).mockImplementation(async (input: any) => {
+                const url = String(input);
+                if (url === `${POD_URL}/prompt`) {
+                    postCalls += 1;
+                    if (postCalls < 2) throw new TypeError('fetch failed');
+                    return new Response(JSON.stringify({ prompt_id: 'prompt-ok', number: 1, node_errors: {} }), {
+                        status: 200,
+                        headers: { 'content-type': 'application/json' }
+                    });
+                }
+                if (url === `${POD_URL}/queue`) {
+                    return new Response(JSON.stringify({ queue_running: [], queue_pending: [] }), {
+                        status: 200,
+                        headers: { 'content-type': 'application/json' }
+                    });
+                }
+                throw new Error(`Unexpected fetch: ${url}`);
+            });
+
+            const lines: string[] = [];
+            const outcome = await submitPodPromptReliably(
+                connection,
+                { promptPayload: { prompt: {} }, match: { workflowId: 'wf-1', generationId: 'gen-1' } },
+                (message) => lines.push(message)
+            );
+
+            expect(outcome.kind).toBe('accepted');
+            expect(lines).toEqual([
+                'Submission attempt 1 failed (fetch failed) — probing the pod\'s queue/history before re-submitting',
+                'Submission attempt 2 accepted by the pod (prompt_id: prompt-ok)'
+            ]);
+        } finally {
+            restore();
         }
     });
 });
@@ -1407,7 +1660,7 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
         }
     });
 
-    it('fails the generation when the ack is lost AND the pod holds no such prompt (never a pending ghost)', async () => {
+    it('fails the generation when every retry is exhausted without the pod accepting (never a pending ghost)', async () => {
         const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pod-socket-'));
         try {
             const workflowId = 'wf-1';
@@ -1415,8 +1668,13 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
             await seedPendingGeneration(root, workflowId, generationId);
 
             await connectPodSocket(new URL(POD_URL));
-            const restoreWindow = setPodRecoveryWindowMs(50);
+            // Shrink BOTH windows: the recovery probe (between retries) and
+            // the overall submission retry budget — the default 30 s budget
+            // is a production value; the test must exhaust it quickly.
+            const restoreWindow = setPodRecoveryWindowMs(15);
             const restoreProbe = setPodRecoveryProbeMs(5);
+            const restoreRetryWindow = setPodPromptSubmitRetryWindowMs(60);
+            const restoreRetryPause = setPodPromptSubmitRetryPauseMs(5);
             try {
                 // Everything fails — the submission never reached the pod.
                 vi.mocked(fetch).mockRejectedValue(new TypeError('fetch failed'));
@@ -1429,7 +1687,7 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
                 }), { root });
 
                 expect(result.status).toBe(502);
-                expect(String((result as any).response.error)).toContain('never started');
+                expect(String((result as any).response.error)).toContain('never accepted');
 
                 // The entry is definitively FAILED — not a pending ghost.
                 const entry = await readGenerationFile(root, workflowId, generationId);
@@ -1440,6 +1698,8 @@ describe('POST /v1/comfy/cloud/prompt — shared-socket transport', () => {
             } finally {
                 setPodRecoveryWindowMs(restoreWindow);
                 setPodRecoveryProbeMs(restoreProbe);
+                setPodPromptSubmitRetryWindowMs(restoreRetryWindow);
+                setPodPromptSubmitRetryPauseMs(restoreRetryPause);
             }
         } finally {
             await fs.rm(root, { recursive: true, force: true });

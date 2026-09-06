@@ -43,6 +43,18 @@
 // fails with prompt_error and the only way back is a fresh pod via
 // POST /v1/comfy/cloud.
 //
+// ── Reliable submission ────────────────────────────────────────────────
+// The HTTP leg to the pod is far less reliable than the websocket: cloud
+// tunnels intermittently drop POST /prompt (never arriving, or arriving and
+// losing its ack). submitPodPromptReliably wraps the submission in a
+// bounded retry: while the pod's websocket is ALIVE, a submission the pod
+// did not confirm is re-attempted — every retry preceded by a
+// queue/history probe (recoverPodPromptId) so a prompt that WAS dispatched
+// is recovered by its prompt_id instead of being double-queued. The loop
+// ends on acceptance, a definitive 4xx rejection, pod death, or budget
+// expiry; the caller fails the generation explicitly in the last two
+// cases, so nothing ever ghosts.
+//
 // ComfyUI routes a prompt's execution messages to the websocket whose
 // clientId submitted it (server.py send_sync sid), so every POST /prompt
 // goes out with the pod-level clientId and ALL of a pod's events arrive on
@@ -182,6 +194,45 @@ export function setPodRecoveryProbeMs(ms: number): number {
 export function setPodRecoveryProbeTimeoutMs(ms: number): number {
     const previous = podRecoveryProbeTimeoutMs;
     podRecoveryProbeTimeoutMs = ms;
+    return previous;
+}
+
+/**
+ * How long submitPodPromptReliably keeps re-attempting a prompt submission
+ * while the pod stays reachable. The user-facing contract: as long as the
+ * pod's websocket is alive, a prompt that the pod did not accept (tunnel
+ * blip, unreachable HTTP endpoint, lost ack with nothing on the pod) is
+ * re-submitted until the pod's queue/history confirms it — or this budget
+ * expires and the generation is failed explicitly. The window bounds the
+ * caller's HTTP wait (the dashboard request stays open for all of it), so
+ * 30 s trades a handful of retry cycles against how long a dead pod makes
+ * the UI wait for its 502.
+ */
+export const POD_PROMPT_SUBMIT_RETRY_WINDOW_MS = 30_000;
+
+/**
+ * Pause between submission retry cycles. The cycle is submit → probe
+ * (queue/history) → pause; the pause keeps a fully-down tunnel from being
+ * hammered and gives transient network partitions time to heal.
+ */
+export const POD_PROMPT_SUBMIT_RETRY_PAUSE_MS = 2_000;
+
+// Runtime-overridable copies (tests / operator tuning) — same pattern as
+// the recovery knobs above.
+let podPromptSubmitRetryWindowMs = POD_PROMPT_SUBMIT_RETRY_WINDOW_MS;
+let podPromptSubmitRetryPauseMs = POD_PROMPT_SUBMIT_RETRY_PAUSE_MS;
+
+/** Override the submission retry budget. Returns the previous value. */
+export function setPodPromptSubmitRetryWindowMs(ms: number): number {
+    const previous = podPromptSubmitRetryWindowMs;
+    podPromptSubmitRetryWindowMs = ms;
+    return previous;
+}
+
+/** Override the pause between submission retries. Returns the previous value. */
+export function setPodPromptSubmitRetryPauseMs(ms: number): number {
+    const previous = podPromptSubmitRetryPauseMs;
+    podPromptSubmitRetryPauseMs = ms;
     return previous;
 }
 
@@ -856,6 +907,149 @@ function extraDataMatches(
     if (match.generationId !== undefined && extra.generation_id !== match.generationId) return false;
     if (match.workflowId !== undefined && extra.workflow_id !== match.workflowId) return false;
     return match.generationId !== undefined || match.workflowId !== undefined;
+}
+
+// ── Reliable submission (bounded retry while the pod is reachable) ──────
+
+/** How submitPodPromptReliably ended — drives the endpoint's response. */
+export type PodPromptSubmitOutcome =
+    /** The pod accepted the prompt (fresh ack, or recovered by prompt_id). */
+    | { kind: 'accepted'; ack: PodPromptAck; /** true when the ack was lost but the prompt was found on the pod. */ recovered: boolean }
+    /** The pod definitively REJECTED the prompt (HTTP 4xx) — retrying can never fix a validation error. */
+    | { kind: 'rejected'; response: Response }
+    /**
+     * The retry budget expired (or the pod became unreachable) without the
+     * prompt ever being accepted — the caller must fail the generation
+     * explicitly so it can never sit 'pending' as a ghost.
+     */
+    | { kind: 'gave-up'; message: string; attempts: number };
+
+/**
+ * Submit a prompt to a pod with a bounded retry loop: AS LONG AS the pod's
+ * persistent websocket is alive, a submission that the pod did not confirm
+ * is re-attempted until the pod's queue/history shows the prompt.
+ *
+ * Why this exists: cloud tunnels (Modal/Beam) intermittently drop the HTTP
+ * leg — the POST /prompt may never arrive, or arrive and lose its ack. A
+ * single attempt + single recovery probe gave up too early: the user saw
+ * "the prompt is not in the queue" errors while the pod sat idle and
+ * reachable.
+ *
+ * The cycle, per iteration:
+ *   1. POST /prompt (bound to the shared socket's client_id).
+ *      - 200 + ack            → accepted, done.
+ *      - HTTP 4xx             → definitive ComfyUI rejection (validation) —
+ *        the prompt can never be queued; return 'rejected' for the caller
+ *        to relay. NO probe, NO retry.
+ *      - HTTP 5xx / transport throw → retryable; continue.
+ *   2. Probe the pod's /queue + /history for THIS generation's extra_data
+ *      (recoverPodPromptId) BEFORE re-submitting. A dispatched-but-unacked
+ *      prompt is recovered by its prompt_id — the ONLY safe continuation,
+ *      because a blind re-submit would run the same job twice on the pod.
+ *   3. Pause, then loop — until the pod accepts, dies (a closed socket is
+ *      terminal: pods never reconnect), or the retry budget expires.
+ *
+ * Pending-count accounting stays exactly submitPodPrompt's: a thrown
+ * submission releases its count, recoverPodPromptId holds one across its
+ * window (kept on success for the caller's subscribe, released when the
+ * prompt is not found), and a 4xx rejection releases — so after a 'gave-up'
+ * or 'rejected' outcome the pod's in-flight count is back to zero.
+ *
+ * onAttempt (optional) receives one human-readable line per submission
+ * failure/recovery — the endpoint folds these into the generation .log.
+ */
+export async function submitPodPromptReliably(
+    connection: PodSocketConnection,
+    options: {
+        promptPayload: Record<string, unknown>;
+        authorization?: string;
+        /** The dashboard ids the pod's extra_data echoes — the recovery key. */
+        match: { workflowId: string; generationId: string };
+    },
+    onAttempt?: (message: string) => void
+): Promise<PodPromptSubmitOutcome> {
+    const deadline = Date.now() + podPromptSubmitRetryWindowMs;
+    let attempts = 0;
+    let lastError = 'unknown error';
+
+    while (true) {
+        // A terminated pod is terminal (pods are designed to die and never
+        // reconnect — see terminate/handleSocketDeath). Retrying or probing
+        // a dead socket can never succeed; fail fast with a precise reason.
+        if (connection.closed) {
+            return {
+                kind: 'gave-up',
+                attempts,
+                message:
+                    `Pod websocket for ${connection.key} is closed — the pod is unreachable. ` +
+                    `The prompt was never accepted after ${attempts} submission attempt(s) (last error: ${lastError})`
+            };
+        }
+        // The retry budget only bounds RETRIES — the first submission always
+        // runs (attempts === 0 on the first iteration).
+        if (attempts > 0 && Date.now() >= deadline) {
+            return {
+                kind: 'gave-up',
+                attempts,
+                message:
+                    `The prompt was never accepted by the pod after ${attempts} submission attempt(s) ` +
+                    `(last error: ${lastError})`
+            };
+        }
+
+        attempts += 1;
+        try {
+            const { response, ack } = await submitPodPrompt(connection, {
+                promptPayload: options.promptPayload,
+                authorization: options.authorization
+            });
+            if (response.ok && ack) {
+                // First-attempt acceptance is the quiet happy path — only a
+                // LATE acceptance (after retries) is worth a .log line.
+                if (attempts > 1) {
+                    onAttempt?.(`Submission attempt ${attempts} accepted by the pod (prompt_id: ${String(ack.prompt_id)})`);
+                }
+                return { kind: 'accepted', ack, recovered: false };
+            }
+            if (response.status < 500) {
+                // Definitive ComfyUI rejection (validation) — relay verbatim.
+                return { kind: 'rejected', response };
+            }
+            // 5xx — indistinguishable between a ComfyUI hiccup and a
+            // tunnel/gateway failure; retryable.
+            lastError = `pod returned HTTP ${response.status}`;
+        } catch (err: any) {
+            // Transport failure after (possibly) dispatching — the ack may
+            // be lost, so the probe below decides.
+            lastError = err?.message ?? String(err);
+        }
+        onAttempt?.(
+            `Submission attempt ${attempts} failed (${lastError}) — probing the pod's queue/history before re-submitting`
+        );
+
+        // Probe BEFORE re-submitting: if the failed attempt actually
+        // dispatched, the prompt is already on the pod — resuming it by
+        // prompt_id is the only safe continuation. On success this hold
+        // stays (the caller's subscribe consumes it); on no-match it is
+        // released again (see recoverPodPromptId).
+        const promptId = await recoverPodPromptId(
+            connection,
+            options.match,
+            { authorization: options.authorization }
+        );
+        if (promptId) {
+            onAttempt?.(
+                `Submission attempt ${attempts} lost its ack — prompt ${promptId} found on the pod's ` +
+                'queue/history; tracking resumed'
+            );
+            return { kind: 'accepted', ack: { prompt_id: promptId }, recovered: true };
+        }
+        // No prompt on the pod, budget/pod-liveness re-checked at loop top —
+        // one bounded pause keeps a down tunnel from being hammered.
+        if (!connection.closed && Date.now() < deadline) {
+            await scriptPause(Math.min(podPromptSubmitRetryPauseMs, deadline - Date.now()));
+        }
+    }
 }
 
 // ── Event routing (module-scope: shared by every socket generation) ────
