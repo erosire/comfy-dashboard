@@ -4,7 +4,7 @@
 // body used by the runtime endpoint. No real server is contacted.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '@config/environment';
+import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '../../config';
 import {
     addPreferenceVariables,
     fetchPreferenceVariables,

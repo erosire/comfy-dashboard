@@ -16,7 +16,6 @@
     "author": "NQQT",
     "license": "ISC",
     "dependencies": {
-        "@config/environment": "*",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "@presource/core": "*",

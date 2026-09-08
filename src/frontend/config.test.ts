@@ -6,7 +6,7 @@
 // localhost domain instead of crossing to the LAN IP).
 
 import { describe, expect, it } from 'vitest';
-import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '@config/environment';
+import { LOCAL_AREA_NETWORK_HOST_NAME, LOCAL_AREA_NETWORK_DATABASE_PORT } from '../config';
 import { GENERATION_STATUS_POLL_INTERVAL_MS, GPU_LIST_POLL_INTERVAL_MS, resolveDefaultBaseUrl } from './config';
 
 describe('frontend polling configuration', () => {
