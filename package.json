@@ -1,6 +1,6 @@
 {
     "name": "@erosire/comfy-dashboard",
-    "version": "0.1.0",
+    "version": "1.0.2",
     "description": "ComfyUI Workflow Dashboard",
     "type": "module",
     "main": "src/frontend/main.tsx",
