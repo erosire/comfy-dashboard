@@ -180,6 +180,74 @@ describe('cloudPrompt UI-prepared prompt forwarding', () => {
             { type: 'prompt_done', data: {} }
         ]);
     });
+
+    it('folds chunked server_client_data_chunk frames back into one legacy server_client_data line on the direct stream', async () => {
+        registry.getPodSocket.mockReturnValue(connection);
+        registry.submitPodPrompt.mockResolvedValue({
+            response: new Response('{}', { status: 200 }),
+            ack: { prompt_id: 'prompt-9', node_errors: {} }
+        });
+        let subscriber: { promptId: string; onEvent: (event: any) => void } | null = null;
+        registry.subscribePodPrompt.mockImplementation((_conn: any, sub: any) => {
+            subscriber = sub;
+            return () => undefined;
+        });
+
+        const result = await cloudPrompt(context(), parameters({
+            pod_url: 'https://pod.example',
+            prompt: apiPrompt
+        }), {});
+        expect(result.status).toBe(200);
+
+        const readAll = (async () => {
+            const reader = (result as any).raw.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+            }
+            return buffer;
+        })();
+        await Promise.resolve();
+
+        // One file as two chunk frames — 'hello' = 'aGVs' + 'bG8=' (each
+        // chunk decodable on its own, per streaming.py's 3-byte slice rule).
+        subscriber!.onEvent({
+            type: 'server_client_data_chunk',
+            data: {
+                transfer_id: 't1', filename: 'clip.mp4', format: 'mp4',
+                chunk_index: 0, total_chunks: 2, data: 'aGVs', prompt_id: 'prompt-9'
+            }
+        });
+        subscriber!.onEvent({
+            type: 'server_client_data_chunk',
+            data: {
+                transfer_id: 't1', filename: 'clip.mp4', format: 'mp4',
+                chunk_index: 1, total_chunks: 2, data: 'bG8=', prompt_id: 'prompt-9'
+            }
+        });
+        // The chunk protocol ends only via the run's terminal.
+        subscriber!.onEvent({ type: 'execution_success', data: { prompt_id: 'prompt-9' } });
+
+        const buffer = await readAll;
+        const lines = buffer.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+
+        // NATIVE direct-stream contract: NO raw chunk frames reach the
+        // consumer — the assembled file arrives as the legacy event shape
+        // (one complete files list) exactly once, between queue ack and
+        // terminal.
+        expect(lines).toEqual([
+            { type: 'prompt_queued', data: { prompt_id: 'prompt-9', number: null, node_errors: {} } },
+            {
+                type: 'server_client_data',
+                data: { files: [{ filename: 'clip.mp4', data: 'aGVsbG8=', format: 'mp4' }] }
+            },
+            { type: 'execution_success', data: { prompt_id: 'prompt-9' } },
+            { type: 'prompt_done', data: {} }
+        ]);
+    });
 });
 
 // Seed a real pending generation json so the failed-at-submission ghost
@@ -313,6 +381,103 @@ describe('cloudPrompt reliable submission (server-side mode)', () => {
             // …and the generation file is failed, not left pending forever.
             const entry = await readGenerationFile(root, 'wf-1', 'gen-rej');
             expect(entry).toMatchObject({ status: 'failed', error: 'Prompt has no outputs' });
+        } finally {
+            await fs.rm(root, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('cloudPrompt chunked transfer capture (server-side mode)', () => {
+    it('captures an assembled chunked file as a generation result once the last chunk frame arrives', async () => {
+        const root = await seedPendingGeneration('wf-1', 'gen-chunk');
+        try {
+            registry.getPodSocket.mockReturnValue(connection);
+            registry.submitPodPromptReliably.mockResolvedValue({
+                kind: 'accepted',
+                ack: { prompt_id: 'prompt-1', node_errors: {} },
+                recovered: false
+            });
+            let subscriber: { promptId: string; onEvent: (event: any) => void } | null = null;
+            registry.subscribePodPrompt.mockImplementation((_conn: any, sub: any) => {
+                subscriber = sub;
+                return () => undefined;
+            });
+
+            const result = await cloudPrompt(context(), parameters({
+                pod_url: 'https://pod.example',
+                prompt: apiPrompt,
+                workflow_id: 'wf-1',
+                generation_id: 'gen-chunk'
+            }), { root });
+            expect(result.status).toBe(202);
+
+            // Stream one mp4 as two chunk frames ('hello' = 'aGVs' + 'bG8=').
+            // The capture only hits results on the FINAL frame.
+            subscriber!.onEvent({
+                type: 'server_client_data_chunk',
+                data: {
+                    transfer_id: 't1', filename: 'clip.mp4', format: 'mp4',
+                    chunk_index: 0, total_chunks: 2, data: 'aGVs', prompt_id: 'prompt-1'
+                }
+            });
+            subscriber!.onEvent({
+                type: 'server_client_data_chunk',
+                data: {
+                    transfer_id: 't1', filename: 'clip.mp4', format: 'mp4',
+                    chunk_index: 1, total_chunks: 2, data: 'bG8=', prompt_id: 'prompt-1'
+                }
+            });
+            // Unviewable-bookkeeping interleave: a SECOND transfer's frames
+            // share the socket concurrently and must never touch t1's slots.
+            subscriber!.onEvent({
+                type: 'server_client_data_chunk',
+                data: {
+                    transfer_id: 't2', filename: 'other.webm', format: 'webm',
+                    chunk_index: 0, total_chunks: 2, data: 'aGVs', prompt_id: 'prompt-1'
+                }
+            });
+            // Then the run completes — finalize() persists the single t1 file.
+            subscriber!.onEvent({ type: 'execution_success', data: { prompt_id: 'prompt-1' } });
+
+            // Finalize is fire-and-forget async — poll until the json flips.
+            await vi.waitFor(async () => {
+                const entry = await readGenerationFile(root, 'wf-1', 'gen-chunk');
+                expect(entry.status).toBe('completed');
+                // The chunked capture produced ONE result — the assembled
+                // t1 file, persisted to an asset file like any other capture.
+                // (t2 never completed — no result, no error, no capture.)
+                expect(entry.result).toEqual([
+                    {
+                        type: 'video',
+                        url: 'file:0.mp4',
+                        mimeType: 'video/mp4',
+                        size: 5, // decoded 'hello'
+                        nodeId: '' // the chunk protocol carries no node id
+                    }
+                ]);
+            });
+
+            // The assembled file's bytes are on disk — validity of the
+            // reassembly, not just a reference. Assets live directly in the
+            // generation folder (generationAssetsDirPath is that folder —
+            // '0.mp4' beside the .json/.log, no extra subfolder).
+            const asset = await fs.readFile(
+                path.join(root, 'comfy-workflows', 'wf-1', 'generation', 'gen-chunk', '0.mp4')
+            );
+            expect(asset.toString('utf8')).toBe('hello');
+
+            // The .log trail traces chunk progress per frame and the
+            // completed capture (frames summarized, payload NEVER dumped).
+            // Log layout: generation/<generateId>.log (a sibling of the json).
+            const log = await fs.readFile(
+                path.join(root, 'comfy-workflows', 'wf-1', 'generation', 'gen-chunk.log'),
+                'utf8'
+            );
+            expect(log).toContain('server_client_data_chunk transfer_id=t1 filename=clip.mp4');
+            expect(log).toContain('data=<4 chars>');
+            expect(log).toContain(`Captured server_client_data file 'clip.mp4' (assembled from 2 chunk frames) (video/mp4, 5 bytes)`);
+            // NOT the raw base64 — the payload stays out of the log trail.
+            expect(log).not.toContain('aGVs');
         } finally {
             await fs.rm(root, { recursive: true, force: true });
         }

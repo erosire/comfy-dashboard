@@ -44,7 +44,15 @@
 
 import { asHandlerMethod } from '@underload/service';
 import { workflowToApiPrompt } from '@underload/comfy';
-import { extractServerClientDataResults } from '../../../frontend/features/workflow/components/utils/stream-results';
+import {
+    CLIENT_DATA_CHUNK_EVENT,
+    createChunkAssembler,
+    extractServerClientDataChunk,
+    extractServerClientDataResults,
+    streamResultFromClientDataFile,
+    type ClientDataChunkAssembler,
+    type ExtractedStreamFile
+} from '../../../frontend/features/workflow/components/utils/stream-results';
 import {
     appendGenerationLog,
     patchGenerationFile,
@@ -320,6 +328,38 @@ async function failGenerationSubmission(
 }
 
 /**
+ * Feed one stream event through the chunk assembler and return the files it
+ * just COMPLETED (usually [], occasionally the one assembled file) in the
+ * legacy capture shape, so the caller's result/log handling stays identical
+ * across the legacy and chunked protocols.
+ */
+type CapturedChunkedFile = ExtractedStreamFile & { frames: number };
+
+function captureChunkedClientDataFiles(
+    assembler: ClientDataChunkAssembler,
+    event: StreamEvent
+): CapturedChunkedFile[] {
+    // Only chunk frames participate; any other event type is a no-op.
+    const frame = extractServerClientDataChunk(event);
+    if (!frame) return [];
+
+    const captured: CapturedChunkedFile[] = [];
+    for (const file of assembler.push(frame)) {
+        // Convert through the SAME single-file converter the legacy path
+        // uses — identical MIME resolution + viewable-media filter. The
+        // chunk protocol carries no node id, so nodeId degrades to ''.
+        const result = streamResultFromClientDataFile({
+            filename: file.filename,
+            data: file.data,
+            format: file.format
+        });
+        if (!result) continue;
+        captured.push({ filename: file.filename, result, frames: file.totalChunks });
+    }
+    return captured;
+}
+
+/**
  * Consume one prompt's events off the pod's shared websocket, persist the
  * outcome (status, results, timing, error) into the generation json file,
  * and trace every event into the sibling .log file (one log per prompt_id —
@@ -341,6 +381,11 @@ function trackGenerationOnPod(
 ): void {
     const startedAt = Date.now();
     const results: GenerationResultItem[] = [];
+    // Reassembler for chunked CloudClient transfers — one per generation, so
+    // transfer_id slots can never leak between concurrent runs sharing the
+    // pod's socket. Never finished under it are swept by the assembler's
+    // stale window (a pod socket dying mid-video releases its buffers).
+    const assembler = createChunkAssembler();
     let eventCount = 0;
     let finished = false;
     let unsubscribe: () => void = () => undefined;
@@ -467,13 +512,29 @@ function trackGenerationOnPod(
                 log(`Captured preview image from node ${preview.nodeId} (${preview.mimeType}, ${preview.size} bytes)`);
             }
 
-            // Capture server_client_data file payloads — the ComfyUI-CloudClient
-            // save nodes (ClientImageSaveNode / ClientVideoSaveNode) ship their
-            // PNG/GIF/MP4/WEBM output over the stream as base64 files.
+            // Legacy single-frame shape — CloudClient pack's FileCompressor is
+            // its only remaining emitter.
             for (const file of extractServerClientDataResults(event)) {
                 results.push(file.result);
                 log(
                     `Captured server_client_data file '${file.filename || '(unnamed)'}' ` +
+                        `(${file.result.mimeType}, ${file.result.size} bytes)`
+                );
+            }
+
+            // Chunked shape — the save nodes (ClientImageSaveNode /
+            // ClientVideoSaveNode) stream one file as many
+            // server_client_data_chunk frames (see
+            // repository/ComfyUI-CloudClient/utils/streaming.py). Frames are
+            // keyed by transfer_id so concurrent transfers on the shared pod
+            // socket cannot mix; the capture only lands once a transfer's
+            // LAST chunk arrives, and non-viewable payloads (zip …) are
+            // skipped exactly like the legacy path.
+            for (const file of captureChunkedClientDataFiles(assembler, event)) {
+                results.push(file.result);
+                log(
+                    `Captured server_client_data file '${file.filename || '(unnamed)'}' ` +
+                        `(assembled from ${file.frames} chunk frames) ` +
                         `(${file.result.mimeType}, ${file.result.size} bytes)`
                 );
             }
@@ -508,6 +569,13 @@ function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck)
     const encoder = new TextEncoder();
     let streamFinished = false;
     let unsubscribe: () => void = () => undefined;
+    // Chunked `server_client_data_chunk` frames are folded back into the
+    // legacy complete-file `server_client_data` event shape before they hit
+    // the wire — direct-stream consumers (NDJSON readers) predate the chunk
+    // protocol and expect one complete { files: [...] } line per file, not
+    // chunked bookkeeping frames. One assembler per stream (per HTTP
+    // request): transfer slots are per-consumer and cannot cross streams.
+    const assembler = createChunkAssembler();
 
     return new ReadableStream<Uint8Array>({
         start(controller) {
@@ -519,6 +587,38 @@ function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck)
                     streamFinished = true;
                     unsubscribe();
                 }
+            };
+
+            /**
+             * Route one subscribed event to the wire. Chunk frames are
+             * reassembled and re-emitted as legacy-shaped events (an NDJSON
+             * consumer can then only see complete files, never partial
+             * transfers); malformed/unknown-origin chunk frames are DROPPED
+             * rather than forwarded — they never assemble into anything
+             * complete and would only leak protocol internals downstream.
+             */
+            const forward = (event: StreamEvent) => {
+                if (event.type === CLIENT_DATA_CHUNK_EVENT) {
+                    const frame = extractServerClientDataChunk(event);
+                    if (!frame) return; // malformed — cannot assemble, cannot forward
+                    for (const file of assembler.push(frame)) {
+                        // Emit in the exact legacy shape
+                        // (stream-results.ts extractor reads this back).
+                        push({
+                            type: 'server_client_data',
+                            data: {
+                                files: [{
+                                    filename: file.filename,
+                                    data: file.data,
+                                    format: file.format
+                                }]
+                            }
+                        });
+                    }
+                    return;
+                }
+                // Everything else is forwarded verbatim (terminals included).
+                push(event);
             };
 
             const finishStream = (terminal?: StreamEvent) => {
@@ -580,7 +680,10 @@ function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck)
             unsubscribe = subscribePodPrompt(connection, {
                 promptId: typeof ack.prompt_id === 'string' ? ack.prompt_id : '',
                 onEvent: (event) => {
-                    push(event);
+                    // Route first (chunk frames may become legacy-shaped
+                    // server_client_data events, everything else passes
+                    // through verbatim) — then handle terminals.
+                    forward(event);
                     if (event.type === 'execution_error' || event.type === 'prompt_error') {
                         // prompt_error covers the registry's socket-death
                         // terminal — no final writes are possible after it.
@@ -607,14 +710,22 @@ function buildPodEventStream(connection: PodSocketConnection, ack: PodPromptAck)
  *
  * Large payloads are reduced to a length placeholder so the log stays
  * readable and small — notably the base64 `image` data URL carried by
- * `imagepreview.update` events and the base64 file payloads carried by
- * `server_client_data` events, which can be megabytes per line.
+ * `imagepreview.update` events, the base64 file payloads carried by
+ * `server_client_data` events, and the per-frame base64 `data` payload of
+ * `server_client_data_chunk` frames — all of which can be megabytes per
+ * event (the chunk protocol just splits those megabytes across frames).
  */
 function summarizeEventData(data: Record<string, unknown>): string {
     const parts: string[] = [];
     for (const [key, val] of Object.entries(data)) {
         if (key === 'image' && typeof val === 'string') {
             // base64 data URL — never dump the payload, just its size
+            parts.push(`${key}=<${val.length} chars>`);
+        } else if (key === 'data' && typeof val === 'string') {
+            // `server_client_data_chunk` frame payload — raw base64 (one
+            // slice of a much larger file). Same treatment as `image`.
+            // (Legacy `server_client_data` entries carry their payload
+            // under `files`, handled below.)
             parts.push(`${key}=<${val.length} chars>`);
         } else if (key === 'files' && Array.isArray(val)) {
             // server_client_data payloads — name + base64 size per file,
