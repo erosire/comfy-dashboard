@@ -32,16 +32,28 @@
 // starts at connect (a freshly spawned pod that never receives work is
 // released too). Independent of the unreachable-pod termination below.
 //
-// ── Transport death ────────────────────────────────────────────────────
-// Cloud pods are DESIGNED to terminate when idle and can never restart
-// without the create-pod endpoint — so a dropped socket is not a transient
-// network event: the pod is gone forever (undici surfaces a close-frame-
-// less TCP drop as code 1006; observed on *.modal.host after the pod's
-// server had already shut down). There is deliberately NO reconnection:
-// attempts would only ever fail against the destroyed pod, delay the
-// failure signal, and spam the log. Death is terminal — the generation
-// fails with prompt_error and the only way back is a fresh pod via
-// POST /v1/comfy/cloud.
+// ── Transport death & reconnect verification ───────────────────────────
+// A dropped socket is NOT assumed fatal on the spot anymore: cloud tunnels
+// intermittently drop TCP while the pod's ComfyUI is still alive and
+// executing (undici surfaces a close-frame-less drop as code 1006; observed
+// on *.modal.host mid-run with the queue still processing). On remote
+// close/error/failed ping the registry starts a BOUNDED reconnect loop
+// (POD_WS_RECONNECT_TIMEOUT_MS budget, POD_WS_RECONNECT_RETRY_MS cadence):
+// every attempt re-handshakes the SAME client_id, so a successful reconnect
+// resumes event routing for every in-flight prompt with zero re-submission.
+// Only when the whole budget is spent without a single successful handshake
+// is the death declared terminal — subscribers receive prompt_error and the
+// pod is deregistered (the only way back is a fresh pod via
+// POST /v1/comfy/cloud). The handshake IS the liveness verification: a pod
+// that is truly gone refuses every connection immediately, so the loop ends
+// fast in the common dead-pod case. Server-initiated termination (idle
+// countdown below, closeAllPodSockets teardown) stays IMMEDIATE and never
+// reconnects — those are server decisions, not transport failures.
+// While a reconnect is in flight the pod STAYS registered: new HTTP
+// submissions keep retrying (submitPodPromptReliably), subscribers keep
+// waiting, and connectPodSocket rides the loop out instead of adopting a
+// fresh socket with a different client id (which would orphan every
+// in-flight prompt).
 //
 // ── Reliable submission ────────────────────────────────────────────────
 // The HTTP leg to the pod is far less reliable than the websocket: cloud
@@ -153,7 +165,10 @@ export function setPodConnectRetryMs(ms: number): number {
  * the prompt — abandoning it there would orphan the run (a ghost job the
  * server never monitors). The probe window gives a slow pod time to surface
  * the queued/finished prompt before the caller gives up and fails the
- * generation explicitly.
+ * generation explicitly. The window is bounded by pod liveness, not pod
+ * death: a socket drop during it now starts the reconnect loop, and the
+ * probe loop simply keeps failing until the socket (re)connects or the
+ * pod terminates for real.
  */
 export const POD_PROMPT_RECOVERY_WINDOW_MS = 10_000;
 
@@ -238,12 +253,44 @@ export function setPodPromptSubmitRetryPauseMs(ms: number): number {
 
 /**
  * Protocol-level ping cadence for the persistent socket. A failed write or
- * a non-OPEN readyState terminates the connection (and every prompt riding
- * it). There is deliberately NO response-silence watchdog here — an idle
- * pod is quiet by nature, and the connection must live until the cloud
- * server ends it.
+ * a non-OPEN readyState starts the reconnect loop (below) — it does NOT
+ * terminate the connection outright anymore.
  */
 export const POD_WS_HEARTBEAT_MS = 10_000;
+
+/**
+ * Total budget the post-drop reconnect loop may spend re-handshaking before
+ * the pod is declared dead. Covers tunnel-level network partitions (LB
+ * restarts, route blips) that outlast a single retry cadence. A truly dead
+ * pod refuses every handshake immediately, so the loop still ends fast in
+ * the common case — the budget only extends the wait when the tunnel is
+ * dark but the pod lives.
+ */
+export const POD_WS_RECONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * Pause between reconnect handshake attempts (mirrors POD_WS_CONNECT_RETRY_MS).
+ */
+export const POD_WS_RECONNECT_RETRY_MS = 2_000;
+
+// Runtime-overridable copies of the two reconnect knobs (tests / operator
+// tuning) — same pattern as the connect knobs above.
+let podReconnectTimeoutMs = POD_WS_RECONNECT_TIMEOUT_MS;
+let podReconnectRetryMs = POD_WS_RECONNECT_RETRY_MS;
+
+/** Override the reconnect budget. Returns the previous value. */
+export function setPodReconnectTimeoutMs(ms: number): number {
+    const previous = podReconnectTimeoutMs;
+    podReconnectTimeoutMs = ms;
+    return previous;
+}
+
+/** Override the reconnect cadence. Returns the previous value. */
+export function setPodReconnectRetryMs(ms: number): number {
+    const previous = podReconnectRetryMs;
+    podReconnectRetryMs = ms;
+    return previous;
+}
 
 /**
  * Default idle grace period: when a pod's queue is empty (no queued prompt,
@@ -354,8 +401,19 @@ export type PodSocketConnection = {
     name?: string;
     /** ISO timestamp of the connection — diagnostics for the GET list. */
     connectedAt: string;
-    /** The pod's one socket — never replaced (pods never recover). */
+    /**
+     * The pod's one socket — REPLACED in place by the reconnect loop on a
+     * transport drop (same client id, same connection object, registry entry
+     * preserved); replaced only there.
+     */
     socket: WebSocket;
+    /**
+     * Set while the post-drop reconnect loop is running (before the first
+     * successful re-handshake). connection.closed stays FALSE during it —
+     * the pod is still registered and its subscribers keep waiting. Guard
+     * against concurrent reconnect loops.
+     */
+    reconnecting: boolean;
     /** Live prompt consumers keyed by subscriber id. */
     subscribers: Map<string, PodPromptSubscriber>;
     /**
@@ -426,6 +484,22 @@ function podKey(podUrl: URL | string): string {
  * when the whole budget is exhausted — the caller (create endpoint) then
  * refuses to return the pod.
  */
+/**
+ * Connect (or reuse) the pod's ONE persistent websocket. A healthy existing
+ * connection is returned as-is (spawn metadata refreshed); a stale one is
+ * replaced. The handshake is RETRIED until podConnectTimeoutMs (default
+ * POD_WS_OPEN_TIMEOUT_MS = 60 s) is spent — a freshly spawned pod usually
+ * needs a few seconds for ComfyUI to boot before its tunnel accepts
+ * connections, and a first-attempt refusal is not a dead pod. Throws only
+ * when the whole budget is exhausted — the caller (create endpoint) then
+ * refuses to return the pod.
+ *
+ * A pod whose socket is currently DOWN but reconnecting (mid reconnect
+ * loop) is awaited instead of replaced: the loop holds the registry entry
+ * and the SAME client id, so adopting a fresh socket here would orphan
+ * every in-flight prompt. The reconnect loop's success (or the terminal
+ * terminate) resolves this await one way or the other.
+ */
 export async function connectPodSocket(
     podUrl: URL,
     meta?: { gpu?: string; name?: string }
@@ -435,6 +509,26 @@ export async function connectPodSocket(
     if (existing && !existing.closed && existing.socket.readyState === WebSocket.OPEN) {
         if (meta?.gpu !== undefined) existing.gpu = meta.gpu;
         if (meta?.name !== undefined) existing.name = meta.name;
+        return existing;
+    }
+    // Mid-reconnect pod: ride the loop out — do NOT build a competing
+    // socket with a different client id. The loop either reconnects (this
+    // connection becomes healthy again) or terminates (closed → throw).
+    if (existing && existing.reconnecting) {
+        if (meta?.gpu !== undefined) existing.gpu = meta.gpu;
+        if (meta?.name !== undefined) existing.name = meta.name;
+        const deadline = Date.now() + podConnectTimeoutMs;
+        while (
+            !existing.closed &&
+            existing.reconnecting &&
+            existing.socket.readyState !== WebSocket.OPEN &&
+            Date.now() < deadline
+        ) {
+            await scriptPause(Math.min(podConnectRetryMs, Math.max(1, deadline - Date.now())));
+        }
+        if (existing.closed || existing.socket.readyState !== WebSocket.OPEN) {
+            throw new Error(`Pod ${key} never reconnected its ComfyUI websocket`);
+        }
         return existing;
     }
     if (existing) podSockets.delete(key);
@@ -487,7 +581,9 @@ export async function connectPodSocket(
 /**
  * The pod's live connection, or null when the pod is unknown / its socket
  * terminated. cloud-prompt.ts gates on this — unknown pods are rejected,
- * never reconnected (only the create/status endpoint adopts pods).
+ * never reconnected here (only the create/status endpoint adopts pods).
+ * A pod mid-reconnect still counts as live: its registry entry and client
+ * id survive, and the reconnect loop may restore the socket at any moment.
  */
 export function getPodSocket(podUrl: URL | string): PodSocketConnection | null {
     let key: string;
@@ -497,9 +593,9 @@ export function getPodSocket(podUrl: URL | string): PodSocketConnection | null {
         return null;
     }
     const connection = podSockets.get(key);
-    if (!connection || connection.closed || connection.socket.readyState !== WebSocket.OPEN) {
-        return null;
-    }
+    if (!connection || connection.closed) return null;
+    if (connection.reconnecting) return connection;
+    if (connection.socket.readyState !== WebSocket.OPEN) return null;
     return connection;
 }
 
@@ -513,7 +609,9 @@ export function listPodSockets(): PodSocketInfo[] {
             gpu: connection.gpu,
             name: connection.name,
             client_id: connection.clientId,
-            active: connection.socket.readyState === WebSocket.OPEN,
+            // A reconnecting pod reports active:false — its socket is
+            // momentarily down, but the pod is still registered.
+            active: !connection.reconnecting && connection.socket.readyState === WebSocket.OPEN,
             prompts: connection.queue.size + connection.pendingSubmissions,
             queue: [...connection.queue.values()],
             connectedAt: connection.connectedAt
@@ -529,6 +627,7 @@ export function listPodSockets(): PodSocketInfo[] {
 export function closeAllPodSockets(): void {
     for (const connection of podSockets.values()) {
         connection.closed = true;
+        connection.reconnecting = false;
         if (connection.heartbeat !== null) clearInterval(connection.heartbeat);
         if (connection.idleTimer !== null) clearTimeout(connection.idleTimer);
         try {
@@ -630,8 +729,9 @@ export function subscribePodPrompt(
     connection: PodSocketConnection,
     subscriber: { promptId: string; onEvent: (event: StreamEvent) => void }
 ): () => void {
-    // A terminated pod can never deliver another event (pods are designed to
-    // die and never reconnect — see terminate/handleSocketDeath). Registering
+    // A terminated pod can never deliver another event (a dropped socket
+    // gets a bounded reconnect window first — see handleSocketDeath — and
+    // once closed is set the pod is truly gone). Registering
     // a subscriber here would silently swallow its prompt: the run rides a
     // dead socket with no terminal ever firing — the GHOST-JOB failure mode
     // (a generation stuck 'pending' forever). Deliver the registry's terminal
@@ -946,8 +1046,9 @@ export type PodPromptSubmitOutcome =
  *      (recoverPodPromptId) BEFORE re-submitting. A dispatched-but-unacked
  *      prompt is recovered by its prompt_id — the ONLY safe continuation,
  *      because a blind re-submit would run the same job twice on the pod.
- *   3. Pause, then loop — until the pod accepts, dies (a closed socket is
- *      terminal: pods never reconnect), or the retry budget expires.
+ *      3. Pause, then loop — until the pod accepts, dies (a closed socket
+ *      is terminal after the reconnect window — pods do not outlive it),
+ *      or the retry budget expires.
  *
  * Pending-count accounting stays exactly submitPodPrompt's: a thrown
  * submission releases its count, recoverPodPromptId holds one across its
@@ -973,8 +1074,8 @@ export async function submitPodPromptReliably(
     let lastError = 'unknown error';
 
     while (true) {
-        // A terminated pod is terminal (pods are designed to die and never
-        // reconnect — see terminate/handleSocketDeath). Retrying or probing
+        // A terminated pod is terminal (the reconnect window already ran —
+        // see handleSocketDeath/reconnectPodSocket). Retrying or probing
         // a dead socket can never succeed; fail fast with a precise reason.
         if (connection.closed) {
             return {
@@ -1157,7 +1258,8 @@ function buildConnection(
         buffered: new Map(),
         heartbeat: null,
         idleTimer: null,
-        closed: false
+        closed: false,
+        reconnecting: false
     };
     attachSocket(connection, socket);
     return connection;
@@ -1311,33 +1413,35 @@ function attachSocket(connection: PodSocketConnection, socket: WebSocket): void 
         });
     });
 
-    // Transport death (remote close, TCP error, failed ping) → terminate:
-    // pods are designed to never come back without the create endpoint.
+    // Transport death (remote close, TCP error, failed ping) → the bounded
+    // reconnect loop first: cloud tunnels drop TCP while the pod's ComfyUI
+    // is still alive (code 1006 mid-run). Only an exhausted reconnect
+    // budget terminates the pod for real (handleSocketDeath below).
     socket.addEventListener('close', (event) => {
         const code = (event as CloseEvent).code;
         const suffix = typeof code === 'number' && code > 0 ? ` (code ${code})` : '';
-        handleSocketDeath(connection, socket, `ComfyUI websocket closed by the cloud server${suffix}`);
+        void attemptPodReconnect(connection, socket, `ComfyUI websocket closed by the cloud server${suffix}`);
     });
     socket.addEventListener('error', () => {
         // Undici fires 'error' immediately BEFORE the paired 'close' on a
         // transport drop (websocket.js #onSocketClose) — deferring a
         // microtask lets the close handler (which carries the close code)
-        // win; this only terminates for a closeless error.
-        queueMicrotask(() => handleSocketDeath(connection, socket, 'ComfyUI websocket errored'));
+        // win; this only reconnects for a closeless error.
+        queueMicrotask(() => void attemptPodReconnect(connection, socket, 'ComfyUI websocket errored'));
     });
 
-    // Liveness: protocol pings only. A quiet pod is HEALTHY — unlike the
-    // removed per-prompt sockets there is intentionally no response-silence
-    // watchdog; the connection lives until the cloud server ends it.
+    // Liveness: protocol pings only. A quiet pod is HEALTHY — no
+    // response-silence watchdog; a FAILED ping write (transport broken)
+    // starts the reconnect loop instead of terminating outright.
     connection.heartbeat = setInterval(() => {
         if (socket.readyState !== WebSocket.OPEN) {
-            handleSocketDeath(connection, socket, 'ComfyUI websocket stopped responding');
+            void attemptPodReconnect(connection, socket, 'ComfyUI websocket stopped responding');
             return;
         }
         try {
             websocketPing(socket);
         } catch (error) {
-            handleSocketDeath(
+            void attemptPodReconnect(
                 connection,
                 socket,
                 `ComfyUI websocket stopped responding: ${error instanceof Error ? error.message : String(error)}`
@@ -1350,27 +1454,96 @@ function attachSocket(connection: PodSocketConnection, socket: WebSocket): void 
 }
 
 /**
- * The pod's socket died — stop its heartbeat and terminate the connection
- * IMMEDIATELY. No reconnection is attempted: cloud pods are designed to
- * terminate when idle and can never restart without the create-pod
- * endpoint, so a handshake retry would only ever fail against the already
- * destroyed pod (delaying the failure and spamming the log). The stale
- * guard (dead-socket identity / already-closed) keeps double signalling —
-// e.g. undici's error+close pair — from terminating twice.
+ * The pod's socket dropped — attempt a bounded reconnect BEFORE declaring
+ * death (see the module header: tunnels drop TCP mid-run while the pod
+ * lives). Fire-and-forget async: every death signal path (close, error,
+ * failed ping) calls this without awaiting; concurrency is guarded by
+ * connection.reconnecting + the stale-socket identity check.
+ *
+ * While the loop runs the pod STAYS registered (closed stays false): new
+ * submissions keep retrying, subscribers keep waiting, and the idle
+ * countdown is suspended (a pod reconnecting is not idle).
  */
-function handleSocketDeath(connection: PodSocketConnection, socket: WebSocket, reason: string): void {
-    if (connection.closed || connection.socket !== socket) return;
-    terminate(connection, reason);
+function attemptPodReconnect(connection: PodSocketConnection, socket: WebSocket, reason: string): void {
+    if (connection.closed || connection.socket !== socket || connection.reconnecting) return;
+    connection.reconnecting = true;
+    // Suspend the idle countdown for the whole reconnect window — the loop
+    // below is the only writer while reconnecting.
+    if (connection.idleTimer !== null) {
+        clearTimeout(connection.idleTimer);
+        connection.idleTimer = null;
+    }
+    console.warn(`[cloud] Pod ${connection.key} socket dropped (${reason}) — reconnecting`);
+    void reconnectPodSocket(connection, reason);
 }
 
 /**
- * Remote close/error/failed ping → fail every prompt riding the socket and
- * deregister the pod. The only way back is a fresh pod via POST
- * /v1/comfy/cloud.
+ * The bounded reconnect loop. Repeatedly re-handshakes the pod with the
+ * SAME client id (in-flight prompts resume routing on success — ComfyUI
+ * routes by sid/client id, see the module header). Success swaps the fresh
+ * socket into the connection in place (attachSocket rewires message
+ * demux + heartbeat + death handlers) and clears the reconnecting flag;
+ * budget exhaustion hands over to terminate() — the terminal verdict.
+ *
+ * The handshake IS the liveness verification: a dead pod refuses every
+ * attempt immediately ("Unable to connect"), so the loop burns through its
+ * budget fast in the common dead-pod case — no extra HTTP probe needed.
+ */
+async function reconnectPodSocket(connection: PodSocketConnection, reason: string): Promise<void> {
+    const deadline = Date.now() + podReconnectTimeoutMs;
+    let lastError: unknown = null;
+    while (!connection.closed && Date.now() < deadline) {
+        try {
+            const socket = new WebSocket(websocketUrl(connection.podUrl, connection.clientId));
+            // waitForSocketOpen throws on refusal/timeout — the liveness
+            // verdict for this attempt.
+            await waitForSocketOpen(socket, Math.min(podReconnectRetryMs, deadline - Date.now()));
+            // A concurrent terminate() (idle can't fire — suspended; only
+            // closeAllPodSockets) may have landed while we awaited.
+            if (connection.closed) {
+                try {
+                    socket.close();
+                } catch {
+                    // Teardown race — nothing to salvage.
+                }
+                return;
+            }
+            // Success: swap the fresh socket in place and resume normal
+            // operation. The connection object (subscribers, queue, client
+            // id, registry entry) is preserved untouched.
+            connection.socket = socket;
+            connection.reconnecting = false;
+            attachSocket(connection, socket);
+            console.log(`[cloud] Pod ${connection.key} reconnected after: ${reason}`);
+            // Resume the idle countdown (queue state is unchanged).
+            updateIdleTimer(connection);
+            return;
+        } catch (error) {
+            lastError = error;
+            if (connection.closed || Date.now() >= deadline) break;
+            await scriptPause(Math.min(podReconnectRetryMs, deadline - Date.now()));
+        }
+    }
+    // Budget exhausted (or the pod was torn down mid-loop) — terminal.
+    connection.reconnecting = false;
+    if (connection.closed) return;
+    const detail = lastError instanceof Error ? lastError.message : String(lastError ?? 'unknown error');
+    terminate(
+        connection,
+        `${reason} — the pod never came back within ` +
+        `${Math.round(podReconnectTimeoutMs / 1000)}s of reconnect attempts (${detail})`
+    );
+}
+
+/**
+ * Remote close/error/failed ping → bounded reconnect (above); budget
+ * exhausted → fail every prompt riding the socket and deregister the pod.
+ * The only way back then is a fresh pod via POST /v1/comfy/cloud.
  */
 function terminate(connection: PodSocketConnection, reason: string): void {
     if (connection.closed) return;
     connection.closed = true;
+    connection.reconnecting = false;
     if (connection.heartbeat !== null) {
         clearInterval(connection.heartbeat);
         connection.heartbeat = null;
