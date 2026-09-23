@@ -225,6 +225,22 @@ async function flushSocketDelivery(): Promise<void> {
     }
 }
 
+/**
+ * Poll (5 ms real ticks) until `predicate` holds, bounded by `timeoutMs`.
+ * Needed wherever a TERMINAL verdict depends on the reconnect loop
+ * exhausting its (shrunk, 40 ms) budget in REAL wall-clock time: a fixed
+ * macrotask flush (flushSocketDelivery) can drain every pending microtask
+ * and still finish before the budget elapses, so tests awaiting the
+ * verdict must poll for the observable (the subscriber's terminal event,
+ * the pod's deregistration) instead of flushing a fixed number of turns.
+ */
+async function pollUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (!predicate() && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+}
+
 beforeEach(() => {
     testState.uuidValues = [CLIENT_UUID, SUB_UUID, SUB2_UUID];
     testState.sockets.length = 0;
@@ -476,7 +492,10 @@ describe('pod termination', () => {
         const restore = shrinkReconnectWindow();
 
         testState.sockets[0].close();
-        await flushSocketDelivery();
+        // The reconnect loop burns its (shrunk) 40 ms budget in REAL wall
+        // clock — poll for the terminal verdict instead of a fixed
+        // macrotask flush, which can finish before the budget elapses.
+        await pollUntil(() => seenA.length > 0);
 
         // The reconnect loop exhausted its budget against a refusing pod —
         // the terminal verdict reaches every riding generation and the pod
@@ -486,13 +505,16 @@ describe('pod termination', () => {
             type: 'prompt_error',
             data: { error: expect.stringContaining('ComfyUI websocket closed by the cloud server') }
         };
-        expect(seenA).toEqual([terminal]);
-        expect(seenB).toEqual([terminal]);
-        expect(seenA[0].data.error).toContain('never came back');
-        expect(getPodSocket(POD_URL)).toBeNull();
-        expect(listPodSockets()).toEqual([]);
-        expect(vi.mocked(fetch).mock.calls).toEqual([]);
-        restore();
+        try {
+            expect(seenA).toEqual([terminal]);
+            expect(seenB).toEqual([terminal]);
+            expect(seenA[0].data.error).toContain('never came back');
+            expect(getPodSocket(POD_URL)).toBeNull();
+            expect(listPodSockets()).toEqual([]);
+            expect(vi.mocked(fetch).mock.calls).toEqual([]);
+        } finally {
+            restore();
+        }
     });
 
     it('RECONNECTS after a remote close when the pod is still alive (code 1006 mid-run)', async () => {
@@ -547,7 +569,11 @@ describe('pod termination', () => {
         await flushSocketDelivery();
         restore();
         // Let the (already-started) reconnect loop finish — the terminal
-        // lands exactly once.
+        // lands exactly once. The loop burns its (shrunk) 40 ms budget in
+        // real wall clock, so poll for the verdict instead of a fixed
+        // macrotask flush, then flush once more so a hypothetical SECOND
+        // delivery would surface in the assertion below.
+        await pollUntil(() => seen.length > 0);
         await flushSocketDelivery();
         expect(seen).toEqual([
             { type: 'prompt_error', data: { error: expect.stringContaining('never came back') } }
@@ -555,30 +581,39 @@ describe('pod termination', () => {
     });
 
     it('terminates the pod when a heartbeat ping write fails and the pod never reconnects', async () => {
-        const restoreReconnect = shrinkReconnectWindow();
+        // Connect FIRST, arm the refused window SECOND: shrinkReconnectWindow
+        // flips the fake websocket to 'refused' (a dead pod refuses every
+        // handshake), so arming it before connectPodSocket leaves the pod
+        // un-connectable — connect then spins for its whole 60 s budget,
+        // the test times out, and the abandoned retry loop leaks a late
+        // registration + subscribe into the tests that follow.
         testState.pingBehavior = 'throw';
         const connection = await connectPodSocket(new URL(POD_URL));
         const seen: any[] = [];
         subscribePodPrompt(connection, { promptId: 'prompt-a', onEvent: (e) => seen.push(e) });
+        const restoreReconnect = shrinkReconnectWindow();
 
-        // Wait past the first heartbeat — the failed ping write starts the
-        // reconnect loop, whose (shrunk) budget exhausts against the
-        // refusing fake and terminates the pod. Real timers + generous
-        // deadline: the heartbeat fires at 10 s of real wall clock.
-        const deadline = Date.now() + 15_000;
-        while (seen.length === 0 && Date.now() < deadline) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
-        }
-
-        expect(seen).toEqual([
-            {
-                type: 'prompt_error',
-                data: { error: expect.stringContaining('ComfyUI websocket stopped responding: ping failed') }
+        try {
+            // Wait past the first heartbeat — the failed ping write starts the
+            // reconnect loop, whose (shrunk) budget exhausts against the
+            // refusing fake and terminates the pod. Real timers + generous
+            // deadline: the heartbeat fires at 10 s of real wall clock.
+            const deadline = Date.now() + 15_000;
+            while (seen.length === 0 && Date.now() < deadline) {
+                await new Promise((resolve) => setTimeout(resolve, 25));
             }
-        ]);
-        expect(seen[0].data.error).toContain('never came back');
-        expect(getPodSocket(POD_URL)).toBeNull();
-        restoreReconnect();
+
+            expect(seen).toEqual([
+                {
+                    type: 'prompt_error',
+                    data: { error: expect.stringContaining('ComfyUI websocket stopped responding: ping failed') }
+                }
+            ]);
+            expect(seen[0].data.error).toContain('never came back');
+            expect(getPodSocket(POD_URL)).toBeNull();
+        } finally {
+            restoreReconnect();
+        }
     }, 20_000);
 
     it('keeps a BUSY pod connected — no response-silence watchdog while the queue is loaded', async () => {
@@ -695,7 +730,12 @@ describe('ghost-job prevention (registry-level)', () => {
         // so the terminal verdict lands before the subscribe below.
         const restore = shrinkReconnectWindow();
         testState.sockets[0].close();
-        await flushSocketDelivery();
+        // The reconnect loop burns its (shrunk) 40 ms budget in REAL wall
+        // clock — poll for the DEREGISTRATION instead of a fixed macrotask
+        // flush, so the subscribe below provably lands on an
+        // already-terminated pod (a flush can finish while the loop still
+        // holds the pod registered and reconnecting).
+        await pollUntil(() => getPodSocket(POD_URL) === null && listPodSockets().length === 0);
         restore();
 
         // A prompt submitted just before the socket died reaches its
@@ -1007,9 +1047,15 @@ describe('submitPodPromptReliably (bounded submission retry while the pod is rea
 
     it('stops immediately when the pod dies mid-retry — a dead pod is unreachable forever', async () => {
         const restore = shrinkTimings();
-        const restoreReconnect = shrinkReconnectWindow();
+        // null-guarded because the refused window is only armed AFTER the pod
+        // holds its websocket (inside the try below) — see the heartbeat test
+        // for why shrinkReconnectWindow must never precede connectPodSocket.
+        let restoreReconnect: (() => void) | null = null;
         try {
             const connection = await connectPodSocket(new URL(POD_URL));
+            // Arm the terminal window only now: the fake flips to 'refused',
+            // so every re-handshake after the socket dies below fails fast.
+            restoreReconnect = shrinkReconnectWindow();
             let postCalls = 0;
             vi.mocked(fetch).mockImplementation(async (input: any) => {
                 const url = String(input);
@@ -1039,7 +1085,7 @@ describe('submitPodPromptReliably (bounded submission retry while the pod is rea
             expect(listPodSockets()).toEqual([]);
         } finally {
             restore();
-            restoreReconnect();
+            restoreReconnect?.();
         }
     });
 
