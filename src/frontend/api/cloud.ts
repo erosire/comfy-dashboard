@@ -3,7 +3,7 @@
 // All calls go through the dashboard service at baseUrl (default resolved by
 // frontend/config.ts resolveDefaultBaseUrl() — http://localhost:5000/v1/comfy
 // when the page's host domain is localhost, otherwise the LAN deployment
-// http://192.168.8.128:5000/v1/comfy).
+// http://192.168.50.109:5000/v1/comfy).
 // See src/server/endpoints/comfy-dashboard.yaml.
 //
 // Routes:
