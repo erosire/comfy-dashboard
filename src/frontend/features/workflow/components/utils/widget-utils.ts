@@ -5,7 +5,7 @@
 // data-type / node-name display helpers shared by the node cards.
 
 import type { DataType, UINode, UIWidget, WidgetDef } from '@underload/comfy';
-import { comfyNodeRegistry, getWidgetLabel, MODE_LABELS } from '@underload/comfy';
+import { comfyNodeRegistry, getWidgetLabel } from '@underload/comfy';
 import { base64ByteSize } from './pod-utils';
 
 /**
@@ -182,13 +182,6 @@ export function dataTypeLabel(type: DataType): string {
     if (typeof type === 'string') return type;
     if (Array.isArray(type)) return type.join('|');
     return String(type);
-}
-
-/** Icon for the header mode toggle: a dot for active, a no-entry glyph for bypassed. */
-export function modeToggleIcon(mode: number): string {
-    if (mode === 4) return '⊘';
-    if (mode === 0) return '●';
-    return MODE_LABELS[mode] ?? `mode ${mode}`;
 }
 
 /** Tooltip for the header mode toggle — what clicking it will do. */

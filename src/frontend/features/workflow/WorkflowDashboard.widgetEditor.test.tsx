@@ -333,13 +333,14 @@ describe('WidgetValueEditor — base64 data: URI values', () => {
         expect(container.textContent).toContain('data:video/mp4;base64,AAAA');
     });
 
-    it('clear (✕) commits an empty value', () => {
+    it('clear (close glyph) commits an empty value', () => {
         const update = vi.fn();
         const { node, widget } = makeNode('UniversalDataToImage', dataUri, 0);
         render(<WidgetValueEditor node={node} widget={widget} updateNodeWidget={update} />);
 
+        // The clear control renders the inline SVG close glyph (data-icon)
         const clear = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
-            (b) => b.textContent === '✕'
+            (b) => b.querySelector('svg[data-icon="close"]') !== null
         )!;
         expect(clear).toBeDefined();
         act(() => clear.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -375,8 +376,9 @@ describe('WidgetValueEditor — base64 data: URI values', () => {
         const spy = vi.fn();
         render(<Harness classType="UniversalDataToImage" widgetIndex={0} initial={dataUri} spy={spy} />);
 
+        // The clear control renders the inline SVG close glyph (data-icon)
         const clear = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
-            (b) => b.textContent === '✕'
+            (b) => b.querySelector('svg[data-icon="close"]') !== null
         )!;
         act(() => clear.dispatchEvent(new MouseEvent('click', { bubbles: true })));
         expect(spy).toHaveBeenCalledWith('7', 0, '');

@@ -48,6 +48,9 @@
 import React from 'react';
 import styled from '@emotion/styled';
 import { arrayCreate, arrayEach } from '@presource/core';
+// Inline SVG close glyph from the workspace icon package — the per-generation
+// delete control (replaces the ✕ font glyph)
+import { CloseIcon } from '@rightless/icons';
 import { theme } from '../../../styles';
 import type { GenerationSummary } from '../../../api';
 import type { MediaKind, OutputViewMode } from './utils';
@@ -389,7 +392,9 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                 onDeleteGeneration(gen.id);
                             }}
                         >
-                            ✕
+                            {/* Inline SVG close glyph — 12px box matching the
+                                former ✕ glyph's footprint */}
+                            <CloseIcon size={12} />
                         </GenDeleteBtn>
                     </ThumbOverlay>
                 </ThumbCard>
@@ -486,7 +491,9 @@ export const GenerationsPane: React.FC<GenerationsPaneProps> = ({
                                 onDeleteGeneration(gen.id);
                             }}
                         >
-                            ✕
+                            {/* Inline SVG close glyph — 12px box matching the
+                                former ✕ glyph's footprint */}
+                            <CloseIcon size={12} />
                         </GenDeleteBtn>
                     </QueueItemEl>
                 );

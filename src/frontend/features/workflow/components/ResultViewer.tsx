@@ -34,6 +34,7 @@
 // Extracted from the original CloudTab.tsx viewer modal.
 
 import React from 'react';
+import { CloseIcon } from '@rightless/icons';
 import { theme } from '../../../styles';
 import { Btn, BtnPrimary, PodButton, PodQueueBadge } from './ui';
 import {
@@ -329,9 +330,10 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                 </button>
             )}
 
-            {/* Close affordance: explicit ✕ button on mobile (there's
+            {/* Close affordance: explicit close button on mobile (there's
                 little tappable backdrop around an edge-to-edge image),
-                keyboard hint on desktop. */}
+                keyboard hint on desktop. The inline SVG close glyph replaces
+                the ✕ font glyph. */}
             {isMobile ? (
                 <button
                     onClick={onClose}
@@ -346,7 +348,6 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         border: '1px solid rgba(255,255,255,0.3)',
                         backgroundColor: 'rgba(0,0,0,0.55)',
                         color: '#fff',
-                        fontSize: 18,
                         cursor: 'pointer',
                         display: 'flex',
                         alignItems: 'center',
@@ -354,7 +355,8 @@ export const ResultViewer: React.FC<ResultViewerProps> = ({
                         zIndex: 1
                     }}
                 >
-                    ✕
+                    {/* 18px box — matches the former font-size: 18 glyph */}
+                    <CloseIcon size={18} />
                 </button>
             ) : (
                 <div

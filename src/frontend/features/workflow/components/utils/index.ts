@@ -14,6 +14,7 @@ export * from './types';
 export * from './constants';
 export * from './pod-utils';
 export * from './widget-utils';
+export * from './mode-visual';
 export * from './stream-results';
 export * from './workflow-prompt';
 export * from './prompt-fields';

@@ -10,6 +10,9 @@
 
 import React from 'react';
 import { styledComponent } from '@presource/react';
+// Inline SVG close glyph from the workspace icon package — the per-field
+// remove control (replaces the ✕ font glyph)
+import { CloseIcon } from '@rightless/icons';
 import { theme } from '../../../styles';
 import { comfyNodeRegistry } from '@underload/comfy';
 import type { UINode } from '@underload/comfy';
@@ -185,7 +188,9 @@ export const PromptFieldsPane: React.FC<PromptFieldsPaneProps> = ({
                                         aria-label={`Remove ${defaultLabel} from the PROMPT tab`}
                                         data-testid={`prompt-field-remove-${key}`}
                                     >
-                                        ✕
+                                        {/* Inline SVG close glyph — 12px box
+                                            matching the former ✕ footprint */}
+                                        <CloseIcon size={12} />
                                     </PromptFieldRemove>
                                 </PromptFieldMeta>
                             </PromptFieldHeader>

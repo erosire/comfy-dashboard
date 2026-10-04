@@ -6,6 +6,11 @@
 
 import React from 'react';
 import { styledComponent } from '@presource/react';
+// Inline SVG glyphs from the workspace icon package: the sidebar toggle
+// hamburger (replaces the ☰ font glyph), the load-warning triangle
+// (replaces the ⚠ font glyph) and the preferences person mark (replaces the
+// former hand-drawn inline <svg> — same geometry, now from the shared family)
+import { MenuIcon, WarningIcon, UserIcon } from '@rightless/icons';
 import { theme } from '../../../styles';
 import { HeaderTitle, ToggleButton } from './ui';
 
@@ -81,7 +86,8 @@ export const DashboardHeaderControls: React.FC<DashboardHeaderControlsProps> = (
 }) => (
     <>
         <ToggleButton onClick={onToggleSidebar} className="sg-hover" aria-label="Toggle sidebar">
-            ☰
+            {/* Inline SVG hamburger — 18px box matching the former glyph size */}
+            <MenuIcon size={18} />
         </ToggleButton>
         {titleClickable ? <InteractiveHeaderTitle
             onClick={titleClickable ? onTitleClick : undefined}
@@ -91,7 +97,9 @@ export const DashboardHeaderControls: React.FC<DashboardHeaderControlsProps> = (
 
         {loadWarning && (
             <HeaderWarning>
-                ⚠ {loadWarning}
+                {/* Inline SVG warning triangle + the message text */}
+                <WarningIcon size={12} />
+                {loadWarning}
             </HeaderWarning>
         )}
 
@@ -103,21 +111,9 @@ export const DashboardHeaderControls: React.FC<DashboardHeaderControlsProps> = (
             aria-label="Open preferences"
             title="Preferences"
         >
-            {/* A compact SVG person mark stays legible in the dark header at all sizes. */}
-            <svg
-                aria-hidden="true"
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-            >
-                <circle cx="12" cy="7" r="3.5" />
-                <path d="M5 21c.7-4.1 3-6.2 7-6.2s6.3 2.1 7 6.2" />
-            </svg>
+            {/* The shared user glyph (head + shoulders stroke, currentColor)
+                stays legible in the dark header at all sizes. */}
+            <UserIcon size={18} />
         </PreferencesButton>
     </>
 );

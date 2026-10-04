@@ -12,6 +12,9 @@
 
 import React from 'react';
 import styled from '@emotion/styled';
+// Inline SVG glyphs from the workspace icon package — the base64 clear (✕)
+// and JSON-editor done/invalid (▾ / ✕) controls
+import { ChevronDownIcon, CloseIcon } from '@rightless/icons';
 import { theme } from '../../../styles';
 import type { WidgetDef } from '@underload/comfy';
 import {
@@ -211,7 +214,8 @@ const Base64DataUriValue: React.FC<{
                     title="Back to the compact base64 summary"
                     data-testid={testId ? `${testId}-collapse` : undefined}
                 >
-                    ▾
+                    {/* Inline SVG collapse caret (replaces the ▾ font glyph) */}
+                    <ChevronDownIcon size={12} />
                 </DataUriAction>
             </>
         );
@@ -241,7 +245,8 @@ const Base64DataUriValue: React.FC<{
                 title="Clear the base64 payload"
                 data-testid={testId ? `${testId}-clear` : undefined}
             >
-                ✕
+                {/* Inline SVG close glyph — 12px box matching the ✕ footprint */}
+                <CloseIcon size={12} />
             </DataUriAction>
         </>
     );
@@ -548,7 +553,9 @@ const JsonObjectDraftEditor: React.FC<{
                 title={isValid ? 'Done editing' : 'Discard invalid JSON'}
                 data-testid={testId ? `${testId}-done` : undefined}
             >
-                {isValid ? '▾' : '✕'}
+                {/* Done = collapse caret; invalid draft = close glyph —
+                    both inline SVG (replacing the ▾ / ✕ font glyphs) */}
+                {isValid ? <ChevronDownIcon size={12} /> : <CloseIcon size={12} />}
             </DataUriAction>
         </>
     );

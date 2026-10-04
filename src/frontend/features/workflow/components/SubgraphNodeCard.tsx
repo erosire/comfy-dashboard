@@ -10,7 +10,7 @@ import type { UINode } from '@underload/comfy';
 import {
     dataTypeColor,
     dataTypeLabel,
-    modeToggleIcon,
+    modeToggleVisual,
     modeToggleTitle,
     nodeDisplayName,
     nodeDisplayNameTitle,
@@ -74,7 +74,8 @@ export const SubgraphNodeCard: React.FC<{
                         onClick={() => toggleNodeBypass(node.id)}
                         title={modeToggleTitle(node.mode)}
                     >
-                        {modeToggleIcon(node.mode)}
+                        {/* Inline SVG dot/ban mark (see mode-visual) */}
+                        {modeToggleVisual(node.mode)}
                     </ModeToggle>
                 </div>
             </NodeHeader>
