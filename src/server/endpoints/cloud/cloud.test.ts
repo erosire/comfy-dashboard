@@ -67,7 +67,7 @@ import { closeAllPodSockets, setPodConnectRetryMs, setPodConnectTimeoutMs } from
 // breaks when secrets rotate — the same source cloud.ts resolves at runtime.
 // The registry shape is gpu → { serverName: spawnerUrl }; the FIRST registered
 // GPU/server pair is used as the spawn fixture (currently the 'Modal' GPU with
-// its single 'yimin' server, after the 4090/6000 Beam entries were retired —
+// its single 'Matthew' server, after the 4090/6000 entries were retired —
 // see runtime/secret/private/modal/comfy.ts).
 import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
 const registry = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;

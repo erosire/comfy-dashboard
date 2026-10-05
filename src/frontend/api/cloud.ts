@@ -29,7 +29,8 @@
 //
 // The spawner creates a fresh native ComfyUI pod; the server then keeps ONE
 // websocket per pod in memory until the pod dies (pods are designed to
-// terminate when idle and never reconnect). Every prompt rides that single
+// terminate when idle; a dropped socket first gets a bounded reconnect
+// window before the pod is deregistered). Every prompt rides that single
 // socket — jobs are isolated by prompt_id, not by connection.
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -129,7 +130,7 @@ export type CloudCreateRequest = { gpu: string; name?: string };
 
 /**
  * Prompt submission request body.
- * Mirrors beam_comfy_service PromptRequest schema.
+ * Mirrors the per-pod Comfy proxy PromptRequest schema.
  */
 export type CloudPromptBody = {
     pod_url: string;

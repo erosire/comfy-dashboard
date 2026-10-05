@@ -29,7 +29,8 @@
 //    JSON object per line, terminated by prompt_done / execution_error /
 //    prompt_error.
 //
-// Common request fields (mirrors beam_comfy_service PromptRequest schema):
+// Common request fields (mirrors the per-pod Comfy proxy PromptRequest
+// schema — modal_comfy_service.py still serves this shape):
 //   - pod_url:   the native ComfyUI pod URL (must be registry-connected)
 //   - prompt:    the ORIGINAL workflow json snapshot (v0.4/v1 editor format
 //                — what the dashboard stores on every generation). Converted
@@ -119,7 +120,7 @@ export const cloudPrompt = asHandlerMethod(async (request, _parameters, _variabl
     // conversion and never needs a second preference payload.
     const apiPrompt = workflowToApiPrompt(body.prompt);
 
-    // Build the prompt payload per beam_comfy_service PromptRequest schema
+    // Build the prompt payload per the Comfy proxy PromptRequest schema
     const promptPayload: Record<string, unknown> = {
         prompt: apiPrompt,
     };
@@ -369,8 +370,8 @@ function captureChunkedClientDataFiles(
  * matched by prompt_id); never throws — failures land in the generation
  * entry itself. Terminals: execution_success / execution_interrupted
  * (completion) and execution_error / prompt_error (failure, incl. the
- * registry's socket-death terminal — pods are designed to die when idle
- * and never reconnect, so a dropped socket is a final verdict).
+ * registry's socket-death terminal — a dropped socket is only a final
+ * verdict once its bounded reconnect window is exhausted).
  */
 function trackGenerationOnPod(
     root: string,

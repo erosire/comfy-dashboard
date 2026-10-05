@@ -730,7 +730,7 @@ export function subscribePodPrompt(
     subscriber: { promptId: string; onEvent: (event: StreamEvent) => void }
 ): () => void {
     // A terminated pod can never deliver another event (a dropped socket
-    // gets a bounded reconnect window first — see handleSocketDeath — and
+    // gets a bounded reconnect window first — see terminate — and
     // once closed is set the pod is truly gone). Registering
     // a subscriber here would silently swallow its prompt: the run rides a
     // dead socket with no terminal ever firing — the GHOST-JOB failure mode
@@ -1075,7 +1075,7 @@ export async function submitPodPromptReliably(
 
     while (true) {
         // A terminated pod is terminal (the reconnect window already ran —
-        // see handleSocketDeath/reconnectPodSocket). Retrying or probing
+        // see terminate/reconnectPodSocket). Retrying or probing
         // a dead socket can never succeed; fail fast with a precise reason.
         if (connection.closed) {
             return {
@@ -1416,7 +1416,7 @@ function attachSocket(connection: PodSocketConnection, socket: WebSocket): void 
     // Transport death (remote close, TCP error, failed ping) → the bounded
     // reconnect loop first: cloud tunnels drop TCP while the pod's ComfyUI
     // is still alive (code 1006 mid-run). Only an exhausted reconnect
-    // budget terminates the pod for real (handleSocketDeath below).
+    // budget terminates the pod for real (terminate below).
     socket.addEventListener('close', (event) => {
         const code = (event as CloseEvent).code;
         const suffix = typeof code === 'number' && code > 0 ? ` (code ${code})` : '';

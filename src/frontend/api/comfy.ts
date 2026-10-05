@@ -24,12 +24,12 @@
 // Generation log (the run's timestamped event trail, for debugging):
 //   GET    /v1/comfy/workflows/:id/generate/:generate_id/log           → { log: string }
 //
-// Queue:
+// Queue (legacy helpers — this distribution's server has no queue endpoint):
 //   GET /v1/comfy/queue              → { queue: QueueItem[] }
 //   POST /v1/comfy/queue             → { id: string, message: string }
 //   DELETE /v1/comfy/queue/:id       → { success: boolean }
 //
-// Status:
+// Status (legacy helper — this distribution's server has no status endpoint):
 //   GET /v1/comfy/status             → { status: ServerStatus }
 
 // ── Types ──────────────────────────────────────────────────────────────

@@ -1320,7 +1320,7 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
         // a live registry key (the override spawner path accepts any gpu tag);
         // available_gpus, by contrast, mirrors the live secret registry, whose
         // only registered GPU key is read dynamically so secret rotations
-        // (e.g. the retired 4090/6000 Beam entries) do not break this test.
+        // (e.g. the retired 4090/6000 entries) do not break this test.
         const SPAWN_GPU = 'test-gpu';
         await connectPodSocket(new URL(POD_URL), { gpu: SPAWN_GPU });
         subscribePodPrompt(getPodSocket(POD_URL)!, { promptId: 'prompt-1', onEvent: () => undefined });

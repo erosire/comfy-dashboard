@@ -3,7 +3,7 @@ info:
   title: ComfyUI Dashboard API
   description: >-
     API for managing ComfyUI workflows and cloud pod management. Provides
-    CRUD for workflows, generation snapshots, and direct-access Beam cloud
+    CRUD for workflows, generation snapshots, and direct-access cloud
     pods.     Every spawned pod gets ONE persistent ComfyUI websocket held in
     server memory (opened during POST /v1/comfy/cloud, which blocks until
     the socket connects, and kept alive until the cloud server terminates
@@ -30,14 +30,15 @@ it — on unreachability, or after its queue stays empty for the
 servers:
   - url: http://127.0.0.1:8188
     description: Local ComfyUI server
-  - url: https://comfy-spawner.beam.cloud
-    description: Beam ComfyUI spawner (Tier 1 — used by POST /v1/comfy/cloud)
+  - url: https://<configured-spawner-url>
+    description: Cloud ComfyUI spawner (Tier 1 — the GPU-keyed entry in
+      runtime/secret/private/modal/comfy.ts, used by POST /v1/comfy/cloud)
 tags:
   - name: Workflows
     description: CRUD for ComfyUI workflows
   - name: Cloud
     description: >-
-      Beam cloud pod management — spawn pods (each gets one persistent
+      Cloud pod management — spawn pods (each gets one persistent
       server-held websocket), list active pods, and check pod status
 paths:
   # ── Workflows ──────────────────────────────────────────────────────
@@ -717,7 +718,7 @@ paths:
       operationId: cloudPod
       summary: Create a cloud pod (blocks until its websocket connects) or check pod status
       description: >-
-        Dual-purpose endpoint for Beam cloud pod management:
+        Dual-purpose endpoint for cloud pod management:
 
         **Create a pod** — Send `{"gpu": "4090"}` (required) plus an
         optional `{"name": "my-pod"}`. The GPU key selects the spawner
@@ -1473,7 +1474,8 @@ components:
     CloudCreateResponse:
       type: object
       description: >-
-        Response from spawning a new ComfyUI pod via the Beam spawner.
+        Response from spawning a new ComfyUI pod via the configured cloud
+        spawner.
         The spawner URL returns a 302 redirect; pod_url is the Location
         URL. This response is only sent AFTER the pod's persistent
         websocket connected and is held in server memory — a fresh pod that
@@ -1846,7 +1848,7 @@ components:
         data:
           type: object
           additionalProperties: true
-          description: Event-specific payload. See beam_comfy_service.yaml for details.
+          description: Event-specific payload. See modal_comfy_service.py for details.
       required:
         - type
         - data

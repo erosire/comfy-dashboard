@@ -220,7 +220,8 @@ describe('usePods server pod-list polling', () => {
         // The server holds a pod the UI never spawned (another client, or a
         // page refresh) — the poll must surface it as a ready button. A
         // listed pod counts as alive; a dead pod simply drops OUT of the
-        // server's list (its websocket is never reconnected).
+        // server's list (a dropped socket gets a bounded reconnect window
+        // before the server deregisters it).
         api.cloudListPods.mockResolvedValue({
             pods: [{
                 pod_url: 'https://server-pod.example/',
@@ -374,8 +375,9 @@ describe('usePods server pod-list reconciliation', () => {
         vi.useFakeTimers();
         try {
             // First poll: the server holds TWO pods. From the next poll on:
-            // EMPTY — both sockets died server-side (pods are designed to
-            // terminate when idle and never reconnect).
+            // EMPTY — both sockets died server-side (pods are terminated
+            // when idle, and a dropped socket is deregistered once its
+            // reconnect budget is exhausted).
             api.cloudListPods
                 .mockResolvedValueOnce({
                     pods: [

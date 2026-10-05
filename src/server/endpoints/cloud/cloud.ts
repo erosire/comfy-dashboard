@@ -5,9 +5,11 @@
 //     open the pod's ONE persistent ComfyUI websocket (pod-socket.ts). The
 //     endpoint answers ONLY once the websocket is connected and held in
 //     server memory — a pod that refuses its socket is NOT returned (502).
-//     The connection is then maintained forever (protocol pings) until the
-//     cloud server terminates it — pods are designed to die when idle and
-//     never come back, so a dropped socket is final.
+//     The connection is then maintained (protocol pings, and a bounded
+//     reconnect window when the transport drops) until the cloud server
+//     terminates it — idle pods are released on the countdown, and a pod
+//     that exhausts its reconnect budget is deregistered, so a dropped
+//     socket is eventually final.
 //   - status: report an existing pod through the registry. A pod the server
 //     does not track yet (e.g. after a restart) is adopted — its persistent
 //     websocket is opened and registered — so the status answer always

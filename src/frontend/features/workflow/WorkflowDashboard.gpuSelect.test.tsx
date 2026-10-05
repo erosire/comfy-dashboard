@@ -2,8 +2,9 @@
 // GPU selection tests
 //
 // Pressing "New" no longer spawns directly — it opens the GpuSelectDialog,
-// which offers the API-provided GPU keys (the keys currently configured by the
-// server secret are "4090" and "6000") and hands the
+// which offers the API-provided GPU keys (the server secret currently
+// configures a single 'Modal' key — see runtime/secret/private/modal/comfy.ts;
+// the fixtures below use illustrative '4090'/'6000' keys) and hands the
 // pick to usePods.handleGenerate (POST /v1/comfy/cloud with {gpu}).
 //
 // Verifies:

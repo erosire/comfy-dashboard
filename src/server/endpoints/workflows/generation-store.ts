@@ -53,7 +53,7 @@ export type GenerationResultItem = {
 export const FILE_URL_PREFIX = 'file:';
 
 // The Comfy dashboard owns this child directory below the service-provided
-// temporary/database root. The same segment is included in media redirects so
+// temporary/dump root. The same segment is included in media redirects so
 // the shared static mount resolves files from the correct distribution folder.
 export const COMFY_WORKFLOWS_DIRECTORY = 'comfy-workflows';
 
