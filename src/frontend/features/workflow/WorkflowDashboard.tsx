@@ -445,10 +445,17 @@ export const WorkflowDashboard: React.FC<WorkflowDashboardProps> = React.memo(
                     headerControls={
                         <DashboardHeaderControls
                             onToggleSidebar={toggleSidebar}
+                            // App-name fallback carries the package version so
+                            // the visible header always identifies the release
+                            // (e.g. "Comfy Dashboard v1.0.2"); a selected
+                            // saved workflow's name still replaces it verbatim.
+                            // The version is the compile-time __APP_VERSION__
+                            // constant injected by vite.config.ts `define`
+                            // (declared ambient in src/vite-env.d.ts).
                             title={
                                 isEditingSaved && store.selectedWorkflow
                                     ? store.selectedWorkflow.name
-                                    : 'Comfy Dashboard'
+                                    : `Comfy Dashboard v${__APP_VERSION__}`
                             }
                             titleClickable={isEditingSaved}
                             onTitleClick={actions.openRename}

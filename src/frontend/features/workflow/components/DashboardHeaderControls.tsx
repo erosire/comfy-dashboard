@@ -66,7 +66,7 @@ const HeaderWarning = styledComponent('span', {
 
 export type DashboardHeaderControlsProps = {
     onToggleSidebar: () => void;
-    /** Header title — the saved workflow's name, or "Comfy Dashboard". */
+    /** Header title — the saved workflow's name, or "Comfy Dashboard v<package version>". */
     title: string;
     /** Whether clicking the title opens the rename dialog (saved workflow). */
     titleClickable: boolean;
