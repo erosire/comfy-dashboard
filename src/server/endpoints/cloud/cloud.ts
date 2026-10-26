@@ -25,13 +25,13 @@
 // authoritative connection; /system_stats remains best-effort enrichment.
 
 import { asHandlerMethod } from '@underload/service';
-import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
+import { COMFY_CLOUD_SERVICE_ENDPOINTS } from '@config/vault';
 import { probeDirectHealth } from './direct-comfy';
 import { connectPodSocket, listPodSockets } from './pod-socket';
 
 // GPU-keyed spawner registry — gpu → { serverName: spawnerUrl }. The map is
 // keyed loosely because JSON request keys are strings even for numeric GPUs.
-const SPAWNER_BY_GPU = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;
+const SPAWNER_BY_GPU = COMFY_CLOUD_SERVICE_ENDPOINTS as Record<string, Record<string, string>>;
 
 // The GET response exposes this exact registry-key list so clients never
 // duplicate GPU configuration in frontend code. Numeric-looking object keys

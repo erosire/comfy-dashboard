@@ -2,7 +2,7 @@
 // GPU-keyed spawner selection tests (endpoints/cloud/cloud.ts).
 //
 // POST /v1/comfy/cloud create mode requires a `gpu` key; the server resolves
-// it via comfyCloudServiceEndpoint (gpu → {serverName: spawnerUrl}) and walks
+// it via COMFY_CLOUD_SERVICE_ENDPOINTS (gpu → {serverName: spawnerUrl}) and walks
 // that GPU's servers IN ORDER — first spawner answering a usable 302 redirect
 // wins, failures fall through, and an exhausted list answers HTTP 503 with
 // the per-server attempts trail. The spawned pod is only returned once its
@@ -69,8 +69,8 @@ import { closeAllPodSockets, setPodConnectRetryMs, setPodConnectTimeoutMs } from
 // GPU/server pair is used as the spawn fixture (currently the 'Modal' GPU with
 // its single 'Matthew' server, after the 4090/6000 entries were retired —
 // see runtime/secret/private/modal/comfy.ts).
-import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
-const registry = comfyCloudServiceEndpoint as Record<string, Record<string, string>>;
+import { COMFY_CLOUD_SERVICE_ENDPOINTS } from '@config/vault';
+const registry = COMFY_CLOUD_SERVICE_ENDPOINTS as Record<string, Record<string, string>>;
 const GPU_KEY = Object.keys(registry)[0];
 const SPAWNER_URL = Object.values(registry[GPU_KEY])[0];
 const POD_URL = 'https://pod-a.example';

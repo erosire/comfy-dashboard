@@ -103,7 +103,7 @@ vi.mock('undici', () => {
 import { createCloudPod, listCloudPods } from './cloud';
 // The live spawner registry — read dynamically in the available_gpus
 // assertion so the test tracks the secret map instead of stale GPU keys.
-import { comfyCloudServiceEndpoint } from '@runtime/secret/private';
+import { COMFY_CLOUD_SERVICE_ENDPOINTS } from '@config/vault';
 import { cloudPrompt } from './cloud-prompt';
 import {
     closeAllPodSockets,
@@ -1328,7 +1328,7 @@ describe('POST /v1/comfy/cloud — persistent socket lifecycle', () => {
         const result = await listCloudPods(context(), parameters({}), {});
         expect(result.status).toBe(200);
         expect(result.response).toEqual({
-            available_gpus: [Object.keys(comfyCloudServiceEndpoint as Record<string, unknown>)[0]],
+            available_gpus: [Object.keys(COMFY_CLOUD_SERVICE_ENDPOINTS as Record<string, unknown>)[0]],
             pods: [
                 {
                     pod_url: `${POD_URL}/`,
