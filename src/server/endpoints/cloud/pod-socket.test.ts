@@ -31,7 +31,12 @@ const testState = vi.hoisted(() => ({
  * which is what exhausts the budget. Returns the restore function (also
  * restores openBehavior) — every test that closes a socket and expects the
  * TERMINAL path must call this BEFORE the close (the loop starts at the
- * close event).
+ * close event) and only restore() AFTER the terminal verdict has landed: the
+ * loop's next handshake reads the LIVE openBehavior, so restoring early lets
+ * the pod revive on the success path (pod-socket.ts:1511-1520) and the
+ * terminal (terminate(), pod-socket.ts:1543) never fires. The deadline alone
+ * is snapshotted at loop entry (pod-socket.ts:1493), so the restored
+ * timeout/retry knobs do not lengthen the already-running window.
  */
 function shrinkReconnectWindow(): () => void {
     const restoreTimeout = setPodReconnectTimeoutMs(40);
@@ -558,26 +563,51 @@ describe('pod termination', () => {
         subscribePodPrompt(connection, { promptId: 'prompt-a', onEvent: (e) => seen.push(e) });
         const restore = shrinkReconnectWindow();
 
-        testState.sockets[0].close();
-        await flushSocketDelivery();
+        try {
+            testState.sockets[0].close();
+            await flushSocketDelivery();
 
-        // Error/close signals on the REPLACEMENT socket are inert once the
-        // pod is terminated; signals on the ORIGINAL corpse are stale
-        // (socket identity guard) and reconnecting-guarded.
-        testState.sockets[0].dispatchEvent(new Event('error'));
-        testState.sockets[0].dispatchEvent(new Event('close'));
-        await flushSocketDelivery();
-        restore();
-        // Let the (already-started) reconnect loop finish — the terminal
-        // lands exactly once. The loop burns its (shrunk) 40 ms budget in
-        // real wall clock, so poll for the verdict instead of a fixed
-        // macrotask flush, then flush once more so a hypothetical SECOND
-        // delivery would surface in the assertion below.
-        await pollUntil(() => seen.length > 0);
-        await flushSocketDelivery();
-        expect(seen).toEqual([
-            { type: 'prompt_error', data: { error: expect.stringContaining('never came back') } }
-        ]);
+            // Error/close signals on the REPLACEMENT socket are inert once the
+            // pod is terminated; signals on the ORIGINAL corpse are stale
+            // (socket identity guard) and reconnecting-guarded.
+            testState.sockets[0].dispatchEvent(new Event('error'));
+            testState.sockets[0].dispatchEvent(new Event('close'));
+            await flushSocketDelivery();
+
+            // The refused window stays ARMED across the whole wait (restore is
+            // in the finally below, mirroring the sibling termination test at
+            // the end of this describe). The already-started reconnect loop
+            // re-reads the live openBehavior on every handshake, so restoring
+            // here would let a later attempt succeed → the pod revives, no
+            // terminal ever reaches the subscriber, and `seen` stays empty.
+            // Let the (already-started) reconnect loop finish — the terminal
+            // lands exactly once. The loop burns its (shrunk) 40 ms budget in
+            // real wall clock, so poll for the verdict instead of a fixed
+            // macrotask flush, then flush once more so a hypothetical SECOND
+            // delivery would surface in the assertion below.
+            // Poll for the pod's DEREGISTRATION rather than `seen.length > 0`:
+            // on a CPU-starved machine the 40 ms real-time budget can outlast
+            // the poll budget, and this observable makes that fail loudly on
+            // the registry assertions below instead of silently timing out
+            // into an empty-`seen` diff.
+            await pollUntil(() => getPodSocket(POD_URL) === null);
+            await flushSocketDelivery();
+
+            // Exactly ONE terminal — a double-terminate would append a second
+            // event and break toEqual on the full array.
+            expect(seen).toEqual([
+                { type: 'prompt_error', data: { error: expect.stringContaining('never came back') } }
+            ]);
+            // Cannot revive: termination is terminal — the connection stays
+            // closed, the reconnect flag is cleared, and the pod is gone from
+            // the registry for good.
+            expect(connection.closed).toBe(true);
+            expect(connection.reconnecting).toBe(false);
+            expect(getPodSocket(POD_URL)).toBeNull();
+            expect(listPodSockets()).toEqual([]);
+        } finally {
+            restore();
+        }
     });
 
     it('terminates the pod when a heartbeat ping write fails and the pod never reconnects', async () => {
